@@ -1,6 +1,6 @@
-"""Referral system — NTM-style deep links + modern UI + self-redeem.
+"""Referral system — AT-style deep links + modern UI + self-redeem.
 
-Link format: https://t.me/BOT?start=ref_NTM-{tg_id}
+Link format: https://t.me/BOT?start=ref_AT-{tg_id}
 Redis namespace: ref:*
 """
 
@@ -19,15 +19,15 @@ REMINDERS = (
 
 
 def _code_for(user_id):
-    """ref_NTM-{tg_id} — simple, unique, human-readable."""
-    return f"ref_NTM-{int(user_id)}"
+    """ref_AT-{tg_id} — simple, unique, human-readable."""
+    return f"ref_AT-{int(user_id)}"
 
 
 def _resolve_code(db, code):
-    """Parse ref_NTM-{tg_id} -> user_id (int) or None."""
+    """Parse ref_AT-{tg_id} -> user_id (int) or None."""
     try:
-        if code.startswith("ref_NTM-"):
-            uid = int(code.split("ref_NTM-", 1)[1])
+        if code.startswith("ref_AT-"):
+            uid = int(code.split("ref_AT-", 1)[1])
             if uid > 0:
                 return uid
     except Exception:
@@ -98,7 +98,7 @@ def check_and_grant_reward(db, user_id, grant_premium_fn):
 
 
 def parse_start_referral(text):
-    """Extract ref code from '/start ref_NTM-xxx'. Returns code or None."""
+    """Extract ref code from '/start ref_AT-xxx'. Returns code or None."""
     try:
         parts = str(text or "").split()
         if len(parts) >= 2 and parts[1].startswith("ref_"):

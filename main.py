@@ -405,9 +405,9 @@ def _main_menu_buttons(uid):
             Button.inline("📊 My Stats", data="menu_mystats"),
         ],
         [
-            Button.url("📣 Channel", url="https://t.me/NTMpro"),
-            Button.url("💬 Group", url="https://t.me/NTmchat"),
-            Button.url("💻 GitHub", url="https://github.com/abdul97233/TeraBox-Downloader-Bot"),
+            Button.url("📣 Channel", url="https://t.me/AT_BOTZ"),
+            Button.url("💬 Group", url="https://t.me/AT_BOTZ"),
+            # Button.url("💻 GitHub", url="https://github.com/abdul97233/TeraBox-Downloader-Bot"),
         ],
     ]
     return rows
@@ -492,7 +492,7 @@ async def generate_gc(m: UpdateNewMessage):
     days = DURATION_MAP_GC[duration_str]
     codes = []
     for _ in range(count):
-        code = f"NTM-{str(uuid4())[:8].upper()}"
+        code = f"AT-{str(uuid4())[:8].upper()}"
         db.hset(GC_REDIS_KEY, code, days)
         if tag:
             db.hset(GC_TAGS_KEY, code, tag)
@@ -1007,7 +1007,7 @@ async def broadcast_message(m: UpdateNewMessage):
 #         # Premium user
 #         reply_text = """
 # ┏━━━━━━━━━━⍟
-# ┃ 𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫 𝐁𝐨𝐭
+# ┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 # ┗━━━━━━━━━━━━━━━━━⍟
 # ╔══════════⍟
 # ┃🌟 Welcome! 🌟
@@ -1019,7 +1019,7 @@ async def broadcast_message(m: UpdateNewMessage):
 # ╚═════════════════⍟
 # Do /help or /cmds - Display available commands.
 
-# [『 𝗡⋆𝗧⋆𝗠 』](https://t.me/NTMpro) 
+# [『 𝗡⋆𝗧⋆𝗠 』](https://t.me/AT_BOTZ) 
 # """
 #     else:
 #         # Free user
@@ -1033,22 +1033,22 @@ async def broadcast_message(m: UpdateNewMessage):
 # ┃
 # ┃ Upgrade to premium or utilize /id, /cmds, or /help to view available details. 
 # ┃
-# ┃ To check availabe plan do /plan in chat group @NTMchat
+# ┃ To check availabe plan do /plan in chat group @AT_BOTZ
 # ╚═════════════════⍟
 # For subscription inquiries, contact @abdul97233.
 # """
 
 #     # Send the welcome message
-#     check_if = await is_user_on_chat(bot, "@NTMpro", m.peer_id)
+#     check_if = await is_user_on_chat(bot, "@AT_BOTZ", m.peer_id)
 #     if not check_if:
-#         return await m.reply("Please join @NTMpro then send me the link again.")
+#         return await m.reply("Please join @AT_BOTZ then send me the link again.")
 #     await m.reply(reply_text, link_preview=False, parse_mode="markdown")
 
 # ==================== /start — MODERN BUTTON MENU ====================
 
 WELCOME_TEXT = """
 ┏━━━━━━━━━━━━━━━━━⍟
-┃  𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫
+┃  𝐓 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫
 ┗━━━━━━━━━━━━━━━━━━━━━⍟
 
 👋 Welcome **{name}**!
@@ -2202,7 +2202,7 @@ async def handle_message(m: Message):
                 tag_str = f" ({user_tag})" if user_tag else ""
                 cached_caption = f"""
 ┏━━━━━━━━━━⍟
-┃ 𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫 𝐁𝐨𝐭
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
@@ -2210,7 +2210,7 @@ async def handle_message(m: Message):
 ╟➣𝗙𝗶𝗿𝘀𝗧 𝗡𝗮𝗺𝗲: {escape_markdown(m.sender.first_name)}{tag_str}
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(m.sender.username or '-')}
 ╚═════════════════⍟
-         @NTMpro
+         @AT_BOTZ
 """
                 if len(valid_msgs) == 1:
                     await bot.send_file(
@@ -2395,7 +2395,7 @@ async def handle_message(m: Message):
 
         caption = f"""
 ┏━━━━━━━━━━⍟
-┃ 𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫 𝐁𝐨𝐭
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
@@ -2405,7 +2405,7 @@ async def handle_message(m: Message):
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(user_username or '-')}
 ╟➣𝐓𝐨𝐭𝐚𝐥 𝐓𝐢𝐦𝐞 𝐓𝐚𝐤𝐞𝐧: {total_time_str}
 ╚═════════════════⍟
-         @NTMpro
+         @AT_BOTZ
 """
 
         sent_id = None
@@ -2642,7 +2642,7 @@ async def handle_message(m: Message):
                 total_time = time.time() - start_time
                 caption = f"""
 ┏━━━━━━━━━━⍟
-┃ 𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫 𝐁𝐨𝐭
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
@@ -2651,7 +2651,7 @@ async def handle_message(m: Message):
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(user_username or '-')}
 ╟➣𝐓𝐨𝐭𝐚𝐥 𝐓𝐢𝐦𝐞 𝐓𝐚𝐤𝐞𝐧: {total_time:.1f} sec
 ╚═════════════════⍟
-         @NTMpro
+         @AT_BOTZ
 """
 
                 try:
@@ -3708,7 +3708,7 @@ async def folder_download(m: UpdateNewMessage):
 
             caption = f"""
 ┏━━━━━━━━━━⍟
-┃ 𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫 𝐁𝐨𝐭
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
@@ -3718,7 +3718,7 @@ async def folder_download(m: UpdateNewMessage):
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(user_username or '-')}
 ╟➣𝐓𝐨𝐭𝐚𝐥 𝐓𝐢𝐦𝐞 𝐓𝐚𝐤𝐞𝐧: {total_time:.1f} sec
 ╚═════════════════⍟
-         @NTMpro
+         @AT_BOTZ
 """
 
             sent_id = None

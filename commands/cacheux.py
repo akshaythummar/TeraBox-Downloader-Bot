@@ -26,7 +26,7 @@ def register(bot, ctx):
         tag_str = f" ({tag})" if tag else ""
         return f"""
 ┏━━━━━━━━━━⍟
-┃ 𝐍𝐓𝐌 𝐓𝐞𝐫𝐚 𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫 𝐁𝐨𝐭
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{data.get('file_name', 'file')}`
@@ -34,7 +34,7 @@ def register(bot, ctx):
 ╟➣𝗙𝗶𝗿𝘀𝗧 𝗡𝗮𝗺𝗲: {escape_markdown(first_name)}{tag_str}
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(username or '-')}
 ╚═════════════════⍟
-         @NTMpro
+         @AT_BOTZ
 """
 
     @bot.on(events.CallbackQuery(pattern=rb"cx_send:"))
