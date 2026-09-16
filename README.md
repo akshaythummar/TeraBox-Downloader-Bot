@@ -230,7 +230,7 @@ Forwards to you instantly
 sudo apt update && sudo apt install python3 python3-pip python3-venv redis-server git ffmpeg -y
 
 # Clone
-git clone https://github.com/abdul97233/TeraBox-Downloader-Bot.git
+git clone https://github.com/akshaythummar/TeraBox-Downloader-Bot.git
 cd TeraBox-Downloader-Bot
 
 # Virtual environment
@@ -240,6 +240,8 @@ source venv/bin/activate
 # Install packages
 pip install -r requirements.txt
 pip install opencv-python-headless
+
+redis-server --daemonize yes
 
 # Configure
 cp config.example.py config.py
