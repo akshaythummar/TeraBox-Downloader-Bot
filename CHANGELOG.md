@@ -74,7 +74,7 @@ All notable changes to the TeraBox Downloader Bot.
 - **Audit log** — tracks all admin actions
 
 ### Referral System (v2)
-- **New link format** — `ref_NTM-{tg_id}` (simple, readable, uses Telegram ID)
+- **New link format** — `ref_AT-{tg_id}` (simple, readable, uses Telegram ID)
 - **Count on join** — referral credited immediately when someone joins via link (not on first download)
 - **Modern UI** — progress bars, tier visualization, share/claim/stats buttons
 - **Self-redeem** — "Claim Reward" button to manually claim tier rewards

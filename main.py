@@ -375,7 +375,7 @@ async def user_info(m: UpdateNewMessage):
 
 # Directly share me the link i will share you the video with direct link
 
-# For premium contact @abdul97233
+# For premium contact @buggybeats
 # """
 #     await m.reply(help_text)
 
@@ -1035,7 +1035,7 @@ async def broadcast_message(m: UpdateNewMessage):
 # ┃
 # ┃ To check availabe plan do /plan in chat group @AT_BOTZ
 # ╚═════════════════⍟
-# For subscription inquiries, contact @abdul97233.
+# For subscription inquiries, contact @buggybeats.
 # """
 
 #     # Send the welcome message
@@ -1048,7 +1048,7 @@ async def broadcast_message(m: UpdateNewMessage):
 
 WELCOME_TEXT = """
 ┏━━━━━━━━━━━━━━━━━⍟
-┃  𝐓 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝𝐞𝐫
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━━━━━⍟
 
 👋 Welcome **{name}**!
@@ -1073,7 +1073,7 @@ async def start(m: UpdateNewMessage):
     user = await bot.get_entity(user_id)
     name = user.first_name
 
-    # Referral capture: /start ref_NTM-{tg_id} (deep link). No self-refs, one-time.
+    # Referral capture: /start ref_AT-{tg_id} (deep link). No self-refs, one-time.
     try:
         from commands.referral import parse_start_referral, record_referral, _resolve_code, check_and_grant_reward
         _ref_code = parse_start_referral(m.text)
@@ -1245,7 +1245,7 @@ async def cb_premium(e):
 • ✅ Folder download
 
 👥 Earn free Premium: /ref
-Contact @abdul97233 to purchase.
+Contact @buggybeats to purchase.
 """
     buttons = [
         [Button.inline("🎁 Redeem Gift Card", data="menu_redeem")],
@@ -1263,7 +1263,7 @@ async def cb_redeem(e):
 
 Send your gift card code like this:
 
-`/redeem NTM-XXXXXXXX`
+`/redeem AT-XXXXXXXX`
 
 You will receive premium instantly!
 """
@@ -1830,7 +1830,7 @@ async def remove(m: UpdateNewMessage):
 async def display_plan(m: UpdateNewMessage):
     plan_text = """
 ┏━━━━━━━━━━━━━━━━━⍟
-┃ 𝐓𝐄𝐑𝐀 𝐁𝐎𝐗 𝐁𝐎𝐓
+┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━━━━━⍟
 
 🌟 **Free Plan**
@@ -1844,7 +1844,7 @@ async def display_plan(m: UpdateNewMessage):
 • No size limit
 • Priority speed
 
-Contact @abdul97233 for premium.
+Contact @buggybeats for premium.
 """
     await m.reply(plan_text, parse_mode="markdown")
 
