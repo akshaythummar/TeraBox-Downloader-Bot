@@ -89,6 +89,7 @@ GC_USED_KEY = "gc_used"                # Redis HASH — code → "user_id:timest
 MAX_FILES_PER_REQUEST = 10
 DOWNLOAD_COOLDOWN_SECONDS = 10
 PARALLEL_DOWNLOADS = 5
+WATERMARK_ENABLED = False  # ponytail: temporarily off, re-encode was slowing downloads. Flip to True to re-enable.
 download_semaphore = asyncio.Semaphore(PARALLEL_DOWNLOADS)
 
 # ---- Modular packages (multi-file layout; safe fallbacks if missing) ----
@@ -2332,7 +2333,7 @@ async def handle_message(m: Message):
                     ".roq", ".mng", ".ogm", ".trp", ".tp", ".pva",
                 ])
         wm_limit = 500_000_000 if not is_premium else 200_000_000
-        if fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
+        if WATERMARK_ENABLED and fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
             try:
                 await hm.edit(f"✅ Downloaded `{data['file_name']}` — adding watermark...")
                 await asyncio.wait_for(
@@ -2627,7 +2628,7 @@ async def handle_message(m: Message):
                     ".roq", ".mng", ".ogm", ".trp", ".tp", ".pva",
                 ])
                 wm_limit = 200_000_000
-                if fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
+                if WATERMARK_ENABLED and fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
                     try:
                         await asyncio.wait_for(
                             asyncio.get_event_loop().run_in_executor(None, add_watermark, download, _mjob),
@@ -3680,7 +3681,7 @@ async def folder_download(m: UpdateNewMessage):
                     ".dav", ".hdv", ".svi", ".swf", ".amv", ".nsv",
                     ".roq", ".mng", ".ogm", ".trp", ".tp", ".pva",
                 ])
-            if fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
+            if WATERMARK_ENABLED and fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
                 try:
                     await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(None, add_watermark, download, _fjob),
