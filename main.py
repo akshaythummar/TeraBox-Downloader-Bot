@@ -37,6 +37,7 @@ from tools import (
     is_user_on_chat,
     safe_unlink,
     send_document_via_api,
+    upload_via_mtproto,
     VIDEO_EXTENSIONS,
     PHOTO_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
@@ -2494,22 +2495,35 @@ async def handle_message(m: Message):
 """
 
         sent_id = None
+        upload_start = time.time()
         try:
-            api_res = await send_document_via_api(
-                TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption, data["file_name"], progress_bar,
-                duration=vduration, width=vwidth, height=vheight, thumb=vthumb,
+            file = await upload_via_mtproto(
+                bot, PRIVATE_CHAT_ID, download, caption,
+                thumb=thumbnail if thumbnail else None, duration=vduration,
+                progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
             )
-            if api_res.get("ok"):
-                sent_id = api_res["result"]["message_id"]
-                log.info(f"Uploaded via custom Bot API, message_id: {sent_id}")
-            else:
-                try:
-                    desc = str((api_res or {}).get("description", "not ok"))[:160]
-                except Exception:
-                    desc = "not ok"
-                log.info(f"Custom Bot API not ok: {desc}")
+            sent_id = file.id
+            log.info(f"Uploaded via MTProto parallel transfer, message_id: {sent_id}")
         except Exception as e:
-            log.info(f"Custom Bot API upload failed: {e}")
+            log.info(f"MTProto parallel upload failed: {e}")
+
+        if sent_id is None:
+            try:
+                api_res = await send_document_via_api(
+                    TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption, data["file_name"], progress_bar,
+                    duration=vduration, width=vwidth, height=vheight, thumb=vthumb,
+                )
+                if api_res.get("ok"):
+                    sent_id = api_res["result"]["message_id"]
+                    log.info(f"Uploaded via custom Bot API, message_id: {sent_id}")
+                else:
+                    try:
+                        desc = str((api_res or {}).get("description", "not ok"))[:160]
+                    except Exception:
+                        desc = "not ok"
+                    log.info(f"Custom Bot API not ok: {desc}")
+            except Exception as e:
+                log.info(f"Custom Bot API upload failed: {e}")
 
         if sent_id is None:
             try:
@@ -2527,6 +2541,8 @@ async def handle_message(m: Message):
                     f"Sorry! Upload Failed but you can download it from [here]({url}).",
                     m.sender_id, _job["id"],
                 )
+
+        log.info(f"download={upload_start - start_time:.1f}s upload={time.time() - upload_start:.1f}s")
 
         if sent_id:
             if shorturl:
@@ -2734,17 +2750,30 @@ async def handle_message(m: Message):
                     vinfo = {"duration": 0, "width": 0, "height": 0, "thumbnail": None}
                 _mthumb = vinfo.get("thumbnail")
                 sent_id = None
+                upload_start = time.time()
                 try:
-                    api_res = await send_document_via_api(
-                        TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption,
-                        data["file_name"], progress_bar,
-                        duration=vinfo.get("duration", 0), width=vinfo.get("width", 0),
-                        height=vinfo.get("height", 0), thumb=_mthumb,
+                    file = await upload_via_mtproto(
+                        bot, PRIVATE_CHAT_ID, download, caption,
+                        thumb=_mthumb if _mthumb and os.path.isfile(_mthumb) else None,
+                        duration=vinfo.get("duration", 0),
+                        progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                     )
-                    if api_res.get("ok"):
-                        sent_id = api_res["result"]["message_id"]
+                    sent_id = file.id
                 except Exception as e:
-                    log.info(f"Multi Bot API upload failed: {e}")
+                    log.info(f"Multi MTProto parallel upload failed: {e}")
+
+                if sent_id is None:
+                    try:
+                        api_res = await send_document_via_api(
+                            TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption,
+                            data["file_name"], progress_bar,
+                            duration=vinfo.get("duration", 0), width=vinfo.get("width", 0),
+                            height=vinfo.get("height", 0), thumb=_mthumb,
+                        )
+                        if api_res.get("ok"):
+                            sent_id = api_res["result"]["message_id"]
+                    except Exception as e:
+                        log.info(f"Multi Bot API upload failed: {e}")
 
                 if sent_id is None:
                     try:
@@ -2757,6 +2786,8 @@ async def handle_message(m: Message):
                         sent_id = file.id
                     except Exception as e:
                         log.info(f"Multi Telethon upload failed: {e}")
+
+                log.info(f"download={upload_start - start_time:.1f}s upload={time.time() - upload_start:.1f}s")
 
                 done_count += 1
                 if sent_id:
@@ -3789,16 +3820,29 @@ async def folder_download(m: UpdateNewMessage):
 """
 
             sent_id = None
+            upload_start = time.time()
             try:
-                api_res = await send_document_via_api(
-                    TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption, data["file_name"], progress_bar,
-                    duration=vinfo.get("duration", 0), width=vinfo.get("width", 0),
-                    height=vinfo.get("height", 0), thumb=_fthumb,
+                file = await upload_via_mtproto(
+                    bot, PRIVATE_CHAT_ID, download, caption,
+                    thumb=_fthumb if _fthumb and os.path.isfile(_fthumb) else None,
+                    duration=vinfo.get("duration", 0),
+                    progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                 )
-                if api_res.get("ok"):
-                    sent_id = api_res["result"]["message_id"]
+                sent_id = file.id
             except Exception as e:
-                log.info(f"Folder Bot API upload failed: {e}")
+                log.info(f"Folder MTProto parallel upload failed: {e}")
+
+            if sent_id is None:
+                try:
+                    api_res = await send_document_via_api(
+                        TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption, data["file_name"], progress_bar,
+                        duration=vinfo.get("duration", 0), width=vinfo.get("width", 0),
+                        height=vinfo.get("height", 0), thumb=_fthumb,
+                    )
+                    if api_res.get("ok"):
+                        sent_id = api_res["result"]["message_id"]
+                except Exception as e:
+                    log.info(f"Folder Bot API upload failed: {e}")
 
             if sent_id is None:
                 try:
@@ -3811,6 +3855,8 @@ async def folder_download(m: UpdateNewMessage):
                     sent_id = file.id
                 except Exception as e:
                     log.info(f"Folder Telethon upload failed: {e}")
+
+            log.info(f"download={upload_start - start_time:.1f}s upload={time.time() - upload_start:.1f}s")
 
             done_count += 1
             if sent_id:

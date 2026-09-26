@@ -379,6 +379,20 @@ async def send_document_via_api(base_url, token, chat_id, file_path, caption, fi
     )
 
 
+async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, duration=0, progress_callback=None):
+    """Fast upload via multiple parallel MTProto connections (FastTelethon)
+    instead of one single-stream HTTP POST. Raises on failure — caller decides
+    what to fall back to."""
+    from FastTelethon import upload_file as _ft_upload
+    filename = os.path.basename(file_path)
+    with open(file_path, "rb") as f:
+        input_file = await _ft_upload(bot, f, progress_callback=progress_callback, file_name=filename)
+    return await bot.send_file(
+        chat_id, file=input_file, thumb=thumb, caption=caption, video=True,
+        supports_streaming=True, duration=duration, attributes=[], spoiler=True,
+    )
+
+
 def check_url_patterns(url: str) -> bool:
     """
     Check if the given URL matches any of the known URL patterns for code hosting services.
@@ -461,8 +475,8 @@ def extract_code_from_url(url: str) -> str | None:
     Returns:
         str: The extracted code, or None if the URL does not contain a code.
     """
-    pattern1 = r"/s/(\w+)"
-    pattern2 = r"surl=(\w+)"
+    pattern1 = r"/s/([\w-]+)"
+    pattern2 = r"surl=([\w-]+)"
 
     match = re.search(pattern1, url)
     if match:
@@ -599,7 +613,7 @@ def _ytdlp_sync(url, filename, callback, loop):
 
     ydl_opts = {
         "outtmpl": target,
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": 16,
         "nocheckcertificate": True,
         "progress_hooks": [hook],
         "quiet": True,
