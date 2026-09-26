@@ -365,7 +365,10 @@ def set_cooldown(user_id):
 
 
 try:
-    _NO_BUTTONS = telethon.tl.types.ReplyInlineMarkup(rows=[])
+    # ponytail: ReplyInlineMarkup(rows=[]) looks like "no buttons" but Telegram
+    # rejects it outright (ReplyMarkupInvalidError) — Button.clear() is the
+    # actual documented way to clear a message's reply markup on edit.
+    _NO_BUTTONS = Button.clear()
 except Exception:
     _NO_BUTTONS = None
 
