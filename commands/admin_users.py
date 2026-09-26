@@ -82,6 +82,7 @@ def register(bot, ctx):
     set_custom_tag = ctx["set_custom_tag"]
     clear_tag = ctx["clear_tag"]
     get_custom_tag = ctx["get_custom_tag"]
+    clear_cache = ctx.get("clear_cache") or (lambda *_: None)
     adm = _admin_only(ctx)
 
     @bot.on(events.NewMessage(pattern=r"/finduser\s+(\d+)", incoming=True, outgoing=False, func=adm))
@@ -114,12 +115,14 @@ def register(bot, ctx):
     async def _ban(m):
         uid = m.pattern_match.group(1)
         db.sadd(BANNED_KEY, str(uid))
+        clear_cache(f"banned:{int(uid)}")
         await m.reply(f"Banned user `{uid}`.")
 
     @bot.on(events.NewMessage(pattern=r"/unban\s+(\d+)", incoming=True, outgoing=False, func=adm))
     async def _unban(m):
         uid = m.pattern_match.group(1)
         db.srem(BANNED_KEY, str(uid))
+        clear_cache(f"banned:{int(uid)}")
         await m.reply(f"Unbanned user `{uid}`.")
 
     @bot.on(events.NewMessage(pattern=r"/addpremium\s+(\d+)\s+(\d+)", incoming=True, outgoing=False, func=adm))

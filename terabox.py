@@ -102,9 +102,15 @@ async def retry_request(method, url, attempts=3, delay=2, **kwargs):
     URLs are never logged (may carry the jsToken); only status codes.
     """
     timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=15)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    headers.update(kwargs.pop("headers", None) or {})
     for i in range(1, attempts + 1):
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.request(method, url, **kwargs) as resp:
                     if resp.status in (200, 302):
                         resp._text = await resp.text()

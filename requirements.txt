@@ -9,6 +9,7 @@ hachoir
 requests
 redis
 fakeredis
+libsql-client
 humanreadable
 opencv-python-headless
 yt-dlp

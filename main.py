@@ -8,7 +8,6 @@ import time
 import datetime
 from uuid import uuid4
 
-import redis
 import telethon
 import telethon.tl.types
 from telethon import TelegramClient, events
@@ -56,19 +55,39 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-db = redis.Redis(
-    host=HOST,
-    port=PORT,
-    password=PASSWORD,
-    decode_responses=True,
-)
+from storage import TursoRedis
+
+
+def _connect_turso(url, token, timeout=10):
+    """Connect with a hard timeout — the libsql client has none of its own,
+    so a bad token/unreachable host would otherwise hang boot forever."""
+    import threading
+    result = {}
+
+    def worker():
+        try:
+            client = TursoRedis(url, token)
+            client.ping()
+            result["db"] = client
+        except Exception as e:
+            result["err"] = e
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"Turso connection timed out after {timeout}s")
+    if "err" in result:
+        raise result["err"]
+    return result["db"]
+
+
 try:
-    db.ping()
-except redis.exceptions.RedisError:
-    # ponytail: no local Redis server for now — in-memory stand-in, data resets on restart.
-    # Remove this fallback once a real Redis server is available.
+    db = _connect_turso(TURSO_DB_URL, TURSO_AUTH_TOKEN)
+except Exception as e:
+    # ponytail: Turso not reachable — in-memory stand-in, data resets on restart.
     import fakeredis
-    log.warning("Redis not reachable at %s:%s — using in-memory fakeredis instead (nothing persists).", HOST, PORT)
+    log.warning("Turso not reachable at %s (%s) — using in-memory fakeredis instead (nothing persists).", TURSO_DB_URL, e)
     db = fakeredis.FakeStrictRedis(decode_responses=True)
 
 # Persisted storage-chat override (/setstorage) — survives restarts + /update.
@@ -115,6 +134,36 @@ except Exception as _mod_err:
     _mod_err = _mod_err  # kept for debugging via logs if needed
 
 
+# ==================== SHORT-TTL CACHE (cuts Turso round trips) ====================
+# main.py:2093's per-message gating (maintenance/ban/premium/admin checks) runs on
+# every incoming message — a few seconds of caching removes most of that network
+# cost for a returning user. Every write path that changes one of these busts the
+# matching entry immediately (see grant_premium/revoke_premium/add_admin/remove_admin
+# below, plus /ban /unban and the maintenance toggle), so admin actions still apply
+# right away rather than waiting out the TTL.
+_CACHE_TTL = 5
+_cache = {}
+
+
+def _cache_get(key):
+    hit = _cache.get(key)
+    if hit is None:
+        return None, False
+    value, expires_at = hit
+    if time.time() >= expires_at:
+        _cache.pop(key, None)
+        return None, False
+    return value, True
+
+
+def _cache_set(key, value):
+    _cache[key] = (value, time.time() + _CACHE_TTL)
+
+
+def _cache_clear(key):
+    _cache.pop(key, None)
+
+
 # ==================== DYNAMIC ADMIN SYSTEM ====================
 
 def is_admin(user_id):
@@ -122,7 +171,25 @@ def is_admin(user_id):
     uid = int(user_id)
     if uid in ADMINS:
         return True
-    return db.sismember(DYNAMIC_ADMINS_KEY, str(uid))
+    ck = f"admin:{uid}"
+    val, hit = _cache_get(ck)
+    if hit:
+        return val
+    result = bool(db.sismember(DYNAMIC_ADMINS_KEY, str(uid)))
+    _cache_set(ck, result)
+    return result
+
+
+def is_banned(user_id):
+    """Check if user is banned."""
+    uid = int(user_id)
+    ck = f"banned:{uid}"
+    val, hit = _cache_get(ck)
+    if hit:
+        return val
+    result = bool(db.sismember(BANNED_USERS_KEY, str(uid)))
+    _cache_set(ck, result)
+    return result
 
 
 def get_all_admins():
@@ -137,11 +204,13 @@ def get_all_admins():
 def add_admin(user_id):
     """Add admin dynamically."""
     db.sadd(DYNAMIC_ADMINS_KEY, str(user_id))
+    _cache_clear(f"admin:{int(user_id)}")
 
 
 def remove_admin(user_id):
     """Remove dynamic admin (can't remove config admins)."""
     db.srem(DYNAMIC_ADMINS_KEY, str(user_id))
+    _cache_clear(f"admin:{int(user_id)}")
 
 
 def grant_premium(user_id, days):
@@ -155,40 +224,51 @@ def grant_premium(user_id, days):
             db.delete(f"{_flag}:{user_id}")
         except Exception:
             pass
+    _cache_clear(f"premium:{str(user_id)}")
 
 
 def revoke_premium(user_id):
     """Revoke premium from user (also clears gift-card tag)."""
-    if _MODULAR_UTILS:
+    try:
+        if _MODULAR_UTILS:
+            try:
+                _revoke_premium_entry(
+                    db, PREMIUM_EXPIRY_KEY, PREMIUM_SET_KEY, user_id,
+                    custom_tags_key=CUSTOM_TAGS_KEY, owner_id=OWNER_ID,
+                    is_admin_fn=is_admin,
+                )
+                return
+            except Exception:
+                pass
+        db.hdel(PREMIUM_EXPIRY_KEY, str(user_id))
+        db.srem(PREMIUM_SET_KEY, str(user_id))
+        # End-to-end tag cleanup: never leave a stale gift-card tag behind.
         try:
-            _revoke_premium_entry(
-                db, PREMIUM_EXPIRY_KEY, PREMIUM_SET_KEY, user_id,
-                custom_tags_key=CUSTOM_TAGS_KEY, owner_id=OWNER_ID,
-                is_admin_fn=is_admin,
-            )
-            return
+            if int(user_id) != int(OWNER_ID) and not is_admin(user_id):
+                db.hdel(CUSTOM_TAGS_KEY, str(user_id))
         except Exception:
             pass
-    db.hdel(PREMIUM_EXPIRY_KEY, str(user_id))
-    db.srem(PREMIUM_SET_KEY, str(user_id))
-    # End-to-end tag cleanup: never leave a stale gift-card tag behind.
-    try:
-        if int(user_id) != int(OWNER_ID) and not is_admin(user_id):
-            db.hdel(CUSTOM_TAGS_KEY, str(user_id))
-    except Exception:
-        pass
+    finally:
+        _cache_clear(f"premium:{str(user_id)}")
 
 
 def is_premium_user(user_id):
     """Check if user has active premium (not expired)."""
     import time as _time
     uid = str(user_id)
+    ck = f"premium:{uid}"
+    val, hit = _cache_get(ck)
+    if hit:
+        return val
     if not db.hexists(PREMIUM_EXPIRY_KEY, uid):
+        _cache_set(ck, False)
         return False
     expiry = int(db.hget(PREMIUM_EXPIRY_KEY, uid) or 0)
     if _time.time() >= expiry:
         revoke_premium(user_id)
+        _cache_set(ck, False)
         return False
+    _cache_set(ck, True)
     return True
 
 
@@ -254,7 +334,12 @@ def log_audit(action, admin_id, details=""):
 
 def is_maintenance():
     """Check if bot is in maintenance mode."""
-    return db.get(MAINTENANCE_KEY) == "1"
+    val, hit = _cache_get("maint")
+    if hit:
+        return val
+    result = db.get(MAINTENANCE_KEY) == "1"
+    _cache_set("maint", result)
+    return result
 
 
 def check_cooldown(user_id):
@@ -1729,6 +1814,7 @@ async def cb_maint_toggle(e):
     try:
         from commands.maintenance import set_maintenance
         set_maintenance(db, MAINTENANCE_KEY, action == "on", "")
+        _cache_clear("maint")
         log_audit(f"MAINTENANCE_{action.upper()}_BTN", e.sender_id, "")
     except Exception:
         pass
@@ -2110,7 +2196,7 @@ async def handle_message(m: Message):
         return await m.reply("🔧 Bot is currently under maintenance. Please try again later.")
 
     # Ban check
-    if db.sismember(BANNED_USERS_KEY, str(m.sender_id)):
+    if is_banned(m.sender_id):
         return await m.reply("🚫 You are banned from using this bot.")
 
     # Premium users skip cooldown and rate limits
@@ -2122,23 +2208,21 @@ async def handle_message(m: Message):
         if cooldown > 0:
             return await m.reply(f"⏳ Please wait **{cooldown} seconds** before downloading again.")
 
-    # Track active user today
+    # Track active-today / member-since / new-user in one round trip
     today_key = f"active_{time.strftime('%Y-%m-%d')}"
-    try:
-        if db.incr(today_key) == 1:
-            db.expire(today_key, 86400)
-    except Exception:
-        pass
-    try:
-        db.set(f"member_since:{m.sender_id}", time.strftime("%Y-%m-%d"), nx=True)
-    except Exception:
-        pass
-
-    # Track total users
     user_set_key = "all_known_users"
-    if not db.sismember(user_set_key, str(m.sender_id)):
-        db.sadd(user_set_key, str(m.sender_id))
-        db.hincrby(STATS_KEY, "total_users", 1)
+    try:
+        is_first_today, is_new_user = db.track_activity(
+            today_key, f"member_since:{m.sender_id}", time.strftime("%Y-%m-%d"),
+            user_set_key, m.sender_id,
+        )
+        if is_first_today:
+            db.expire(today_key, 86400)
+        if is_new_user:
+            db.sadd(user_set_key, str(m.sender_id))
+            db.hincrby(STATS_KEY, "total_users", 1)
+    except Exception:
+        pass
 
     # Force join check — channels
     for ch in FORCE_CHANNELS:
@@ -3551,7 +3635,7 @@ async def dl_command(m: UpdateNewMessage):
 async def folder_download(m: UpdateNewMessage):
     url = m.pattern_match.group(1)
 
-    if db.sismember(BANNED_USERS_KEY, str(m.sender_id)):
+    if is_banned(m.sender_id):
         return await m.reply("🚫 You are banned from using this bot.")
 
     if not is_premium_user(m.sender_id):
@@ -4003,6 +4087,7 @@ async def scheduled_announce(m: UpdateNewMessage):
 )
 async def panic_stop(m: UpdateNewMessage):
     db.set(MAINTENANCE_KEY, "1")
+    _cache_clear("maint")
     log_audit("PANIC_STOP", m.sender_id, "Emergency stop activated")
     await m.reply(
         "🚨 **EMERGENCY STOP ACTIVATED**\n\n"
@@ -4024,6 +4109,7 @@ async def panic_stop(m: UpdateNewMessage):
 )
 async def resume_bot(m: UpdateNewMessage):
     db.delete(MAINTENANCE_KEY)
+    _cache_clear("maint")
     log_audit("RESUME", m.sender_id, "Bot resumed from panic/maintenance")
     await m.reply("✅ **Bot is back online!** All services resumed.")
 
@@ -4214,6 +4300,7 @@ try:
         "set_custom_tag": set_custom_tag,
         "clear_tag": lambda uid: db.hdel(CUSTOM_TAGS_KEY, str(uid)),
         "get_custom_tag": get_custom_tag, "OWNER_ID": OWNER_ID,
+        "clear_cache": _cache_clear,
     })
     _loaded_packs.append("admin_users")
 except Exception as e:
@@ -4284,6 +4371,7 @@ try:
         "db": db, "is_admin": is_admin, "log_audit": log_audit,
         "maintenance_key": MAINTENANCE_KEY, "log_file": LOG_FILE,
         "apply_api_templates": _apply_api_templates,
+        "clear_cache": _cache_clear,
     })
     _loaded_packs.append("maintenance")
 except Exception as e:

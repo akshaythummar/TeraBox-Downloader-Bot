@@ -7,12 +7,10 @@ API_HASH = "YOUR_API_HASH_HERE"
 BOT_TOKEN = "1234567890:ABCdefGhIjKlMnOpQrStUvWxYz"
 
 
-# ================== REDIS DATABASE CONFIG ==================
+# ================== TURSO DATABASE CONFIG ==================
 
-# Redis Host / Port / Password
-HOST = "localhost"
-PORT = 6379
-PASSWORD = None   # Set to None if Redis has no password
+TURSO_DB_URL = "libsql://your-db-name.turso.io"
+TURSO_AUTH_TOKEN = "your_turso_auth_token"
 
 
 # ================== BOT SETTINGS ==================

@@ -129,6 +129,7 @@ def register(bot, ctx):
     maintenance_key = ctx["maintenance_key"]
     log_file = ctx["log_file"]
     apply_api_templates = ctx.get("apply_api_templates")
+    clear_cache = ctx.get("clear_cache") or (lambda *_: None)
 
     async def _deny(m):
         await m.reply("Not authorized.")
@@ -144,6 +145,7 @@ def register(bot, ctx):
             txt = f"Maintenance is **{'ON' if is_on else 'OFF'}**"
             return await m.reply(txt + (f"\nReason: {cur}" if cur else ""))
         is_on = set_maintenance(db, maintenance_key, arg == "on", reason)
+        clear_cache("maint")
         try:
             log_audit(f"MAINTENANCE_{arg.upper()}", m.sender_id, reason)
         except Exception:
