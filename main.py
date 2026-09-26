@@ -16,6 +16,7 @@ from telethon.tl.functions.messages import ForwardMessagesRequest
 from telethon.types import Message, UpdateNewMessage
 
 from cansend import CanSend
+from utils.flood import patient_edit
 from utils.jobs import (
     register_job, unregister_job, sweep_finished,
     claim_inflight, release_inflight, add_waiter, pop_waiters,
@@ -2310,6 +2311,7 @@ async def handle_message(m: Message):
                         file=valid_msgs[0].media,
                         caption=cached_caption,
                         supports_streaming=True,
+                        spoiler=SPOILER_VIDEOS,
                     )
                 else:
                     for cm in valid_msgs:
@@ -2317,6 +2319,7 @@ async def handle_message(m: Message):
                             m.chat.id,
                             file=cm.media,
                             supports_streaming=True,
+                            spoiler=SPOILER_VIDEOS,
                         )
                 _record_dl(m.sender_id, 0, shorturl, True)
                 await hm.delete()
@@ -2501,6 +2504,7 @@ async def handle_message(m: Message):
                 bot, PRIVATE_CHAT_ID, download, caption,
                 thumb=thumbnail if thumbnail else None, duration=vduration,
                 progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                spoiler=SPOILER_VIDEOS,
             )
             sent_id = file.id
             log.info(f"Uploaded via MTProto parallel transfer, message_id: {sent_id}")
@@ -2511,7 +2515,7 @@ async def handle_message(m: Message):
             try:
                 api_res = await send_document_via_api(
                     TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption, data["file_name"], progress_bar,
-                    duration=vduration, width=vwidth, height=vheight, thumb=vthumb,
+                    duration=vduration, width=vwidth, height=vheight, thumb=vthumb, spoiler=SPOILER_VIDEOS,
                 )
                 if api_res.get("ok"):
                     sent_id = api_res["result"]["message_id"]
@@ -2530,7 +2534,7 @@ async def handle_message(m: Message):
                 file = await bot.send_file(
                     PRIVATE_CHAT_ID, file=download, thumb=thumbnail if thumbnail else None,
                     progress_callback=lambda c, t: progress_bar(c, t, "Uploading"), caption=caption, video=True,
-                    supports_streaming=True, duration=vduration, attributes=[], spoiler=True,
+                    supports_streaming=True, duration=vduration, attributes=[], spoiler=SPOILER_VIDEOS,
                 )
                 sent_id = file.id
             except Exception as e:
@@ -2582,7 +2586,7 @@ async def handle_message(m: Message):
             safe_unlink(download)
 
             try:
-                await hm.edit("✅ Video sent successfully to your chat!",
+                await patient_edit(hm, "✅ Video sent successfully to your chat!",
                               **({"buttons": _NO_BUTTONS} if _NO_BUTTONS is not None else {}))
             except Exception:
                 pass
@@ -2757,6 +2761,7 @@ async def handle_message(m: Message):
                         thumb=_mthumb if _mthumb and os.path.isfile(_mthumb) else None,
                         duration=vinfo.get("duration", 0),
                         progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                        spoiler=SPOILER_VIDEOS,
                     )
                     sent_id = file.id
                 except Exception as e:
@@ -2768,7 +2773,7 @@ async def handle_message(m: Message):
                             TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption,
                             data["file_name"], progress_bar,
                             duration=vinfo.get("duration", 0), width=vinfo.get("width", 0),
-                            height=vinfo.get("height", 0), thumb=_mthumb,
+                            height=vinfo.get("height", 0), thumb=_mthumb, spoiler=SPOILER_VIDEOS,
                         )
                         if api_res.get("ok"):
                             sent_id = api_res["result"]["message_id"]
@@ -2779,7 +2784,7 @@ async def handle_message(m: Message):
                     try:
                         file = await bot.send_file(
                             PRIVATE_CHAT_ID, file=download, caption=caption,
-                            video=True, supports_streaming=True, spoiler=True,
+                            video=True, supports_streaming=True, spoiler=SPOILER_VIDEOS,
                             thumb=_mthumb if _mthumb and os.path.isfile(_mthumb) else None,
                             progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                         )
@@ -2868,7 +2873,8 @@ async def handle_message(m: Message):
             log.info(f"Multi download batch failed: {e}")
 
         try:
-            await hm.edit(
+            await patient_edit(
+                hm,
                 f"✅ Complete!\n"
                 f"Sent: {sent_count}/{total} | Failed: {failed_count}",
                 **({"buttons": _NO_BUTTONS} if _NO_BUTTONS is not None else {}),
@@ -3827,6 +3833,7 @@ async def folder_download(m: UpdateNewMessage):
                     thumb=_fthumb if _fthumb and os.path.isfile(_fthumb) else None,
                     duration=vinfo.get("duration", 0),
                     progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                    spoiler=SPOILER_VIDEOS,
                 )
                 sent_id = file.id
             except Exception as e:
@@ -3837,7 +3844,7 @@ async def folder_download(m: UpdateNewMessage):
                     api_res = await send_document_via_api(
                         TG_API_BASE, BOT_TOKEN, PRIVATE_CHAT_ID, download, caption, data["file_name"], progress_bar,
                         duration=vinfo.get("duration", 0), width=vinfo.get("width", 0),
-                        height=vinfo.get("height", 0), thumb=_fthumb,
+                        height=vinfo.get("height", 0), thumb=_fthumb, spoiler=SPOILER_VIDEOS,
                     )
                     if api_res.get("ok"):
                         sent_id = api_res["result"]["message_id"]
@@ -3848,7 +3855,7 @@ async def folder_download(m: UpdateNewMessage):
                 try:
                     file = await bot.send_file(
                         PRIVATE_CHAT_ID, file=download, caption=caption,
-                        video=True, supports_streaming=True, spoiler=True,
+                        video=True, supports_streaming=True, spoiler=SPOILER_VIDEOS,
                         thumb=_fthumb if _fthumb and os.path.isfile(_fthumb) else None,
                         progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                     )

@@ -287,7 +287,7 @@ class _ProgressFileWrapper:
 
 
 def _bot_api_send(base_url, token, chat_id, file_path, caption, filename, progress_callback=None, loop=None,
-                   duration=0, width=0, height=0, thumb=None):
+                   duration=0, width=0, height=0, thumb=None, spoiler=True):
     """Upload a local file to a chat via the Telegram Bot HTTP API.
 
     Video files are sent with sendVideo so Telegram renders them as
@@ -313,7 +313,7 @@ def _bot_api_send(base_url, token, chat_id, file_path, caption, filename, progre
             "caption": caption,
             "parse_mode": "Markdown",
             "supports_streaming": "true",
-            "spoiler": "true",
+            "spoiler": "true" if spoiler else "false",
         }
         if duration:
             data["duration"] = str(duration)
@@ -370,16 +370,16 @@ def _bot_api_send(base_url, token, chat_id, file_path, caption, filename, progre
 
 
 async def send_document_via_api(base_url, token, chat_id, file_path, caption, filename, progress_callback=None,
-                                 duration=0, width=0, height=0, thumb=None):
+                                 duration=0, width=0, height=0, thumb=None, spoiler=True):
     """Async wrapper around the Bot API upload (runs in a thread)."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None, _bot_api_send, base_url, token, chat_id, file_path, caption, filename, progress_callback, loop,
-        duration, width, height, thumb
+        duration, width, height, thumb, spoiler
     )
 
 
-async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, duration=0, progress_callback=None):
+async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, duration=0, progress_callback=None, spoiler=True):
     """Fast upload via multiple parallel MTProto connections (FastTelethon)
     instead of one single-stream HTTP POST. Raises on failure — caller decides
     what to fall back to."""
@@ -389,7 +389,7 @@ async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, durat
         input_file = await _ft_upload(bot, f, progress_callback=progress_callback, file_name=filename)
     return await bot.send_file(
         chat_id, file=input_file, thumb=thumb, caption=caption, video=True,
-        supports_streaming=True, duration=duration, attributes=[], spoiler=True,
+        supports_streaming=True, duration=duration, attributes=[], spoiler=spoiler,
     )
 
 

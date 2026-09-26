@@ -22,6 +22,9 @@ PRIVATE_CHAT_ID = -1001234567890
 # Folder where downloaded videos are stored on the VPS
 DOWNLOAD_DIR = "downloads"
 
+# Always send videos with the spoiler (blurred) overlay
+SPOILER_VIDEOS = True
+
 
 # ================== ADMIN & OWNER ==================
 
