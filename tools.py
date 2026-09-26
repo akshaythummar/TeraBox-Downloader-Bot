@@ -572,12 +572,73 @@ async def is_user_on_chat(bot: TelegramClient, chat_id: int, user_id: int) -> bo
         return False
 
 
+def _ytdlp_sync(url, filename, callback, loop):
+    """Blocking yt-dlp HLS download (call via run_in_executor)."""
+    import yt_dlp
+
+    base, _ = os.path.splitext(filename)
+    target = base + ".mp4"
+    last_call = {"t": 0.0}
+
+    def hook(d):
+        if d.get("status") != "downloading" or not callback or not loop:
+            return
+        now = time.time()
+        if now - last_call["t"] < 2.0:
+            return
+        last_call["t"] = now
+        downloaded = d.get("downloaded_bytes") or 0
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                callback(downloaded, total, "Downloading"), loop
+            )
+            future.result(timeout=5)
+        except Exception:
+            pass
+
+    ydl_opts = {
+        "outtmpl": target,
+        "concurrent_fragment_downloads": 8,
+        "nocheckcertificate": True,
+        "progress_hooks": [hook],
+        "quiet": True,
+        "no_warnings": True,
+        "remux_video": "mp4",
+        "retries": 3,
+        "fragment_retries": 3,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        from utils.logx import safe_exc
+        log.info(f"yt-dlp download failed: {safe_exc(e)}")
+        if os.path.isfile(target):
+            os.unlink(target)
+        return False
+
+    if not os.path.isfile(target):
+        return False
+    if target != filename:
+        os.replace(target, filename)
+    return filename
+
+
+async def _download_via_ytdlp(url, filename, callback=None):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ytdlp_sync, url, filename, callback, loop)
+
+
 async def download_file(
     url: str,
     filename: str,
     callback=None,
     retries: int = 3,
 ) -> str | bool:
+    if ".m3u8" in url.lower():
+        return await _download_via_ytdlp(url, filename, callback)
+
     for attempt in range(1, retries + 1):
         try:
             timeout = aiohttp.ClientTimeout(total=3600, connect=15, sock_read=60)
@@ -701,3 +762,22 @@ def bytesio_from_file(path: str, filename: str) -> BytesIO | None:
         return bio
     except Exception:
         return None
+
+
+def safe_unlink(path: str, retries: int = 3, delay: float = 0.3) -> bool:
+    """Delete a file, retrying briefly on a transient lock. Logs real failures
+    instead of silently swallowing them."""
+    if not path:
+        return True
+    for attempt in range(retries):
+        try:
+            os.remove(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(delay)
+                continue
+            log.info(f"Could not delete {os.path.basename(path)}: {e}")
+            return False

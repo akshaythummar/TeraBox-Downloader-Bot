@@ -2,12 +2,12 @@ import logging
 log = logging.getLogger(__name__)
 import asyncio
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 import aiohttp
 
-from config import TERABOX_API_TEMPLATE, TERABOX_FALLBACK_API_TEMPLATE
-from tools import get_formatted_size
+from config import TERABOX_RESOLVER_WORKER, TERABOX_HLS_PROXY_WORKER, TERABOX_JSTOKEN
+from tools import extract_code_from_url
 
 
 # ---------------- URL VALIDATION ---------------- #
@@ -92,19 +92,14 @@ def extract_surl_from_url(url: str) -> str | None:
     return surl[0] if surl else False
 
 
-# ---------------- API SETTINGS ---------------- #
-
-# API endpoint template is imported from config (TERABOX_API_TEMPLATE)
-
-
 # ---------------- RETRY WRAPPER ---------------- #
 
 async def retry_request(method, url, attempts=3, delay=2, **kwargs):
     """Async retry wrapper for GET requests.
 
     4xx (except 429) fail fast — retrying a dead link is pointless.
-    Backoff grows per attempt to avoid hammering a struggling API.
-    URLs are never logged (may carry authkey); only status codes.
+    Backoff grows per attempt to avoid hammering a struggling worker.
+    URLs are never logged (may carry the jsToken); only status codes.
     """
     timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=15)
     for i in range(1, attempts + 1):
@@ -113,7 +108,6 @@ async def retry_request(method, url, attempts=3, delay=2, **kwargs):
                 async with session.request(method, url, **kwargs) as resp:
                     if resp.status in (200, 302):
                         resp._text = await resp.text()
-                        resp._json = None
                         return resp
                     if resp.status == 429:
                         log.info(f"[Retry {i}] HTTP 429 (rate limited)")
@@ -129,87 +123,85 @@ async def retry_request(method, url, attempts=3, delay=2, **kwargs):
     return None
 
 
-# ---------------- MAIN API HANDLER ---------------- #
+# ---------------- WORKER-BASED RESOLVER ---------------- #
+# No more ntmtbapi: resolves via a Cloudflare Worker that reads TeraBox's own
+# share metadata, then builds an HLS (.m3u8) stream URL ourselves. Video only —
+# the worker/token scheme here has no photo path (see get_files() below).
 
-async def _fetch_files_from_api(api_template: str, url: str, _api_name="api"):
-    """Helper: fetch files from a single API template.
+def _sanitize_filename(name: str) -> str:
+    return re.sub(r'[\\/*?:"<>|]', "", str(name or "")).strip() or "file"
 
-    Never logs URLs, tokens, or raw responses — only api name, status,
-    latency and short error classes.
-    """
-    import time as _time
-    from utils.logx import api_log_started, api_log_ok, api_log_failed, safe_exc
-    api_url = api_template.format(url=url)
-    api_log_started(log, _api_name)
-    t0 = _time.monotonic()
-    latency = lambda: int((_time.monotonic() - t0) * 1000)
 
+async def _resolve_share_metadata(share_code: str):
+    """Fetch {shareid, uk, sign, timestamp, list:[...]} for a share code."""
+    api_url = f"{TERABOX_RESOLVER_WORKER}/?q={share_code}"
     res = await retry_request("GET", api_url, attempts=2, delay=2)
     if not res:
-        api_log_failed(log, _api_name, status=None, latency_ms=latency(), error="unreachable after retries")
+        log.info("Resolver worker unreachable after retries")
         return False
-
     try:
         data = await res.json()
     except Exception as e:
-        api_log_failed(log, _api_name, status=res.status, latency_ms=latency(), error=f"bad response: {safe_exc(e, 60)}")
+        from utils.logx import safe_exc
+        log.info(f"Resolver worker bad response: {safe_exc(e, 60)}")
+        return False
+    if not isinstance(data, dict) or data.get("errno") != 0 or not data.get("list"):
+        log.info(f"Resolver worker error: {(data or {}).get('show_msg') or 'no files'}")
+        return False
+    return data
+
+
+def _build_stream_url(shareid, uk, sign, timestamp, fid, quality="M3U8_AUTO_480"):
+    """Build the HLS (.m3u8) stream URL for one file, proxied through the HLS worker."""
+    streaming_link = (
+        f"https://1024tera.com/share/streaming.m3u8?uk={uk}"
+        f"&shareid={shareid}&type={quality}&fid={fid}"
+        f"&sign={sign}&timestamp={timestamp}"
+        f"&jsToken={TERABOX_JSTOKEN}"
+        f"&esl=1&isplayer=1&ehps=1&clienttype=0&app_id=250528&web=1&channel=dubox"
+    )
+    return f"{TERABOX_HLS_PROXY_WORKER}/?hls={quote(streaming_link, safe='')}"
+
+
+async def _fetch_files_via_worker(url: str):
+    share_code = extract_code_from_url(url)
+    if not share_code:
+        log.info("No share code found in URL")
         return False
 
-    if not isinstance(data, dict) or not data.get("ok"):
-        api_log_failed(log, _api_name, status=res.status, latency_ms=latency(), error="ok=false")
+    data = await _resolve_share_metadata(share_code)
+    if not data:
         return False
 
-    files = data.get("files")
-    if not files:
-        api_log_failed(log, _api_name, status=res.status, latency_ms=latency(), error="empty file list")
-        return False
+    shareid, uk, sign, timestamp = data["shareid"], data["uk"], data["sign"], data["timestamp"]
 
     result = []
-    for f in files:
-        fast_link = f.get("download_url")
-        if not fast_link:
+    for item in data["list"]:
+        fid = item.get("fs_id")
+        if not fid:
             continue
-        try:
-            size_bytes = int(f.get("size", 0))
-        except (TypeError, ValueError):
-            size_bytes = 0
+        file_name = _sanitize_filename(item.get("server_filename") or "video.mp4")
         result.append({
-            "file_name": f.get("filename") or "file",
-            "size": f.get("size_readable") or get_formatted_size(size_bytes),
-            "sizebytes": size_bytes,
+            "file_name": file_name,
+            "size": "Unknown",   # not known until after download — see main.py post-download gate
+            "sizebytes": 0,
             "thumb": None,
-            "direct_link": fast_link,
-            "link": fast_link,
-            "expires_in": f.get("expires_in", ""),
+            "direct_link": _build_stream_url(shareid, uk, sign, timestamp, fid),
+            "link": _build_stream_url(shareid, uk, sign, timestamp, fid),
+            "expires_in": "",
         })
 
     if not result:
-        api_log_failed(log, _api_name, status=res.status, latency_ms=latency(), error="no usable links")
+        log.info("Resolver worker returned no usable files")
         return False
 
-    api_log_ok(log, _api_name, status=res.status, latency_ms=latency())
-    try:
-        log.info(f"API files: count={len(result)}")
-    except Exception:
-        pass
+    log.info(f"Resolved files: count={len(result)}")
     return result
 
 
 async def get_files(url: str):
-    """Async: Fetch files via primary API, fallback to secondary if it fails."""
-    # Try primary API first
-    result = await _fetch_files_from_api(TERABOX_API_TEMPLATE, url, _api_name="primary")
-    if result:
-        return result
-
-    # Fallback to secondary API
-    log.info("Primary API failed, trying fallback API...")
-    result = await _fetch_files_from_api(TERABOX_FALLBACK_API_TEMPLATE, url, _api_name="fallback")
-    if result:
-        log.info("Primary failed, fallback ok")
-        return result
-
-    return False
+    """Async: resolve every file in a TeraBox share link via the worker."""
+    return await _fetch_files_via_worker(url)
 
 
 async def get_data(url: str):
@@ -221,8 +213,6 @@ async def get_data(url: str):
 
 
 async def get_fallback_files(url: str):
-    """Async: Fetch files via fallback API ONLY (fresh alternate dl URLs).
-
-    Used to retry a download whose primary direct_link 502s.
-    """
-    return await _fetch_files_from_api(TERABOX_FALLBACK_API_TEMPLATE, url, _api_name="fallback")
+    """Async: re-resolve fresh (new sign/timestamp) — used to retry a download
+    whose stream URL failed/expired."""
+    return await _fetch_files_via_worker(url)

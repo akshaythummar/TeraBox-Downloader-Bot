@@ -442,4 +442,6 @@ TeraBox-Downloader-Bot/
 
 ⭐ Star this repo if you found it useful!
 
+venv\Scripts\activate.bat
+
 </div>

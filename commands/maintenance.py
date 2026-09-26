@@ -113,11 +113,12 @@ def _short(t, n=160):
 
 
 def build_config_reload_text(new_values):
-    """Report reloaded templates. No config import; values passed in."""
+    """Report reloaded resolver config. No config import; values passed in."""
     vals = new_values or {}
-    return ("Reloaded API templates without restart.\n"
-            f"Primary: `{_short(vals.get('primary'))}`\n"
-            f"Fallback: `{_short(vals.get('fallback'))}`")
+    return ("Reloaded resolver config without restart.\n"
+            f"jsToken: `{_short(vals.get('jstoken'))}`\n"
+            f"Resolver worker: `{_short(vals.get('resolver'))}`\n"
+            f"HLS proxy worker: `{_short(vals.get('proxy'))}`")
 
 
 def register(bot, ctx):
@@ -160,31 +161,27 @@ def register(bot, ctx):
             pass
         await m.reply(text)
 
-    @bot.on(events.NewMessage(pattern=r"^/setapi\s+(primary|fallback)\s+(\S.*)$"))
+    @bot.on(events.NewMessage(pattern=r"^/setapi\s+(jstoken|resolver|proxy)\s+(\S.*)$"))
     async def _setapi(m):
         if not is_admin(m.sender_id):
             return await _deny(m)
         slot = m.pattern_match.group(1).lower()
-        tpl = m.pattern_match.group(2).strip()
-        if "{url}" not in tpl or not tpl.startswith("http"):
-            return await m.reply("Usage: `/setapi <primary|fallback> <url_template>`\nTemplate must start with http and contain `{url}`.")
-        try:
-            db.set(f"api_template:{slot}", tpl)
-        except Exception:
-            pass
+        value = m.pattern_match.group(2).strip()
+        if slot in ("resolver", "proxy") and not value.startswith("http"):
+            return await m.reply("Usage: `/setapi <jstoken|resolver|proxy> <value>`\n`resolver`/`proxy` must be a worker URL starting with http.")
         applied = None
         if callable(apply_api_templates):
             try:
-                applied = apply_api_templates(**{slot: tpl})
+                applied = apply_api_templates(**{slot: value})
             except Exception as e:
-                return await m.reply(f"Saved but apply failed: `{e}`")
+                return await m.reply(f"Apply failed: `{e}`")
         try:
-            log_audit("SETAPI", m.sender_id, f"{slot}={tpl[:120]}")
+            log_audit("SETAPI", m.sender_id, f"{slot}={value[:120]}")
         except Exception:
             pass
         if isinstance(applied, dict):
             return await m.reply(build_config_reload_text(applied))
-        await m.reply(f"Saved `{slot}` template (live apply deferred).\n`{tpl[:160]}`")
+        await m.reply(f"Saved `{slot}` (live apply deferred).\n`{value[:160]}`")
 
     @bot.on(events.NewMessage(pattern=r"^/reloadconfig$"))
     async def _reloadconfig(m):

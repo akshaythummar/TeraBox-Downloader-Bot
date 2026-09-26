@@ -8,6 +8,7 @@ pillow
 hachoir
 requests
 redis
-FastTelethonhelper
+fakeredis
 humanreadable
 opencv-python-headless
+yt-dlp

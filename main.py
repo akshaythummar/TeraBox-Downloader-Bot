@@ -36,6 +36,7 @@ from tools import (
     get_video_info,
     get_urls_from_string,
     is_user_on_chat,
+    safe_unlink,
     send_document_via_api,
     VIDEO_EXTENSIONS,
     PHOTO_EXTENSIONS,
@@ -61,6 +62,14 @@ db = redis.Redis(
     password=PASSWORD,
     decode_responses=True,
 )
+try:
+    db.ping()
+except redis.exceptions.RedisError:
+    # ponytail: no local Redis server for now — in-memory stand-in, data resets on restart.
+    # Remove this fallback once a real Redis server is available.
+    import fakeredis
+    log.warning("Redis not reachable at %s:%s — using in-memory fakeredis instead (nothing persists).", HOST, PORT)
+    db = fakeredis.FakeStrictRedis(decode_responses=True)
 
 # Persisted storage-chat override (/setstorage) — survives restarts + /update.
 CHAT_ID_DEFAULT = PRIVATE_CHAT_ID
@@ -1234,7 +1243,6 @@ async def cb_premium(e):
 **Free Plan:**
 • 10 downloads/hour
 • Single file only
-• 500MB size limit
 
 **Premium Plan:**
 • ✅ Unlimited downloads
@@ -1745,7 +1753,7 @@ async def cb_admin_api(e):
     try:
         from commands.analytics import check_api_health
         res = await check_api_health(
-            {"primary": TERABOX_API_TEMPLATE, "fallback": TERABOX_FALLBACK_API_TEMPLATE},
+            {"resolver_worker": TERABOX_RESOLVER_WORKER, "hls_proxy": TERABOX_HLS_PROXY_WORKER},
             timeout=10,
         )
         lines = ["**API Health**", ""]
@@ -1836,7 +1844,6 @@ async def display_plan(m: UpdateNewMessage):
 🌟 **Free Plan**
 • 10 downloads/hour
 • Single file only
-• 500MB size limit
 
 ⚡ **Premium Plan**
 • Unlimited downloads
@@ -2253,15 +2260,10 @@ async def handle_message(m: Message):
 
         fname_lower = data["file_name"].lower()
         file_ext = "." + fname_lower.rsplit(".", 1)[-1] if "." in fname_lower else ""
-        if file_ext not in SUPPORTED_EXTENSIONS:
-            supported = ", ".join(sorted(set(VIDEO_EXTENSIONS | PHOTO_EXTENSIONS)))
+        if file_ext not in VIDEO_EXTENSIONS:
+            supported = ", ".join(sorted(VIDEO_EXTENSIONS))
             return await hm.edit(
-                f"Sorry! File type `{file_ext}` is not supported.\nSupported: {supported}"
-            )
-
-        if int(data.get("sizebytes", 0) or 0) > 524288000 and not is_admin(m.sender_id) and not is_premium:
-            return await hm.edit(
-                f"Sorry! File is too big. I can download only 500MB and this file is of {data['size']} ."
+                f"Sorry! File type `{file_ext}` is not supported (photos aren't supported right now).\nSupported: {supported}"
             )
 
         start_time = time.time()
@@ -2399,8 +2401,7 @@ async def handle_message(m: Message):
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
-╟➣𝙎𝙞𝙯𝙚: **{escape_markdown(data['size'])}** 
-╟➣𝗗𝗶𝗿𝗲𝗰𝘁 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗟𝗶𝗻𝗸 : [Click here]({data['direct_link'].replace(')', '%29')})
+╟➣𝙎𝙞𝙯𝙚: **{get_formatted_size(file_size)}**
 ╟➣𝗙𝗶𝗿𝘀𝗧 𝗡𝗮𝗺𝗲: {escape_markdown(user_first_name)}{tag_str}
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(user_username or '-')}
 ╟➣𝐓𝐨𝐭𝐚𝐥 𝐓𝐢𝐦𝐞 𝐓𝐚𝐤𝐞𝐧: {total_time_str}
@@ -2436,10 +2437,7 @@ async def handle_message(m: Message):
                 sent_id = file.id
             except Exception as e:
                 log.info(f"Telethon upload failed: {e}")
-                try:
-                    os.unlink(download)
-                except Exception:
-                    pass
+                safe_unlink(download)
                 return await _fail_single_dl(
                     db, shorturl, hm,
                     f"Sorry! Upload Failed but you can download it from [here]({url}).",
@@ -2456,8 +2454,8 @@ async def handle_message(m: Message):
             try:
                 if callable(globals().get("_lib_index")):
                     globals()["_lib_index"](db, sent_id, data["file_name"],
-                                            data.get("size", "?"),
-                                            int(data.get("sizebytes", 0) or 0))
+                                            get_formatted_size(file_size),
+                                            file_size)
             except Exception:
                 pass
 
@@ -2474,20 +2472,14 @@ async def handle_message(m: Message):
                 _fok = False
             if not _fok:
                 log.info("Forward failed (incl. flood-wait retry)")
-                try:
-                    os.unlink(download)
-                except Exception:
-                    pass
+                safe_unlink(download)
                 return await _fail_single_dl(
                     db, shorturl, hm,
                     "Upload succeeded but delivery failed — please try again.",
                     m.sender_id, _job["id"],
                 )
 
-            try:
-                os.unlink(download)
-            except Exception:
-                pass
+            safe_unlink(download)
 
             try:
                 await hm.edit("✅ Video sent successfully to your chat!",
@@ -2501,7 +2493,7 @@ async def handle_message(m: Message):
             except Exception:
                 pass
 
-            _record_dl(m.sender_id, int(data.get("sizebytes", 0) or 0), shorturl, True)
+            _record_dl(m.sender_id, file_size, shorturl, True)
             try:
                 from utils.flood import patient_forward as _pfw, patient_send as _psw
             except Exception:
@@ -2523,7 +2515,7 @@ async def handle_message(m: Message):
             unregister_job(db, m.sender_id, _job["id"])
             import json as _json
             history_entry = _json.dumps({
-                "file": data["file_name"], "size": data["size"],
+                "file": data["file_name"], "size": get_formatted_size(file_size),
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
             existing_history = db.get(f"history_{m.sender_id}")
@@ -2567,12 +2559,7 @@ async def handle_message(m: Message):
             async with download_semaphore:
                 fname_lower = data["file_name"].lower()
                 file_ext = "." + fname_lower.rsplit(".", 1)[-1] if "." in fname_lower else ""
-                if file_ext not in SUPPORTED_EXTENSIONS:
-                    done_count += 1
-                    failed_count += 1
-                    return
-
-                if int(data.get("sizebytes", 0) or 0) > 524288000 and not is_admin(m.sender_id) and not is_premium:
+                if file_ext not in VIDEO_EXTENSIONS:
                     done_count += 1
                     failed_count += 1
                     return
@@ -2646,7 +2633,7 @@ async def handle_message(m: Message):
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
-╟➣𝙎𝙞𝙯𝙚: **{escape_markdown(data['size'])}**
+╟➣𝙎𝙞𝙯𝙚: **{get_formatted_size(file_size)}**
 ╟➣𝗙𝗶𝗿𝘀𝗧 𝗡𝗮𝗺𝗲: {escape_markdown(user_first_name)}{tag_str}
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(user_username or '-')}
 ╟➣𝐓𝐨𝐭𝐚𝐥 𝐓𝐢𝐦𝐞 𝐓𝐚𝐤𝐞𝐧: {total_time:.1f} sec
@@ -2699,8 +2686,8 @@ async def handle_message(m: Message):
                     try:
                         if callable(globals().get("_lib_index")):
                             globals()["_lib_index"](db, sent_id, data["file_name"],
-                                                    data.get("size", "?"),
-                                                    int(data.get("sizebytes", 0) or 0))
+                                                    get_formatted_size(file_size),
+                                                    file_size)
                     except Exception:
                         pass
 
@@ -2730,12 +2717,12 @@ async def handle_message(m: Message):
                     except Exception:
                         pass
 
-                    _record_dl(m.sender_id, int(data.get("sizebytes", 0) or 0), shorturl, True)
+                    _record_dl(m.sender_id, file_size, shorturl, True)
                     unregister_job(db, m.sender_id, _mjob["id"])
                     try:
                         import json as _json2
                         _he = _json2.dumps({
-                            "file": data["file_name"], "size": data["size"],
+                            "file": data["file_name"], "size": get_formatted_size(file_size),
                             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         })
                         _ex = db.get(f"history_{m.sender_id}")
@@ -2752,10 +2739,7 @@ async def handle_message(m: Message):
                     _record_dl(m.sender_id, 0, shorturl, False)
                     await update_multi_progress(f"❌ Upload failed: `{data['file_name']}`")
 
-                try:
-                    os.unlink(download)
-                except Exception:
-                    pass
+                safe_unlink(download)
                 try:
                     if _mthumb and os.path.isfile(_mthumb):
                         os.unlink(_mthumb)
@@ -3276,14 +3260,14 @@ async def admin_commands(m: UpdateNewMessage):
 /usage — Disk, RAM, CPU usage
 /logs `[count]` — Recent error logs
 /errors `[count]` — Recent download failures
-/apihealth — Primary/fallback API status
+/apihealth — Resolver/HLS worker status
 /logrotate — Rotate bot.log now (auto daily)
 /configview — View runtime config
 /configset `<KEY>` `<VALUE>` — Edit runtime config
 /configreset `<KEY>` — Reset key to default
 /configreset `<KEY>` — Reset key to default
-/setapi `<primary|fallback>` `<template>` — Rotate API live
-/reloadconfig — Reload API templates
+/setapi `<jstoken|resolver|proxy>` `<value>` — Rotate resolver config live
+/reloadconfig — Reload resolver config
 /backup — Full Redis snapshot
 /restore — Restore (reply to backup file)
 /reindex — Rebuild file library (owner)
@@ -3624,7 +3608,7 @@ async def folder_download(m: UpdateNewMessage):
         async with download_semaphore:
             fname_lower = data["file_name"].lower()
             file_ext = "." + fname_lower.rsplit(".", 1)[-1] if "." in fname_lower else ""
-            if file_ext not in SUPPORTED_EXTENSIONS:
+            if file_ext not in VIDEO_EXTENSIONS:
                 done_count += 1
                 failed_count += 1
                 await update_progress(f"⏭ Skipping `{data['file_name']}` (unsupported)")
@@ -3712,8 +3696,7 @@ async def folder_download(m: UpdateNewMessage):
 ┗━━━━━━━━━━━━━━━━━⍟
 ╔══════════⍟
 ╟➣𝙁𝙞𝙡𝙚 𝙉𝙖𝙢𝙚: `{caption_name(data['file_name'])}`
-╟➣𝙎𝙞𝙯𝙚: **{escape_markdown(data['size'])}**
-╟➣𝗗𝗶𝗿𝗲𝗰𝘁 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗟𝗶𝗻𝗸 : [Click here]({data['direct_link'].replace(')', '%29')})
+╟➣𝙎𝙞𝙯𝙚: **{get_formatted_size(file_size)}**
 ╟➣𝗙𝗶𝗿𝘀𝗧 𝗡𝗮𝗺𝗲: {escape_markdown(user_first_name)}{tag_str}
 ╟➣𝗨𝘀𝗲𝗿𝗻𝗮𝗺𝗲: @{escape_markdown(user_username or '-')}
 ╟➣𝐓𝐨𝐭𝐚𝐥 𝐓𝐢𝐦𝐞 𝐓𝐚𝐤𝐞𝐧: {total_time:.1f} sec
@@ -3748,12 +3731,12 @@ async def folder_download(m: UpdateNewMessage):
             done_count += 1
             if sent_id:
                 sent_count += 1
-                _record_dl(m.sender_id, int(data.get("sizebytes", 0) or 0), url, True)
+                _record_dl(m.sender_id, file_size, url, True)
                 try:
                     if callable(globals().get("_lib_index")):
                         globals()["_lib_index"](db, sent_id, data["file_name"],
-                                                data.get("size", "?"),
-                                                int(data.get("sizebytes", 0) or 0))
+                                                get_formatted_size(file_size),
+                                                file_size)
                 except Exception:
                     pass
                 try:
@@ -3780,10 +3763,7 @@ async def folder_download(m: UpdateNewMessage):
                 _record_dl(m.sender_id, 0, url, False)
                 await update_progress(f"❌ Upload failed: `{data['file_name']}`")
 
-            try:
-                os.unlink(download)
-            except Exception:
-                pass
+            safe_unlink(download)
             try:
                 if _fthumb and os.path.isfile(_fthumb):
                     os.unlink(_fthumb)
@@ -4243,7 +4223,7 @@ try:
     from commands.analytics import register as _reg_analytics, track_download as _track_dl
     _reg_analytics(bot, {
         "db": db, "is_admin": is_admin, "get_formatted_size": get_formatted_size,
-        "api_templates": {"primary": TERABOX_API_TEMPLATE, "fallback": TERABOX_FALLBACK_API_TEMPLATE},
+        "api_templates": {"resolver_worker": TERABOX_RESOLVER_WORKER, "hls_proxy": TERABOX_HLS_PROXY_WORKER},
         "log_path": LOG_FILE,
     })
     _loaded_packs.append("analytics")
@@ -4251,38 +4231,47 @@ except Exception as e:
     log.warning(f"analytics pack not loaded: {e}")
     _track_dl = None
 
-def _apply_api_templates(primary=None, fallback=None):
+def _apply_api_templates(jstoken=None, resolver=None, proxy=None):
+    """Live-rotate the TeraBox resolver's token/worker URLs (no code deploy needed)."""
     import terabox as _tb
-    if primary:
-        _tb.TERABOX_API_TEMPLATE = primary
+    if jstoken:
+        _tb.TERABOX_JSTOKEN = jstoken
         try:
-            db.set("api_template:primary", primary)
+            db.set("terabox_cfg:jstoken", jstoken)
         except Exception:
             pass
-    if fallback:
-        _tb.TERABOX_FALLBACK_API_TEMPLATE = fallback
+    if resolver:
+        _tb.TERABOX_RESOLVER_WORKER = resolver.rstrip("/")
         try:
-            db.set("api_template:fallback", fallback)
+            db.set("terabox_cfg:resolver", _tb.TERABOX_RESOLVER_WORKER)
         except Exception:
             pass
-    return {"primary": _tb.TERABOX_API_TEMPLATE, "fallback": _tb.TERABOX_FALLBACK_API_TEMPLATE}
+    if proxy:
+        _tb.TERABOX_HLS_PROXY_WORKER = proxy.rstrip("/")
+        try:
+            db.set("terabox_cfg:proxy", _tb.TERABOX_HLS_PROXY_WORKER)
+        except Exception:
+            pass
+    masked_token = (_tb.TERABOX_JSTOKEN[:10] + "...") if _tb.TERABOX_JSTOKEN else ""
+    return {"jstoken": masked_token, "resolver": _tb.TERABOX_RESOLVER_WORKER, "proxy": _tb.TERABOX_HLS_PROXY_WORKER}
 
 
 def _apply_saved_api_templates():
-    """Boot: re-apply API templates persisted via /setapi."""
+    """Boot: re-apply resolver token/worker URLs persisted via /setapi."""
     try:
         import terabox as _tb
-        for slot, attr in (("primary", "TERABOX_API_TEMPLATE"),
-                           ("fallback", "TERABOX_FALLBACK_API_TEMPLATE")):
+        for slot, attr in (("jstoken", "TERABOX_JSTOKEN"),
+                           ("resolver", "TERABOX_RESOLVER_WORKER"),
+                           ("proxy", "TERABOX_HLS_PROXY_WORKER")):
             try:
-                saved = db.get(f"api_template:{slot}")
+                saved = db.get(f"terabox_cfg:{slot}")
             except Exception:
                 saved = None
-            if saved and "{url}" in str(saved):
+            if saved:
                 setattr(_tb, attr, str(saved))
     except Exception as e:
         try:
-            log.warning(f"saved API templates not applied: {e}")
+            log.warning(f"saved resolver config not applied: {e}")
         except Exception:
             pass
 

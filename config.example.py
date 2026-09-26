@@ -50,20 +50,17 @@ FORCE_GROUPS = [
 ]
 
 
-# ================== TERA BOX API ==================
+# ================== TERA BOX RESOLVER (worker-based, no ntmtbapi) ==================
 
-TERABOX_API_BASE = "https://your-terabox-api.com/"
-TERABOX_API_TOKEN = "your_api_token"
+# Cloudflare Worker that reads TeraBox's own share metadata (shareid/uk/sign/timestamp/list)
+TERABOX_RESOLVER_WORKER = "https://your-metadata-worker.workers.dev"
 
-TERABOX_API_TEMPLATE = (
-    f"{TERABOX_API_BASE}?authkey={TERABOX_API_TOKEN}&url={{url}}"
-)
+# Cloudflare Worker that proxies the built streaming.m3u8 URL
+TERABOX_HLS_PROXY_WORKER = "https://your-hls-proxy-worker.workers.dev"
 
-# Fallback API — used when primary API returns no files
-TERABOX_FALLBACK_API_BASE = "https://your-fallback-api.com/"
-TERABOX_FALLBACK_API_TEMPLATE = (
-    f"{TERABOX_FALLBACK_API_BASE}?authkey={TERABOX_API_TOKEN}&url={{url}}"
-)
+# TeraBox web-session token embedded in the streaming URL. This WILL expire/rotate
+# over time — update it here (or live via /setapi) when downloads start failing.
+TERABOX_JSTOKEN = "your_js_token"
 
 # Self-hosted Telegram Bot API server (replaces https://api.telegram.org)
 # Enables high-speed uploads up to 2GB via the Bot HTTP API.
