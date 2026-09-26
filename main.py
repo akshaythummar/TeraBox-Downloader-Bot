@@ -25,6 +25,7 @@ from config import *
 from terabox import get_files, get_fallback_files
 from tools import (
     add_watermark,
+    build_spoiler_media,
     bytesio_from_file,
     caption_name,
     convert_seconds,
@@ -2306,21 +2307,16 @@ async def handle_message(m: Message):
          @AT_BOTZ
 """
                 if len(valid_msgs) == 1:
-                    await bot.send_file(
-                        m.chat.id,
-                        file=valid_msgs[0].media,
-                        caption=cached_caption,
-                        supports_streaming=True,
-                        spoiler=SPOILER_VIDEOS,
+                    _cached_media = await build_spoiler_media(
+                        bot, valid_msgs[0].media, spoiler=SPOILER_VIDEOS, supports_streaming=True,
                     )
+                    await bot.send_file(m.chat.id, file=_cached_media, caption=cached_caption)
                 else:
                     for cm in valid_msgs:
-                        await bot.send_file(
-                            m.chat.id,
-                            file=cm.media,
-                            supports_streaming=True,
-                            spoiler=SPOILER_VIDEOS,
+                        _cached_media = await build_spoiler_media(
+                            bot, cm.media, spoiler=SPOILER_VIDEOS, supports_streaming=True,
                         )
+                        await bot.send_file(m.chat.id, file=_cached_media)
                 _record_dl(m.sender_id, 0, shorturl, True)
                 await hm.delete()
                 db.set(
@@ -2531,11 +2527,12 @@ async def handle_message(m: Message):
 
         if sent_id is None:
             try:
-                file = await bot.send_file(
-                    PRIVATE_CHAT_ID, file=download, thumb=thumbnail if thumbnail else None,
-                    progress_callback=lambda c, t: progress_bar(c, t, "Uploading"), caption=caption, video=True,
-                    supports_streaming=True, duration=vduration, attributes=[], spoiler=SPOILER_VIDEOS,
+                _media = await build_spoiler_media(
+                    bot, download, spoiler=SPOILER_VIDEOS, attributes=[],
+                    thumb=thumbnail if thumbnail else None, supports_streaming=True,
+                    progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                 )
+                file = await bot.send_file(PRIVATE_CHAT_ID, file=_media, caption=caption)
                 sent_id = file.id
             except Exception as e:
                 log.info(f"Telethon upload failed: {e}")
@@ -2782,12 +2779,12 @@ async def handle_message(m: Message):
 
                 if sent_id is None:
                     try:
-                        file = await bot.send_file(
-                            PRIVATE_CHAT_ID, file=download, caption=caption,
-                            video=True, supports_streaming=True, spoiler=SPOILER_VIDEOS,
+                        _media = await build_spoiler_media(
+                            bot, download, spoiler=SPOILER_VIDEOS, attributes=[], supports_streaming=True,
                             thumb=_mthumb if _mthumb and os.path.isfile(_mthumb) else None,
                             progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                         )
+                        file = await bot.send_file(PRIVATE_CHAT_ID, file=_media, caption=caption)
                         sent_id = file.id
                     except Exception as e:
                         log.info(f"Multi Telethon upload failed: {e}")
@@ -3853,12 +3850,12 @@ async def folder_download(m: UpdateNewMessage):
 
             if sent_id is None:
                 try:
-                    file = await bot.send_file(
-                        PRIVATE_CHAT_ID, file=download, caption=caption,
-                        video=True, supports_streaming=True, spoiler=SPOILER_VIDEOS,
+                    _media = await build_spoiler_media(
+                        bot, download, spoiler=SPOILER_VIDEOS, attributes=[], supports_streaming=True,
                         thumb=_fthumb if _fthumb and os.path.isfile(_fthumb) else None,
                         progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
                     )
+                    file = await bot.send_file(PRIVATE_CHAT_ID, file=_media, caption=caption)
                     sent_id = file.id
                 except Exception as e:
                     log.info(f"Folder Telethon upload failed: {e}")

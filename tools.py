@@ -313,7 +313,7 @@ def _bot_api_send(base_url, token, chat_id, file_path, caption, filename, progre
             "caption": caption,
             "parse_mode": "Markdown",
             "supports_streaming": "true",
-            "spoiler": "true" if spoiler else "false",
+            "has_spoiler": "true" if spoiler else "false",
         }
         if duration:
             data["duration"] = str(duration)
@@ -379,6 +379,25 @@ async def send_document_via_api(base_url, token, chat_id, file_path, caption, fi
     )
 
 
+async def build_spoiler_media(bot, file, spoiler=True, **kwargs):
+    """Build the InputMedia Telethon would send for `file` (a local path, an
+    already-uploaded InputFile/InputFileBig, or another message's .media) and
+    patch its spoiler flag directly.
+
+    Telethon's send_file() has no `spoiler=` kwarg on any version up to the
+    current latest (1.45.0, checked directly against its signature) —
+    unrecognized kwargs are silently swallowed by its **kwargs catch-all
+    rather than rejected, so passing spoiler=True there does nothing. This
+    is the only way to actually set it: build the InputMedia via the same
+    internal method send_file() itself uses, then patch the attribute
+    before handing it to send_file(file=media, ...).
+    """
+    _, media, _ = await bot._file_to_media(file, **kwargs)
+    if media is not None:
+        media.spoiler = bool(spoiler)
+    return media
+
+
 async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, duration=0, progress_callback=None, spoiler=True):
     """Fast upload via multiple parallel MTProto connections (FastTelethon)
     instead of one single-stream HTTP POST. Raises on failure — caller decides
@@ -387,10 +406,10 @@ async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, durat
     filename = os.path.basename(file_path)
     with open(file_path, "rb") as f:
         input_file = await _ft_upload(bot, f, progress_callback=progress_callback, file_name=filename)
-    return await bot.send_file(
-        chat_id, file=input_file, thumb=thumb, caption=caption, video=True,
-        supports_streaming=True, duration=duration, attributes=[], spoiler=spoiler,
+    media = await build_spoiler_media(
+        bot, input_file, spoiler=spoiler, attributes=[], thumb=thumb, supports_streaming=True,
     )
+    return await bot.send_file(chat_id, file=media, caption=caption)
 
 
 def check_url_patterns(url: str) -> bool:
