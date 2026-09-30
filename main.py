@@ -2383,7 +2383,11 @@ async def handle_message(m: Message):
 
         thumbnail = download_image_to_bytesio(data["thumb"], "thumbnail.png")
 
-        _dest = os.path.join(DOWNLOAD_DIR, os.path.basename(data["file_name"]))
+        # ponytail: prefixed with a per-request token — two concurrent downloads
+        # (different users, or the same popular link twice) can otherwise
+        # resolve to the exact same TeraBox filename and collide on this path,
+        # so one job's cleanup deletes the file the other is still uploading.
+        _dest = os.path.join(DOWNLOAD_DIR, f"{uuid4().hex[:8]}_{os.path.basename(data['file_name'])}")
         _job = register_job(db, m.sender_id, f"dl:{data['file_name']}", msg=hm)
         _job["files"].append(_dest)
         _job["shorturl"] = shorturl
@@ -2669,7 +2673,7 @@ async def handle_message(m: Message):
                     return
 
                 start_time = time.time()
-                _mdest = os.path.join(DOWNLOAD_DIR, f"{idx:02d}_{os.path.basename(data['file_name'])}")
+                _mdest = os.path.join(DOWNLOAD_DIR, f"{uuid4().hex[:8]}_{idx:02d}_{os.path.basename(data['file_name'])}")
                 _mjob = register_job(db, m.sender_id, f"dl:{data['file_name']}", msg=hm)
                 _mjob["shorturl"] = shorturl
                 _mjob["files"].append(_mdest)
@@ -3736,7 +3740,7 @@ async def folder_download(m: UpdateNewMessage):
                 return
 
             start_time = time.time()
-            _fdest = os.path.join(DOWNLOAD_DIR, f"{idx:02d}_{os.path.basename(data['file_name'])}")
+            _fdest = os.path.join(DOWNLOAD_DIR, f"{uuid4().hex[:8]}_{idx:02d}_{os.path.basename(data['file_name'])}")
             _fjob = register_job(db, m.sender_id, f"folder:{data['file_name']}", msg=hm)
             _fjob["shorturl"] = url
             _fjob["files"].append(_fdest)
@@ -4762,5 +4766,19 @@ log.info("Bot starting...")
 print(BANNER)
 bot.start(bot_token=BOT_TOKEN)
 log.info("Bot is running!")
+
+try:
+    # Warm Telethon's entity cache for every chat the bot is in — on a brand
+    # new/fresh session (no prior interaction history) Telethon can't resolve
+    # a bare channel ID into a full peer (it needs the access_hash, which is
+    # only learned by seeing the channel in a dialog list). Without this,
+    # every upload targeting PRIVATE_CHAT_ID fails with "Could not find the
+    # input entity" — invisible on a long-lived session that's already seen
+    # it, guaranteed on every fresh boot otherwise.
+    bot.loop.run_until_complete(bot.get_dialogs())
+    log.info("Entity cache warmed (dialogs loaded)")
+except Exception as e:
+    log.warning(f"Could not warm entity cache: {e}")
+
 bot.run_until_disconnected()
 cleanup_task.cancel()

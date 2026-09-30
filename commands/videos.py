@@ -159,7 +159,7 @@ def register(bot, ctx):
             pass
 
         if await _has_access(user_id):
-            return await _serve_video(m.chat.id, user_id, m)
+            return await _serve_video(m.chat_id, user_id, m)
 
         trial_start = _get_state(db, user_id).get("trial_start_time")
         if not trial_start or int(float(trial_start)) == 0:

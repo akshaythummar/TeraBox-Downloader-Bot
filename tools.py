@@ -120,8 +120,17 @@ _ensure_font()
 
 
 def caption_name(name: str) -> str:
-    """Make an API filename safe inside Markdown backticks."""
-    return str(name or "file").replace("`", "'")
+    """Make an API filename safe inside Markdown backticks.
+
+    Backticks alone used to be enough, back when filenames came from the
+    ntmtbapi resolver (server-picked, predictable names). Real TeraBox
+    filenames (now sourced directly from TeraBox's own metadata) routinely
+    contain underscores/asterisks/brackets, which Telegram's legacy Markdown
+    parser still treats as entity delimiters even inside a code span —
+    unescaped, these break caption parsing entirely ("can't parse entities").
+    """
+    safe = str(name or "file").replace("`", "'")
+    return re.sub(r"([*_\[\]])", r"\\\1", safe)
 
 
 def add_watermark(input_path: str, job=None) -> str | bool:
