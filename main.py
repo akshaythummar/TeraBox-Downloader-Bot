@@ -4768,15 +4768,21 @@ bot.start(bot_token=BOT_TOKEN)
 log.info("Bot is running!")
 
 try:
-    # Warm Telethon's entity cache for every chat the bot is in — on a brand
-    # new/fresh session (no prior interaction history) Telethon can't resolve
-    # a bare channel ID into a full peer (it needs the access_hash, which is
-    # only learned by seeing the channel in a dialog list). Without this,
-    # every upload targeting PRIVATE_CHAT_ID fails with "Could not find the
-    # input entity" — invisible on a long-lived session that's already seen
-    # it, guaranteed on every fresh boot otherwise.
-    bot.loop.run_until_complete(bot.get_dialogs())
-    log.info("Entity cache warmed (dialogs loaded)")
+    # Warm Telethon's entity cache for the storage channel — on a brand new
+    # session (no prior interaction history) Telethon can't resolve a bare
+    # channel ID into a full peer without this. Without it, every upload
+    # targeting PRIVATE_CHAT_ID fails with "Could not find the input entity"
+    # — invisible on a long-lived session that's already seen it, guaranteed
+    # on every fresh boot otherwise.
+    #
+    # get_dialogs() would be the obvious call, but Telegram flatly rejects
+    # GetDialogsRequest for ALL bot accounts ("API access for bot users is
+    # restricted") — confirmed live. get_entity() uses a different RPC
+    # (channels.GetChannels with a "min" input) that bots ARE allowed to use
+    # for channels they're a member/admin of — verified working on a
+    # genuinely fresh session.
+    bot.loop.run_until_complete(bot.get_entity(PRIVATE_CHAT_ID))
+    log.info("Entity cache warmed (storage channel resolved)")
 except Exception as e:
     log.warning(f"Could not warm entity cache: {e}")
 

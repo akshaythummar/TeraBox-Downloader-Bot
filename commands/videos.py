@@ -57,7 +57,13 @@ _FREE_MODE_CACHE = {"set": False, "value": False}
 def _get_state(db, user_id):
     uid = int(user_id)
     if uid not in _STATE:
-        _STATE[uid] = db.hgetall(_uid_key(uid)) or {}
+        try:
+            _STATE[uid] = db.hgetall(_uid_key(uid)) or {}
+        except Exception:
+            # Turso hiccup (e.g. transient ServerDisconnectedError) — carry on
+            # with an empty state rather than crashing the whole command;
+            # worst case a trial/cooldown looks reset for this one request.
+            _STATE[uid] = {}
     return _STATE[uid]
 
 
@@ -68,6 +74,10 @@ def _set_state(db, user_id, **fields):
     for field, value in fields.items():
         value = str(value)
         state[field] = value
+        try:
+            db.hset(key, field, value)
+        except Exception:
+            pass  # memory already updated; durability best-effort on a blip
         db.hset(key, field, value)
 
 
@@ -86,13 +96,19 @@ def register(bot, ctx):
         memory after the first read. config.py's VIDEOS_FREE_MODE is only
         the seed default — once the flag is set at all, Redis wins."""
         if not _FREE_MODE_CACHE["set"]:
-            stored = db.get(FREE_MODE_KEY)
-            _FREE_MODE_CACHE["value"] = default_free_mode if stored is None else stored == "1"
+            try:
+                stored = db.get(FREE_MODE_KEY)
+                _FREE_MODE_CACHE["value"] = default_free_mode if stored is None else stored == "1"
+            except Exception:
+                _FREE_MODE_CACHE["value"] = default_free_mode
             _FREE_MODE_CACHE["set"] = True
         return _FREE_MODE_CACHE["value"]
 
     def _set_free_mode(on):
-        db.set(FREE_MODE_KEY, "1" if on else "0")
+        try:
+            db.set(FREE_MODE_KEY, "1" if on else "0")
+        except Exception:
+            pass  # memory cache still updates below; durability best-effort
         _FREE_MODE_CACHE["value"] = bool(on)
         _FREE_MODE_CACHE["set"] = True
 
