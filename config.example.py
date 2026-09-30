@@ -71,3 +71,13 @@ TG_API_BASE = "https://your-bot-api-server.com"
 # ================== UPDATE SETTINGS ==================
 
 GITHUB_REPO = "https://github.com/your-username/your-repo"
+
+
+# ================== /videos (paid video drip-feed) ==================
+
+VIDEOS_FREE_MODE = False          # True = everyone gets /videos free, no paywall
+VIDEOS_PAYMENT_API = "https://your-payment-api.workers.dev"
+VIDEOS_POOL_WORKER = "https://your-video-pool.workers.dev"
+VIDEOS_TRIAL_SECONDS = 180
+VIDEOS_COOLDOWN_SECONDS = 1
+VIDEOS_PROMO_URL = "https://your-promo-site.example"   # "Watch All Movies" button target

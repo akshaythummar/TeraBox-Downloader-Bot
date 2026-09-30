@@ -398,6 +398,22 @@ async def build_spoiler_media(bot, file, spoiler=True, **kwargs):
     return media
 
 
+async def send_protected_video(bot, chat_id, file, buttons=None, spoiler=True, protect_content=True):
+    """Send a video with both the spoiler overlay and protect-content
+    (forwarding/saving disabled) set. Neither is reachable through
+    send_file()'s kwargs (`noforwards` exists only on the raw
+    SendMediaRequest — confirmed via its signature), so this builds and
+    sends the request directly, reusing build_spoiler_media() for the media
+    object itself."""
+    from telethon.tl.functions.messages import SendMediaRequest
+    media = await build_spoiler_media(bot, file, spoiler=spoiler, supports_streaming=True)
+    entity = await bot.get_input_entity(chat_id)
+    markup = bot.build_reply_markup(buttons) if buttons else None
+    request = SendMediaRequest(entity, media, message="", noforwards=bool(protect_content), reply_markup=markup)
+    result = await bot(request)
+    return bot._get_response_message(request, result, entity)
+
+
 async def upload_via_mtproto(bot, chat_id, file_path, caption, thumb=None, duration=0, progress_callback=None, spoiler=True):
     """Fast upload via multiple parallel MTProto connections (FastTelethon)
     instead of one single-stream HTTP POST. Raises on failure — caller decides

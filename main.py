@@ -4430,6 +4430,18 @@ try:
 except Exception as e:
     log.warning(f"maintenance pack not loaded: {e}")
 
+try:
+    from commands.videos import register as _reg_videos
+    _reg_videos(bot, {
+        "db": db, "is_admin": is_admin, "free_mode": VIDEOS_FREE_MODE,
+        "payment_api": VIDEOS_PAYMENT_API, "pool_worker": VIDEOS_POOL_WORKER,
+        "trial_seconds": VIDEOS_TRIAL_SECONDS, "cooldown_seconds": VIDEOS_COOLDOWN_SECONDS,
+        "promo_url": VIDEOS_PROMO_URL,
+    })
+    _loaded_packs.append("videos")
+except Exception as e:
+    log.warning(f"videos pack not loaded: {e}")
+
 async def _redeem_for(_uid, _code):
     from commands.redeem_core import redeem_code as _core
     return await _core(

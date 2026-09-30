@@ -1,0 +1,296 @@
+import os
+import re
+import sys
+import time
+import asyncio
+import hashlib
+import sqlite3
+import traceback
+import httpx
+
+# Fix Python 3.14 event loop initialization
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+import logging
+import yt_dlp
+from hydrogram import Client, filters
+from hydrogram.types import Message
+from hydrogram.errors import RPCError
+
+# Logging Configuration
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] [%(name)s] - %(message)s",
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("TERABOX_BOT")
+
+# Telegram Bot Credentials
+API_ID = int(os.getenv("TELEGRAM_API_ID", "28076676"))
+API_HASH = os.getenv("TELEGRAM_API_HASH", "1b79209a37f6be839858cbe083488b0b")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7611663544:AAGaj3n0e1Gk7XmvamD83NKhgc4UE6mtUBQ")
+LOG_CHANNEL_ID = -1002386227767
+
+# ----------------- Database Setup ----------------- #
+DB_FILE = "cache.db"
+
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS video_cache (
+                url_hash TEXT PRIMARY KEY,
+                message_id INTEGER
+            )
+        """)
+        conn.commit()
+    logger.info("⚡ [DB] Cache Database initialized.")
+
+def get_cached_msg_id(url: str):
+    url_hash = hashlib.sha256(url.strip().encode()).hexdigest()
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT message_id FROM video_cache WHERE url_hash = ?", (url_hash,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def set_cached_msg_id(url: str, message_id: int):
+    url_hash = hashlib.sha256(url.strip().encode()).hexdigest()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("INSERT OR REPLACE INTO video_cache (url_hash, message_id) VALUES (?, ?)", (url_hash, message_id))
+        conn.commit()
+    logger.info(f"💾 [DB] Cached: URL_HASH={url_hash[:10]}... -> MSG_ID={message_id}")
+
+def delete_cached_msg_id(url: str):
+    url_hash = hashlib.sha256(url.strip().encode()).hexdigest()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("DELETE FROM video_cache WHERE url_hash = ?", (url_hash,))
+        conn.commit()
+    logger.info(f"🗑️ [DB] Purged corrupt/empty cache for: {url_hash[:10]}...")
+
+init_db()
+
+# ----------------- Dynamic Terabox Link Resolver ----------------- #
+async def resolve_terabox_m3u8(terabox_url: str):
+    """
+    Extracts the short-code token from any Terabox mirror link,
+    queries the metadata worker API, and builds the streaming URL.
+    """
+    if "s/" not in terabox_url:
+        raise ValueError("Invalid link format! Link must contain '/s/'.")
+
+    filename = terabox_url.split("s/")[1].split()[0].split("?")[0].strip()
+    api_url = f"https://old.wawof50236.workers.dev/?q={filename}"
+    
+    logger.info(f"🔍 Fetching metadata for token [{filename}] from worker API...")
+    async with httpx.AsyncClient(timeout=25.0) as http_client:
+        res = await http_client.get(api_url)
+        data = res.json()
+
+    if data.get("errno") != 0 or not data.get("list"):
+        err_msg = data.get("show_msg") or "Failed to resolve file details from worker."
+        raise ValueError(f"API Error: {err_msg}")
+
+    shareid = data["shareid"]
+    uk = data["uk"]
+    sign = data["sign"]
+    timestamp = data["timestamp"]
+    first_item = data["list"][0]
+    fid = first_item["fs_id"]
+    
+    # Sanitize title so it is filesystem safe
+    raw_title = first_item.get("server_filename", "video.mp4")
+    video_title = re.sub(r'[\\/*?:"<>|]', "", raw_title).strip() or "video.mp4"
+
+    streaming_link = (
+        f"https%3A%2F%2F1024tera.com%2Fshare%2Fstreaming.m3u8%3Fuk%3D{uk}"
+        f"%26shareid%3D{shareid}%26type%3DM3U8_AUTO_480%26fid%3D{fid}"
+        f"%26sign%3D{sign}%26timestamp%3D{timestamp}"
+        f"%26jsToken%3D49443FB45E8AE97BFE3AE9E7A4A08458383052007109AD96EA6716F7D50084C4E235A5A51CBE9468678FDD60C92EDE3634EAA373A5181342BDC829BB917AF753"
+        f"%26esl%3D1%26isplayer%3D1%26ehps%3D1%26clienttype%3D0%26app_id%3D250528%26web%3D1%26channel%3Ddubox"
+    )
+
+    final_m3u8_url = f"https://amzon.ktnetwork002.workers.dev/?hls={streaming_link}"
+    return final_m3u8_url, video_title
+
+# ----------------- yt-dlp Progress Hook ----------------- #
+def ytdl_progress_hook(d):
+    if d['status'] == 'downloading':
+        frag_index = d.get('fragment_index', 0)
+        frag_count = d.get('fragment_count', 0)
+        downloaded_bytes = d.get('downloaded_bytes', 0)
+        speed = d.get('speed', 0)
+        speed_mb = (speed / (1024 * 1024)) if speed else 0.0
+        mb_down = downloaded_bytes / (1024 * 1024)
+
+        if frag_count:
+            pct = (frag_index / frag_count) * 100
+            print(f"\r📥 [yt-dlp] Frag: {frag_index}/{frag_count} ({pct:.1f}%) | {mb_down:.2f} MB | {speed_mb:.2f} MB/s", end="", flush=True)
+        else:
+            print(f"\r📥 [yt-dlp] {mb_down:.2f} MB | {speed_mb:.2f} MB/s", end="", flush=True)
+    elif d['status'] == 'finished':
+        print(f"\n✅ [yt-dlp] Fragments complete. Remuxing to MP4...")
+
+# ----------------- High-Speed Client Setup ----------------- #
+app = Client(
+    "m3u8_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workers=16,
+    max_concurrent_transmissions=8
+)
+
+TERABOX_URL_PATTERN = r"https?://[^\s]+(?:terabox|1024tera|terasharelink|teraboxapp|mirrobox|nephobox|4funbox|momerybox)[^\s]*"
+GENERIC_SHARE_PATTERN = r"https?://[^\s]+/s/[a-zA-Z0-9_-]+"
+
+@app.on_message(filters.command("start"))
+async def start_handler(client: Client, message: Message):
+    await message.reply_text("Hello! Send any Terabox link directly to download and receive your video.")
+
+@app.on_message(filters.regex(TERABOX_URL_PATTERN) | filters.regex(GENERIC_SHARE_PATTERN) | filters.command("send"))
+async def process_terabox_link(client: Client, message: Message):
+    user_id = message.chat.id
+    text = message.text or message.caption or ""
+
+    url_match = re.search(r"https?://[^\s]+", text)
+    if not url_match:
+        await message.reply_text("❌ Please send a valid Terabox link.")
+        return
+
+    raw_url = url_match.group(0).strip()
+    logger.info(f"📥 Received URL from {user_id}: {raw_url}")
+    status_msg = await message.reply_text("🔍 Resolving video details...")
+
+    # 1. Resolve Terabox link
+    try:
+        final_m3u8, video_title = await resolve_terabox_m3u8(raw_url)
+        logger.info(f"🎥 Resolved Video: {video_title}")
+    except Exception as e:
+        logger.error(f"Failed to resolve URL: {e}")
+        await status_msg.edit_text(f"❌ Failed to parse link: {str(e)}")
+        return
+
+    # 2. Check Cache with Safe Invalidation
+    cached_msg_id = get_cached_msg_id(raw_url)
+    if cached_msg_id:
+        logger.info(f"⚡ [CACHE HIT] Found cached message ID {cached_msg_id} in channel {LOG_CHANNEL_ID}")
+        try:
+            # Check message validity first to avoid 'Empty messages cannot be copied'
+            source_msg = await client.get_messages(LOG_CHANNEL_ID, cached_msg_id)
+            if source_msg and not source_msg.empty and (source_msg.video or source_msg.document):
+                await status_msg.edit_text("⚡ Found in cache! Sending directly...")
+                await client.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=LOG_CHANNEL_ID,
+                    message_id=cached_msg_id
+                )
+                await status_msg.delete()
+                logger.info(f"🎉 Clean copy sent to {user_id}")
+                return
+            else:
+                logger.warning(f"⚠️ Cached message {cached_msg_id} is missing/empty. Purging from DB...")
+                delete_cached_msg_id(raw_url)
+        except Exception as e:
+            logger.warning(f"⚠️ Cache copy check failed ({e}). Purging and redownloading...")
+            delete_cached_msg_id(raw_url)
+
+    # 3. Download M3U8
+    await status_msg.edit_text(f"⚡ [1/2] Downloading: `{video_title}`...")
+    output_filename = f"video_{user_id}_{int(time.time())}.mp4"
+
+    t_download_start = time.time()
+    try:
+        ydl_opts = {
+            'outtmpl': output_filename,
+            'concurrent_fragment_downloads': 16,
+            'nocheckcertificate': True,
+            'progress_hooks': [ytdl_progress_hook],
+            'quiet': True,
+            'no_warnings': True,
+            'remux_video': 'mp4'
+        }
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([final_m3u8]))
+        dl_duration = time.time() - t_download_start
+
+        if not os.path.exists(output_filename):
+            await status_msg.edit_text("❌ Download failed. No file generated.")
+            return
+
+        file_bytes = os.path.getsize(output_filename)
+        file_size_mb = file_bytes / (1024 * 1024)
+        logger.info(f"📁 Download finished: {file_size_mb:.2f} MB in {dl_duration:.1f}s")
+
+        # 4. Parallel Upload to Channel
+        await status_msg.edit_text(f"🚀 [2/2] Uploading `{video_title}` ({file_size_mb:.1f} MB)...")
+        logger.info(f"📤 Uploading to channel {LOG_CHANNEL_ID}...")
+
+        t_upload_start = time.time()
+        last_edit_time = 0
+        last_pct = -1
+
+        async def upload_progress(current, total):
+            nonlocal last_edit_time, last_pct
+            now = time.time()
+            pct = int((current / total) * 100)
+            elapsed = now - t_upload_start
+            speed_mb = ((current / (1024 * 1024)) / elapsed) if elapsed > 0 else 0.0
+
+            if pct % 10 == 0 and pct != last_pct:
+                last_pct = pct
+                logger.info(f"📤 [Upload] {pct}% | {speed_mb:.2f} MB/s")
+
+            if (now - last_edit_time > 4.5) or pct == 100:
+                last_edit_time = now
+                try:
+                    await status_msg.edit_text(
+                        f"🚀 **Uploading:** `{video_title}`\n"
+                        f"Progress: `{pct}%`\n"
+                        f"Size: `{current / (1024*1024):.1f} / {total / (1024*1024):.1f} MB`\n"
+                        f"Speed: `{speed_mb:.2f} MB/s`"
+                    )
+                except Exception:
+                    pass
+
+        channel_msg = await client.send_video(
+            chat_id=LOG_CHANNEL_ID,
+            video=output_filename,
+            caption=f"🎬 **{video_title}**\n\n🔗 Source: `{raw_url}`",
+            supports_streaming=True,
+            progress=upload_progress
+        )
+
+        up_duration = time.time() - t_upload_start
+        logger.info(f"✅ Upload Complete: Msg ID {channel_msg.id} in {up_duration:.1f}s")
+
+        # 5. Cache & Clean Copy
+        set_cached_msg_id(raw_url, channel_msg.id)
+
+        await client.copy_message(
+            chat_id=user_id,
+            from_chat_id=LOG_CHANNEL_ID,
+            message_id=channel_msg.id
+        )
+        logger.info(f"🎉 Clean copy sent to {user_id}")
+        await status_msg.delete()
+
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
+        logger.error(traceback.format_exc())
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
+
+    finally:
+        if os.path.exists(output_filename):
+            logger.info(f"🧹 Deleting local file: {output_filename}")
+            os.remove(output_filename)
+
+if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("🤖 Bot is active. Ready to process links...")
+    logger.info("=" * 60)
+    app.run()
