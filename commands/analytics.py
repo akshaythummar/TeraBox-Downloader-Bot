@@ -11,6 +11,8 @@ import time
 import aiohttp
 from telethon import events
 
+import tools as _tools_mod
+
 STATS_KEY = "bot_stats"
 USER_STATS_PREFIX = "user_stats_"
 CUSTOM_TAGS_KEY = "custom_tags"
@@ -308,7 +310,7 @@ def register(bot, ctx):
     async def _errors(m):
         n = int(m.pattern_match.group(1) or 15)
         errs = await asyncio.get_event_loop().run_in_executor(
-            None, get_recent_errors, log_path, n)
+            _tools_mod.EXECUTOR, get_recent_errors, log_path, n)
         if not errs:
             return await m.reply("No errors found in log.")
         txt = "\n".join(errs)[-3000:]

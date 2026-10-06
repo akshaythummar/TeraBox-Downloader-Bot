@@ -44,6 +44,17 @@ from tools import (
     PHOTO_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
 )
+import tools as _tools_mod
+
+# Replace tools.py's default-sized shared thread pool with one sized from
+# config — see tools.py's EXECUTOR docstring for why this matters (the
+# alternative, asyncio's own auto-sized default executor, is shared by every
+# blocking call in the whole process and can be as small as 5-6 workers on a
+# constrained host).
+import concurrent.futures as _cf
+_tools_mod.EXECUTOR = _cf.ThreadPoolExecutor(
+    max_workers=int(globals().get("THREAD_POOL_WORKERS", 32) or 32), thread_name_prefix="iobound"
+)
 
 bot = TelegramClient("tele", API_ID, API_HASH)
 
@@ -119,7 +130,7 @@ CUSTOM_TAGS_KEY = "custom_tags"        # Redis HASH — user_id → custom tag
 GC_USED_KEY = "gc_used"                # Redis HASH — code → "user_id:timestamp:days"
 MAX_FILES_PER_REQUEST = 10
 DOWNLOAD_COOLDOWN_SECONDS = 10
-PARALLEL_DOWNLOADS = 5
+PARALLEL_DOWNLOADS = 150  # 48-core/189GB box, mostly I/O-bound work — tune live via /config
 WATERMARK_ENABLED = False  # ponytail: temporarily off, re-encode was slowing downloads. Flip to True to re-enable.
 download_semaphore = asyncio.Semaphore(PARALLEL_DOWNLOADS)
 
@@ -345,10 +356,14 @@ def is_maintenance():
     return result
 
 
-def check_cooldown(user_id):
-    """Check if user is on cooldown. Returns remaining seconds or 0."""
+async def check_cooldown(user_id):
+    """Check if user is on cooldown. Returns remaining seconds or 0.
+
+    Routed through the shared executor — a direct db.get() here blocks the
+    whole bot's event loop on every single incoming link under concurrent load."""
     try:
-        last = db.get(f"{COOLDOWN_KEY}_{user_id}")
+        last = await asyncio.get_event_loop().run_in_executor(
+            _tools_mod.EXECUTOR, db.get, f"{COOLDOWN_KEY}_{user_id}")
         if not last:
             return 0
         elapsed = time.time() - float(last)
@@ -359,9 +374,12 @@ def check_cooldown(user_id):
     return 0
 
 
-def set_cooldown(user_id):
+async def set_cooldown(user_id):
     """Set download cooldown for user."""
-    db.set(f"{COOLDOWN_KEY}_{user_id}", time.time(), ex=DOWNLOAD_COOLDOWN_SECONDS + 5)
+    await asyncio.get_event_loop().run_in_executor(
+        _tools_mod.EXECUTOR,
+        lambda: db.set(f"{COOLDOWN_KEY}_{user_id}", time.time(), ex=DOWNLOAD_COOLDOWN_SECONDS + 5),
+    )
 
 
 try:
@@ -392,15 +410,22 @@ def _edits_paused():
 
 
 def _record_dl(uid, size, link, ok=True):
-    """Stats hook: analytics pack when loaded, minimal fallback otherwise."""
-    try:
-        fn = globals().get("_track_dl")
-        if callable(fn):
-            fn(db, uid, size, link, ok)
-        elif ok:
-            db.hincrby(f"user_stats_{uid}", "total", 1)
-    except Exception:
-        pass
+    """Stats hook: analytics pack when loaded, minimal fallback otherwise.
+
+    Dispatched to the shared executor — nobody awaits the result, and a
+    Turso round trip here would otherwise block the whole bot's single
+    event loop on every single download (hundreds of these under
+    concurrent load)."""
+    def _run():
+        try:
+            fn = globals().get("_track_dl")
+            if callable(fn):
+                fn(db, uid, size, link, ok)
+            elif ok:
+                db.hincrby(f"user_stats_{uid}", "total", 1)
+        except Exception:
+            pass
+    _tools_mod.EXECUTOR.submit(_run)
 
 # Define /info and /id commands to display user information
 @bot.on(
@@ -2210,25 +2235,30 @@ async def handle_message(m: Message):
 
     # Anti-spam cooldown check (skip for premium/admin)
     if not is_premium and not is_admin(m.sender_id):
-        cooldown = check_cooldown(m.sender_id)
+        cooldown = await check_cooldown(m.sender_id)
         if cooldown > 0:
             return await m.reply(f"⏳ Please wait **{cooldown} seconds** before downloading again.")
 
-    # Track active-today / member-since / new-user in one round trip
-    today_key = f"active_{time.strftime('%Y-%m-%d')}"
-    user_set_key = "all_known_users"
-    try:
-        is_first_today, is_new_user = db.track_activity(
-            today_key, f"member_since:{m.sender_id}", time.strftime("%Y-%m-%d"),
-            user_set_key, m.sender_id,
-        )
-        if is_first_today:
-            db.expire(today_key, 86400)
-        if is_new_user:
-            db.sadd(user_set_key, str(m.sender_id))
-            db.hincrby(STATS_KEY, "total_users", 1)
-    except Exception:
-        pass
+    # Track active-today / member-since / new-user in one round trip.
+    # Fire-and-forget on the shared executor — pure stats bookkeeping that
+    # nothing downstream depends on, and a sync Turso call here would
+    # otherwise block the whole bot's event loop on every single message.
+    def _track_activity(_uid=m.sender_id):
+        today_key = f"active_{time.strftime('%Y-%m-%d')}"
+        user_set_key = "all_known_users"
+        try:
+            is_first_today, is_new_user = db.track_activity(
+                today_key, f"member_since:{_uid}", time.strftime("%Y-%m-%d"),
+                user_set_key, _uid,
+            )
+            if is_first_today:
+                db.expire(today_key, 86400)
+            if is_new_user:
+                db.sadd(user_set_key, str(_uid))
+                db.hincrby(STATS_KEY, "total_users", 1)
+        except Exception:
+            pass
+    _tools_mod.EXECUTOR.submit(_track_activity)
 
     # Force join check — channels
     for ch in FORCE_CHANNELS:
@@ -2247,12 +2277,14 @@ async def handle_message(m: Message):
         buttons=[[Button.inline("❌ Cancel", data="jobx_tap")]],
     )
 
-    count = db.get(f"check_{m.sender_id}")
+    count = await asyncio.get_event_loop().run_in_executor(
+        _tools_mod.EXECUTOR, db.get, f"check_{m.sender_id}")
 
     # Free user rate limit: 10 downloads per hour
     if not is_premium and not is_admin(m.sender_id):
         if count and int(count) >= 10:
-            ttl = db.ttl(f"check_{m.sender_id}")
+            ttl = await asyncio.get_event_loop().run_in_executor(
+                _tools_mod.EXECUTOR, db.ttl, f"check_{m.sender_id}")
             ttl_text = convert_seconds(ttl) if ttl and ttl > 0 else "1 hour"
             return await hm.edit(
                 f"You've reached your limit (10 videos/hour).\n"
@@ -2280,14 +2312,14 @@ async def handle_message(m: Message):
 
     # Set cooldown after successful API call (skip for premium/admin)
     if not is_premium and not is_admin(m.sender_id):
-        set_cooldown(m.sender_id)
+        await set_cooldown(m.sender_id)
 
     # Premium users get all files, free users get only the first one
     files_to_process = files if is_premium else files[:1]
     total = len(files_to_process)
 
     # Cached forwarding — only for single-file links
-    fileid = db.get(shorturl)
+    fileid = await asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, db.get, shorturl)
     if fileid and total == 1:
         try:
             ids = [int(x) for x in str(fileid).split(",")]
@@ -2322,11 +2354,8 @@ async def handle_message(m: Message):
                         await bot.send_file(m.chat.id, file=_cached_media)
                 _record_dl(m.sender_id, 0, shorturl, True)
                 await hm.delete()
-                db.set(
-                    f"check_{m.sender_id}",
-                    int(count) + 1 if count else 1,
-                    ex=3600,
-                )
+                _tools_mod.EXECUTOR.submit(
+                    lambda: db.set(f"check_{m.sender_id}", int(count) + 1 if count else 1, ex=3600))
                 return
         except Exception as e:
             log.info(f"Cache forward failed: {e}")
@@ -2430,7 +2459,7 @@ async def handle_message(m: Message):
             try:
                 await hm.edit(f"✅ Downloaded `{data['file_name']}` — adding watermark...")
                 await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(None, add_watermark, download, _job),
+                    asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, add_watermark, download, _job),
                     timeout=120,
                 )
             except (asyncio.TimeoutError, Exception):
@@ -2452,7 +2481,7 @@ async def handle_message(m: Message):
                 ]
                 from utils.jobs import ffmpeg_run as _ffmpeg_run
                 rc, _out, _err = await asyncio.get_event_loop().run_in_executor(
-                    None, _ffmpeg_run, cmd, 180, _job)
+                    _tools_mod.EXECUTOR, _ffmpeg_run, cmd, 180, _job)
                 if rc == 0 and os.path.isfile(compressed_path):
                     os.replace(compressed_path, download)
                 else:
@@ -2473,7 +2502,7 @@ async def handle_message(m: Message):
         # Get video info (with fallback for thumbnail/duration)
         try:
             vinfo = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, get_video_info, download),
+                asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, get_video_info, download),
                 timeout=15,
             )
         except (asyncio.TimeoutError, Exception):
@@ -2553,19 +2582,23 @@ async def handle_message(m: Message):
         log.info(f"download={upload_start - start_time:.1f}s upload={time.time() - upload_start:.1f}s")
 
         if sent_id:
-            if shorturl:
-                existing = db.get(shorturl)
-                if existing:
-                    db.set(shorturl, f"{existing},{sent_id}")
-                else:
-                    db.set(shorturl, sent_id)
-            try:
-                if callable(globals().get("_lib_index")):
-                    globals()["_lib_index"](db, sent_id, data["file_name"],
-                                            get_formatted_size(file_size),
-                                            file_size)
-            except Exception:
-                pass
+            # Fire-and-forget: shorturl cache + library index are pure
+            # bookkeeping nothing downstream of this request depends on.
+            def _post_deliver_cache(_shorturl=shorturl, _sent_id=sent_id,
+                                     _fname=data["file_name"], _fsize=file_size):
+                if _shorturl:
+                    try:
+                        existing = db.get(_shorturl)
+                        db.set(_shorturl, f"{existing},{_sent_id}" if existing else _sent_id)
+                    except Exception:
+                        pass
+                try:
+                    if callable(globals().get("_lib_index")):
+                        globals()["_lib_index"](db, _sent_id, _fname,
+                                                get_formatted_size(_fsize), _fsize)
+                except Exception:
+                    pass
+            _tools_mod.EXECUTOR.submit(_post_deliver_cache)
 
             fwd_kwargs = dict(
                 from_peer=PRIVATE_CHAT_ID, id=[sent_id], to_peer=m.chat.id,
@@ -2622,17 +2655,26 @@ async def handle_message(m: Message):
             release_inflight(db, shorturl)
             unregister_job(db, m.sender_id, _job["id"])
             import json as _json
-            history_entry = _json.dumps({
-                "file": data["file_name"], "size": get_formatted_size(file_size),
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            existing_history = db.get(f"history_{m.sender_id}")
-            history_list = _json.loads(existing_history) if existing_history else []
-            history_list.append(history_entry)
-            if len(history_list) > 50:
-                history_list = history_list[-50:]
-            db.set(f"history_{m.sender_id}", _json.dumps(history_list), ex=2592000)
-            db.set(f"check_{m.sender_id}", int(count) + 1 if count else 1, ex=3600)
+            def _post_deliver_history(_uid=m.sender_id, _fname=data["file_name"],
+                                       _fsize=file_size, _count=count):
+                try:
+                    entry = _json.dumps({
+                        "file": _fname, "size": get_formatted_size(_fsize),
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                    existing_history = db.get(f"history_{_uid}")
+                    history_list = _json.loads(existing_history) if existing_history else []
+                    history_list.append(entry)
+                    if len(history_list) > 50:
+                        history_list = history_list[-50:]
+                    db.set(f"history_{_uid}", _json.dumps(history_list), ex=2592000)
+                except Exception:
+                    pass
+                try:
+                    db.set(f"check_{_uid}", int(_count) + 1 if _count else 1, ex=3600)
+                except Exception:
+                    pass
+            _tools_mod.EXECUTOR.submit(_post_deliver_history)
 
     # ---- Multi-file (premium): parallel downloads, send as ready ----
     else:
@@ -2726,7 +2768,7 @@ async def handle_message(m: Message):
                 if WATERMARK_ENABLED and fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
                     try:
                         await asyncio.wait_for(
-                            asyncio.get_event_loop().run_in_executor(None, add_watermark, download, _mjob),
+                            asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, add_watermark, download, _mjob),
                             timeout=120,
                         )
                     except (asyncio.TimeoutError, Exception):
@@ -2751,7 +2793,7 @@ async def handle_message(m: Message):
 
                 try:
                     vinfo = await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(None, get_video_info, download),
+                        asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, get_video_info, download),
                         timeout=30,
                     )
                 except (asyncio.TimeoutError, Exception):
@@ -2801,19 +2843,21 @@ async def handle_message(m: Message):
                 done_count += 1
                 if sent_id:
                     sent_count += 1
-                    if shorturl:
-                        existing = db.get(shorturl)
-                        if existing:
-                            db.set(shorturl, f"{existing},{sent_id}")
-                        else:
-                            db.set(shorturl, sent_id)
-                    try:
-                        if callable(globals().get("_lib_index")):
-                            globals()["_lib_index"](db, sent_id, data["file_name"],
-                                                    get_formatted_size(file_size),
-                                                    file_size)
-                    except Exception:
-                        pass
+                    def _post_deliver_cache(_shorturl=shorturl, _sent_id=sent_id,
+                                             _fname=data["file_name"], _fsize=file_size):
+                        if _shorturl:
+                            try:
+                                existing = db.get(_shorturl)
+                                db.set(_shorturl, f"{existing},{_sent_id}" if existing else _sent_id)
+                            except Exception:
+                                pass
+                        try:
+                            if callable(globals().get("_lib_index")):
+                                globals()["_lib_index"](db, _sent_id, _fname,
+                                                        get_formatted_size(_fsize), _fsize)
+                        except Exception:
+                            pass
+                    _tools_mod.EXECUTOR.submit(_post_deliver_cache)
 
                     fwd_kwargs = dict(
                         from_peer=PRIVATE_CHAT_ID, id=[sent_id], to_peer=m.chat.id,
@@ -2843,20 +2887,23 @@ async def handle_message(m: Message):
 
                     _record_dl(m.sender_id, file_size, shorturl, True)
                     unregister_job(db, m.sender_id, _mjob["id"])
-                    try:
-                        import json as _json2
-                        _he = _json2.dumps({
-                            "file": data["file_name"], "size": get_formatted_size(file_size),
-                            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        })
-                        _ex = db.get(f"history_{m.sender_id}")
-                        _hl = _json2.loads(_ex) if _ex else []
-                        _hl.append(_he)
-                        if len(_hl) > 50:
-                            _hl = _hl[-50:]
-                        db.set(f"history_{m.sender_id}", _json2.dumps(_hl), ex=2592000)
-                    except Exception:
-                        pass
+                    import json as _json2
+                    def _post_deliver_history(_uid=m.sender_id, _fname=data["file_name"],
+                                               _fsize=file_size):
+                        try:
+                            _he = _json2.dumps({
+                                "file": _fname, "size": get_formatted_size(_fsize),
+                                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            })
+                            _ex = db.get(f"history_{_uid}")
+                            _hl = _json2.loads(_ex) if _ex else []
+                            _hl.append(_he)
+                            if len(_hl) > 50:
+                                _hl = _hl[-50:]
+                            db.set(f"history_{_uid}", _json2.dumps(_hl), ex=2592000)
+                        except Exception:
+                            pass
+                    _tools_mod.EXECUTOR.submit(_post_deliver_history)
                 else:
                     failed_count += 1
                     unregister_job(db, m.sender_id, _mjob["id"])
@@ -3793,7 +3840,7 @@ async def folder_download(m: UpdateNewMessage):
             if WATERMARK_ENABLED and fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
                 try:
                     await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(None, add_watermark, download, _fjob),
+                        asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, add_watermark, download, _fjob),
                         timeout=120,
                     )
                 except (asyncio.TimeoutError, Exception):
@@ -3801,7 +3848,7 @@ async def folder_download(m: UpdateNewMessage):
 
             try:
                 vinfo = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(None, get_video_info, download),
+                    asyncio.get_event_loop().run_in_executor(_tools_mod.EXECUTOR, get_video_info, download),
                     timeout=30,
                 )
             except (asyncio.TimeoutError, Exception):

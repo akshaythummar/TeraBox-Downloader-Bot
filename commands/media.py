@@ -9,6 +9,8 @@ import os as _os
 
 from telethon import Button, events
 
+import tools as _tools_mod
+
 try:
     from telethon.tl import types as _t
     _CLEAR = _t.ReplyInlineMarkup(rows=[])
@@ -145,7 +147,7 @@ def register(bot, ctx):
                 job["files"].extend([video_path, audio_path])
                 await bot.download_media(target, video_path)
                 loop = asyncio.get_event_loop()
-                has_audio = await loop.run_in_executor(None, _has_audio_sync, video_path)
+                has_audio = await loop.run_in_executor(_tools_mod.EXECUTOR, _has_audio_sync, video_path)
                 if has_audio is False:
                     try:
                         await _final_edit(msg, "❌ This file does not contain an audio track.")
@@ -156,7 +158,7 @@ def register(bot, ctx):
                 cmd = [_sh.which("ffmpeg"), "-y", "-i", video_path, "-vn",
                        "-acodec", "libmp3lame", "-ab", f"{br}k", "-ar", "44100",
                        "-map_metadata", "0", "-id3v2_version", "3", audio_path]
-                rc, _out, err = await loop.run_in_executor(None, ffmpeg_run, cmd, 600, job)
+                rc, _out, err = await loop.run_in_executor(_tools_mod.EXECUTOR, ffmpeg_run, cmd, 600, job)
                 if rc != 0 or not _os.path.isfile(audio_path):
                     try:
                         await _final_edit(msg, "❌ Audio extraction failed.")
@@ -223,7 +225,7 @@ def register(bot, ctx):
             _os.makedirs(download_dir, exist_ok=True)
             await bot.download_media(replied, tmp)
             loop = asyncio.get_event_loop()
-            _w, _h = await loop.run_in_executor(None, _probe_wh_sync, tmp)
+            _w, _h = await loop.run_in_executor(_tools_mod.EXECUTOR, _probe_wh_sync, tmp)
         except Exception:
             _w, _h = 0, 0
         finally:
@@ -291,7 +293,7 @@ def register(bot, ctx):
                 job["files"].extend([video_path, out_path])
                 await bot.download_media(target, video_path)
                 loop = asyncio.get_event_loop()
-                _w, src_h = await loop.run_in_executor(None, _probe_wh_sync, video_path)
+                _w, src_h = await loop.run_in_executor(_tools_mod.EXECUTOR, _probe_wh_sync, video_path)
                 if src_h and h > src_h:
                     try:
                         await _final_edit(msg, f"Source is {src_h}p — {h}p would upscale. Picked nothing; try a lower option.")
@@ -304,7 +306,7 @@ def register(bot, ctx):
                        "-vf", f"scale=-2:{h}", "-c:v", "libx264",
                        "-crf", str(crf), "-preset", "fast",
                        "-c:a", "aac", "-b:a", "128k", out_path]
-                rc, _out, err = await loop.run_in_executor(None, ffmpeg_run, cmd, 900, job)
+                rc, _out, err = await loop.run_in_executor(_tools_mod.EXECUTOR, ffmpeg_run, cmd, 900, job)
                 if rc != 0 or not _os.path.isfile(out_path):
                     try:
                         await _final_edit(msg, "❌ Video processing failed.")

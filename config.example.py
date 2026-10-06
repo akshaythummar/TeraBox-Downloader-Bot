@@ -25,6 +25,12 @@ DOWNLOAD_DIR = "downloads"
 # Always send videos with the spoiler (blurred) overlay
 SPOILER_VIDEOS = True
 
+# Shared thread pool size for blocking work (yt-dlp download, OpenCV probing,
+# ffmpeg, Bot-API HTTP upload) — bump this up on a beefier server so
+# multiple concurrent downloads actually run in parallel instead of queuing
+# for a free thread. Each in-flight download can use 2-3 of these at once.
+THREAD_POOL_WORKERS = 300
+
 
 # ================== ADMIN & OWNER ==================
 

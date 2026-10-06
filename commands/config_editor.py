@@ -22,7 +22,8 @@ SPECS = {
         "desc": "Cooldown between links for free users (0 = off).",
     },
     "PARALLEL_DOWNLOADS": {
-        "section": "Limits", "kind": "int", "min": 1, "max": 10,
+
+        "section": "Limits", "kind": "int", "min": 1, "max": 300,
         "desc": "How many files download at once.",
     },
     "CLEANUP_INTERVAL": {

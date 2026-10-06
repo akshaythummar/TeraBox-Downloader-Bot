@@ -1,6 +1,7 @@
 import logging
 log = logging.getLogger(__name__)
 import asyncio
+import concurrent.futures
 import os
 import re
 import shutil
@@ -13,6 +14,17 @@ import aiohttp
 import cv2
 import requests
 from telethon import TelegramClient
+
+# Shared thread pool for every blocking call (yt-dlp download, OpenCV probing,
+# ffmpeg, the Bot-API HTTP upload) across this whole bot — main.py and
+# commands/media.py both reference this same object (not asyncio's own
+# auto-sized default executor, which is min(32, cpu_count()+4): on a
+# constrained host that can be as few as 5-6 workers shared by literally
+# every blocking operation in the entire process, so 3-4 concurrent
+# downloads starve each other for a free thread instead of actually running
+# in parallel — exactly the "fails with multiple links at once" symptom.
+# main.py resizes this at boot from THREAD_POOL_WORKERS in config.py.
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=32, thread_name_prefix="iobound")
 
 
 VIDEO_EXTENSIONS = (
@@ -383,7 +395,7 @@ async def send_document_via_api(base_url, token, chat_id, file_path, caption, fi
     """Async wrapper around the Bot API upload (runs in a thread)."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, _bot_api_send, base_url, token, chat_id, file_path, caption, filename, progress_callback, loop,
+        EXECUTOR, _bot_api_send, base_url, token, chat_id, file_path, caption, filename, progress_callback, loop,
         duration, width, height, thumb, spoiler
     )
 
@@ -685,7 +697,7 @@ def _ytdlp_sync(url, filename, callback, loop):
 
 async def _download_via_ytdlp(url, filename, callback=None):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _ytdlp_sync, url, filename, callback, loop)
+    return await loop.run_in_executor(EXECUTOR, _ytdlp_sync, url, filename, callback, loop)
 
 
 async def download_file(

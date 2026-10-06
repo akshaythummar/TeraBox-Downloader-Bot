@@ -17,9 +17,51 @@ Accepted trade-off; see the plan for the async follow-up if this becomes a
 bottleneck in practice.
 """
 
+import threading
 import time
 
 import libsql_client
+
+# libsql_client's ClientSync bridges async->sync via ONE background thread
+# running ONE event loop that awaits each call to completion before pulling
+# the next off its queue (see _AsyncExecutor._run_on_loop) — every call from
+# every caller is fully serialized, regardless of how many concurrent asyncio
+# tasks/threads are calling in. Confirmed empirically: 30 "concurrent" calls
+# took the same wall time as their sum (no overlap at all). Fine at low
+# traffic; becomes the dominant bottleneck once many requests hit the DB at
+# once (e.g. 200 concurrent users). Fix: spread calls across a small pool of
+# independent clients instead of rewriting ~150 synchronous call sites.
+_POOL_SIZE = 16
+
+
+class _PooledClient:
+    def __init__(self, url, auth_token, size, **kwargs):
+        self._clients = [libsql_client.create_client_sync(url, auth_token=auth_token, **kwargs)
+                          for _ in range(size)]
+        for c in self._clients:
+            try:
+                c._executor._thread.daemon = True
+            except Exception:
+                pass
+        self._i = 0
+        self._lock = threading.Lock()
+
+    def _next(self):
+        with self._lock:
+            c = self._clients[self._i % len(self._clients)]
+            self._i += 1
+        return c
+
+    def execute(self, *a, **kw):
+        return self._next().execute(*a, **kw)
+
+    def batch(self, *a, **kw):
+        return self._next().batch(*a, **kw)
+
+    def close(self):
+        for c in self._clients:
+            c.close()
+
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, expires_at REAL)",
@@ -41,13 +83,7 @@ class TursoRedis:
         # reliably, so translate rather than make callers change their URL.
         if url.startswith("libsql://"):
             url = "https://" + url[len("libsql://"):]
-        self._c = libsql_client.create_client_sync(url, auth_token=auth_token, **kwargs)
-        try:
-            # libsql_client's sync bridge runs a non-daemon background thread —
-            # without this, an unhandled crash before close() hangs the process forever.
-            self._c._executor._thread.daemon = True
-        except Exception:
-            pass
+        self._c = _PooledClient(url, auth_token, _POOL_SIZE, **kwargs)
         for stmt in SCHEMA:
             self._c.execute(stmt)
 
