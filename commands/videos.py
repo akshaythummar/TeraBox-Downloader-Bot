@@ -9,12 +9,14 @@ Redis namespace: video_state:{uid} (hash) — trial_start_time, last_video_time,
 video_index, video_links (JSON-encoded list, refilled once exhausted).
 """
 
+import asyncio
 import json
 import time
 
 import aiohttp
 from telethon import Button, events
 
+import tools as _tools_mod
 from tools import send_protected_video
 
 
@@ -54,11 +56,12 @@ _STATE = {}
 _FREE_MODE_CACHE = {"set": False, "value": False}
 
 
-def _get_state(db, user_id):
+async def _get_state(db, user_id):
     uid = int(user_id)
     if uid not in _STATE:
         try:
-            _STATE[uid] = db.hgetall(_uid_key(uid)) or {}
+            _STATE[uid] = await asyncio.get_event_loop().run_in_executor(
+                _tools_mod.EXECUTOR, db.hgetall, _uid_key(uid)) or {}
         except Exception:
             # Turso hiccup (e.g. transient ServerDisconnectedError) — carry on
             # with an empty state rather than crashing the whole command;
@@ -67,18 +70,18 @@ def _get_state(db, user_id):
     return _STATE[uid]
 
 
-def _set_state(db, user_id, **fields):
+async def _set_state(db, user_id, **fields):
     uid = int(user_id)
-    state = _get_state(db, user_id)
+    state = await _get_state(db, user_id)
     key = _uid_key(uid)
     for field, value in fields.items():
         value = str(value)
         state[field] = value
         try:
-            db.hset(key, field, value)
+            await asyncio.get_event_loop().run_in_executor(
+                _tools_mod.EXECUTOR, db.hset, key, field, value)
         except Exception:
             pass  # memory already updated; durability best-effort on a blip
-        db.hset(key, field, value)
 
 
 def register(bot, ctx):
@@ -118,7 +121,7 @@ def register(bot, ctx):
         resp = await _api_get(f"{payment_api}/api/subscription/status/{int(user_id)}")
         if resp and resp.get("subscribed"):
             return True
-        trial_start = _get_state(db, user_id).get("trial_start_time")
+        trial_start = (await _get_state(db, user_id)).get("trial_start_time")
         if trial_start:
             try:
                 elapsed = time.time() - float(trial_start)
@@ -129,7 +132,7 @@ def register(bot, ctx):
         return False
 
     async def _next_video_link(user_id):
-        state = _get_state(db, user_id)
+        state = await _get_state(db, user_id)
         links_raw = state.get("video_links")
         index = int(state.get("video_index") or 0)
         links = json.loads(links_raw) if links_raw else []
@@ -139,8 +142,8 @@ def register(bot, ctx):
             if not links:
                 return None
             index = 0
-            _set_state(db, user_id, video_links=json.dumps(links))
-        _set_state(db, user_id, video_index=index + 1)
+            await _set_state(db, user_id, video_links=json.dumps(links))
+        await _set_state(db, user_id, video_index=index + 1)
         return links[index]
 
     async def _serve_video(chat_id, user_id, reply_target):
@@ -158,7 +161,7 @@ def register(bot, ctx):
     async def _videos(m):
         user_id = m.sender_id
 
-        last = _get_state(db, user_id).get("last_video_time")
+        last = (await _get_state(db, user_id)).get("last_video_time")
         if last:
             try:
                 pending = cooldown_seconds - (time.time() - float(last))
@@ -166,18 +169,23 @@ def register(bot, ctx):
                 pending = 0
             if pending > 0:
                 return await m.reply(f"⏳ Please wait {pending:.1f} seconds before requesting another video.")
-        _set_state(db, user_id, last_video_time=time.time())
+        await _set_state(db, user_id, last_video_time=time.time())
 
-        try:
-            await _api_post(f"{payment_api}/api/telegram/register",
-                             {"telegram_id": int(user_id), "name": (m.sender.username if m.sender else None) or "User"})
-        except Exception:
-            pass
+        # Registration is pure bookkeeping for the paywall/payment system — skip
+        # it when there's no paywall active (free mode) to cut per-click latency.
+        # Paid path (free mode off) is untouched: register + live subscription
+        # check run on every request exactly as before.
+        if not _free_mode():
+            try:
+                await _api_post(f"{payment_api}/api/telegram/register",
+                                 {"telegram_id": int(user_id), "name": (m.sender.username if m.sender else None) or "User"})
+            except Exception:
+                pass
 
         if await _has_access(user_id):
             return await _serve_video(m.chat_id, user_id, m)
 
-        trial_start = _get_state(db, user_id).get("trial_start_time")
+        trial_start = (await _get_state(db, user_id)).get("trial_start_time")
         if not trial_start or int(float(trial_start)) == 0:
             buttons = [[Button.inline("🎁 Get Free 3-Min Trial", data="vid_trial")]]
             return await m.reply(
@@ -200,7 +208,7 @@ def register(bot, ctx):
 
     @bot.on(events.CallbackQuery(data=b"vid_trial"))
     async def _vid_trial(e):
-        _set_state(db, e.sender_id, trial_start_time=time.time())
+        await _set_state(db, e.sender_id, trial_start_time=time.time())
         try:
             await e.answer("Trial activated!", alert=False)
         except Exception:
