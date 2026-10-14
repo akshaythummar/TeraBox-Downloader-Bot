@@ -1,0 +1,25 @@
+name = "terabox-stream-bot"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+# lets this worker fetch the resolver/proxy workers even if they live on the same account
+compatibility_flags = ["global_fetch_strictly_public"]
+
+[vars]
+RESOLVER = "https://old.wawof50236.workers.dev"
+HLS_PROXY = "https://amzon.ktnetwork002.workers.dev"
+OWNER_ID = "618879443"
+ADMINS = ""                   # comma-separated extra admin ids
+FORCE_CHANNELS = "@AT_BOTZ"   # comma-separated; bot must be admin there
+FREE_PER_HOUR = "10"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "terabox-bot"
+database_id = "REPLACE_WITH_D1_ID"   # from: npx wrangler d1 create terabox-bot
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_KV_ID"            # from: npx wrangler kv namespace create KV
+
+[triggers]
+crons = ["* * * * *"]                # broadcast batches + pruning
