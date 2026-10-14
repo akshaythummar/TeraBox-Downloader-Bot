@@ -292,15 +292,43 @@ def register(bot, ctx):
     @bot.on(events.NewMessage(pattern=r"^/apihealth$", incoming=True, outgoing=False,
                               func=lambda m: is_admin(m.sender_id)))
     async def _apihealth(m):
-        res = await check_api_health(api_templates, timeout=10)
-        if not res:
-            return await m.reply("No API templates configured.")
-        lines = ["**API Health**", ""]
-        for name, r in res.items():
-            state = r.get("state", "UP" if r["ok"] else "DOWN")
-            lines.append(f"{state} **{name}**: ok={r['ok']} "
-                         f"status={r['status']} {r['latency_ms']}ms")
-        lines += ["", "_UP = healthy | REACHABLE = server alive (probe link rejected) | DOWN = failing_"]
+        # Load balancer stats
+        get_balancer = ctx.get("get_balancer")
+        lb = get_balancer() if callable(get_balancer) else None
+
+        lines = ["**API Load Balancer**", ""]
+
+        if lb:
+            stats = lb.stats()
+            for s in stats:
+                icon = "🟢" if s["healthy"] else "🔴"
+                circuit = f" ⚡CIRCUIT OPEN ({s['circuit_remaining_s']}s)" if s["circuit_open"] else ""
+                lines.append(
+                    f"{icon} **{s['name']}**{circuit}\n"
+                    f"   `{s['success_rate']}` success | "
+                    f"{s['avg_latency_ms']}ms avg | "
+                    f"{s['total']} requests"
+                )
+            lines.append(f"\n📊 **Active:** {lb.active_count()}/{len(lb.endpoints)} endpoints")
+        else:
+            lines.append("_Load balancer not initialized_")
+
+        # Live probe ALL load balancer endpoints
+        lines.append("\n**Live Ping Test:**")
+        if lb and lb.endpoints:
+            probe_templates = {}
+            for ep in lb.endpoints:
+                probe_templates[ep.name] = ep.template
+            res = await check_api_health(probe_templates, timeout=10)
+            if res:
+                for name, r in res.items():
+                    state = r.get("state", "UP" if r["ok"] else "DOWN")
+                    lines.append(f"  {state} **{name}**: {r['latency_ms']}ms")
+            else:
+                lines.append("  _Probe failed_")
+        else:
+            lines.append("  _No endpoints configured_")
+
         await m.reply("\n".join(lines), parse_mode="markdown")
 
     @bot.on(events.NewMessage(pattern=r"^/errors(?:\s+(\d+))?", incoming=True,

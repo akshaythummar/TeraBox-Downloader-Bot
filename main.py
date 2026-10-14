@@ -23,6 +23,16 @@ from utils.jobs import (
 )
 from config import *
 from terabox import get_files, get_fallback_files
+
+# Fallback defaults if config.py is missing new variables
+if "FREE_DOWNLOAD_LIMIT" not in globals():
+    FREE_DOWNLOAD_LIMIT = 10
+if "PREMIUM_DOWNLOAD_LIMIT" not in globals():
+    PREMIUM_DOWNLOAD_LIMIT = 0
+if "MAX_FILES_PER_REQUEST" not in globals():
+    MAX_FILES_PER_REQUEST = 10
+if "DOWNLOAD_COOLDOWN_SECONDS" not in globals():
+    DOWNLOAD_COOLDOWN_SECONDS = 10
 from tools import (
     add_watermark,
     bytesio_from_file,
@@ -86,8 +96,6 @@ COOLDOWN_KEY = "download_cooldown"     # Redis STRING — user_id → timestamp
 DYNAMIC_ADMINS_KEY = "dynamic_admins"  # Redis SET — dynamically added admin IDs
 CUSTOM_TAGS_KEY = "custom_tags"        # Redis HASH — user_id → custom tag
 GC_USED_KEY = "gc_used"                # Redis HASH — code → "user_id:timestamp:days"
-MAX_FILES_PER_REQUEST = 10
-DOWNLOAD_COOLDOWN_SECONDS = 10
 PARALLEL_DOWNLOADS = 5
 WATERMARK_ENABLED = False  # ponytail: temporarily off, re-encode was slowing downloads. Flip to True to re-enable.
 download_semaphore = asyncio.Semaphore(PARALLEL_DOWNLOADS)
@@ -419,7 +427,7 @@ def _main_menu_buttons(uid):
     )
 )
 async def command_help(m: UpdateNewMessage):
-    text = WELCOME_TEXT.format(name=m.sender.first_name)
+    text = WELCOME_TEXT.format(name=m.sender.first_name, free_limit=FREE_DOWNLOAD_LIMIT)
     buttons = _main_menu_buttons(m.sender_id)
 
     await m.reply(
@@ -1019,7 +1027,7 @@ async def broadcast_message(m: UpdateNewMessage):
 # ╚═════════════════⍟
 # Do /help or /cmds - Display available commands.
 
-# [『 𝗡⋆𝗧⋆𝗠 』](https://t.me/AT_BOTZ) 
+# [『 𝗡⋆𝗧⋆𝗠 』](https://t.me/AT_BOTZ)
 # """
 #     else:
 #         # Free user
@@ -1055,7 +1063,7 @@ WELCOME_TEXT = """
 
 Simply send me a **TeraBox link** and I'll download the video for you instantly.
 
-⚡ Free: 10 downloads/hour
+⚡ Free: {free_limit} downloads/hour
 ⭐ Premium: Unlimited + no limits
 
 Choose an option below 👇
@@ -1093,10 +1101,18 @@ async def start(m: UpdateNewMessage):
 
     # Notify admins (skip when the starter is an admin themselves)
     if user_id not in get_all_admins():
-        admin_message = f"👤 New user started bot:\nName: {name}\nUsername: @{user.username or '-'}\nID: `{user_id}`"
+        # Use tg:// deep link for tap-to-contact when no username
+        username_display = f"@{user.username}" if user.username else "No username"
+        user_link = f"[{name}](tg://user?id={user_id})"
+        admin_message = (
+            f"👤 **New user started bot**\n"
+            f"Name: {user_link}\n"
+            f"Username: {username_display}\n"
+            f"ID: `{user_id}`"
+        )
         for admin_id in get_all_admins():
             try:
-                await bot.send_message(admin_id, admin_message)
+                await bot.send_message(admin_id, admin_message, parse_mode="markdown")
             except Exception:
                 pass
 
@@ -1111,7 +1127,7 @@ async def start(m: UpdateNewMessage):
             hours = (rem % 86400) // 3600
             remaining = f" ({days}d {hours}h left)"
 
-    text = WELCOME_TEXT.format(name=name)
+    text = WELCOME_TEXT.format(name=name, free_limit=FREE_DOWNLOAD_LIMIT)
 
     buttons = _main_menu_buttons(user_id)
 
@@ -1403,7 +1419,7 @@ async def cb_setlang(e):
     await e.answer(f"Language set to {lang_name}!", alert=False)
     # Refresh main menu
     user = await bot.get_entity(e.sender_id)
-    text = WELCOME_TEXT.format(name=user.first_name)
+    text = WELCOME_TEXT.format(name=user.first_name, free_limit=FREE_DOWNLOAD_LIMIT)
     buttons = _main_menu_buttons(e.sender_id)
     if is_admin(e.sender_id):
         buttons.insert(2, [Button.inline("⚙️ Admin Panel", data="menu_admin")])
@@ -1413,7 +1429,7 @@ async def cb_setlang(e):
 @bot.on(events.CallbackQuery(data=b"menu_main"))
 async def cb_main(e):
     user = await bot.get_entity(e.sender_id)
-    text = WELCOME_TEXT.format(name=user.first_name)
+    text = WELCOME_TEXT.format(name=user.first_name, free_limit=FREE_DOWNLOAD_LIMIT)
     buttons = _main_menu_buttons(e.sender_id)
     await e.edit(text, parse_mode="markdown", buttons=buttons)
 
@@ -1676,17 +1692,26 @@ async def cb_admin_broadcast(e):
     if not is_admin(e.sender_id):
         return await e.answer("Access denied!", alert=True)
 
-    text = """
-┏━━━━━━━━━━━━━━━━━⍟
-┃  📢 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-**Commands:**
-`/broadcast <message>` — Send now (owner)
-`/broadcast_legacy <message>` — Via channel (admin)
-`/announce <minutes> <msg>` — Schedule delay
-"""
-    buttons = [[Button.inline("◀️ Back", data="menu_admin")]]
+    text = (
+        "┏━━━━━━━━━━━━━━━━━⍟\n"
+        "┃  📢 **𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭 𝐂𝐞𝐧𝐭𝐞𝐫**\n"
+        "┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n"
+        "Choose broadcast type:\n\n"
+        "📝 **Text** — plain text message\n"
+        "📷 **Media** — photo or video + caption\n"
+        "🎭 **Sticker** — send a sticker\n"
+        "↩️ **Forward** — forward replied message as-is\n\n"
+        "Or use commands:\n"
+        "`/broadcast <message>` — quick text\n"
+        "Reply + `/broadcast` — forward message"
+    )
+    buttons = [
+        [Button.inline("📝 Text", data="bcast_text"),
+         Button.inline("📷 Media", data="bcast_media")],
+        [Button.inline("🎭 Sticker", data="bcast_sticker"),
+         Button.inline("↩️ Forward", data="bcast_forward")],
+        [Button.inline("◀️ Back", data="menu_admin")],
+    ]
     await e.edit(text, parse_mode="markdown", buttons=buttons)
 
 
@@ -2001,7 +2026,8 @@ _MAX_INFLIGHT_MSGS = 10
 )
 async def get_message(m: Message):
     global _INFLIGHT_MSGS
-    if _INFLIGHT_MSGS >= _MAX_INFLIGHT_MSGS:
+    # Owner bypasses server busy limit
+    if int(m.sender_id) != int(OWNER_ID) and _INFLIGHT_MSGS >= _MAX_INFLIGHT_MSGS:
         return await m.reply("⏳ Server busy — please try again in a moment.")
     _INFLIGHT_MSGS += 1
     _t = asyncio.create_task(handle_message(m))
@@ -2059,6 +2085,59 @@ async def _retry_download_via_fallback(url, data, dest, progress_bar):
         return False
 
 
+# ─── Queue Processor ───────────────────────────────────────────────
+
+async def process_next_in_queue(bot, db, user_id):
+    """Process the next queued download for a user."""
+    from utils.jobs import dequeue_download, is_queue_paused, get_queue
+    if is_queue_paused(db, user_id):
+        return
+    next_item = dequeue_download(db, user_id)
+    if not next_item:
+        return
+    url = next_item.get("url")
+    if not url:
+        return
+    # Notify user
+    try:
+        label = next_item.get('label', 'Download')
+        pos = next_item.get('position')
+        if pos is not None:
+            msg_text = f"▶️ **Starting queued download** ({label})\nPosition was: {pos}"
+        else:
+            msg_text = f"▶️ **Starting queued download** ({label})"
+        await bot.send_message(
+            user_id,
+            msg_text,
+            parse_mode="markdown",
+        )
+    except Exception:
+        pass
+    # Create a fake message object to reuse handle_message logic
+    class FakeMessage:
+        def __init__(self, uid, text):
+            self.sender_id = uid
+            self.text = text
+            self.chat_id = uid
+            self.sender = type('obj', (object,), {'first_name': 'User', 'username': ''})()
+            self.is_private = True
+            self.is_reply = False
+            self.id = 0
+
+        async def reply(self, text, **kwargs):
+            return await bot.send_message(self.chat_id, text, **kwargs)
+    fake_msg = FakeMessage(user_id, url)
+    try:
+        await handle_message(fake_msg)
+    except Exception as e:
+        log.info(f"Queue processing failed for {user_id}: {e}")
+        # Re-queue on failure
+        from utils.jobs import enqueue_download
+        from tools import extract_surl_from_url
+        surl = extract_surl_from_url(url) or url[:30]
+        enqueue_download(db, user_id, url, f"TeraBox: {surl} (retry)")
+
+
 async def _fail_single_dl(db, shorturl, hm, text, uid, job_id):
     """Failed download: notify waiters, release claim, unregister, record, edit."""
     try:
@@ -2093,10 +2172,15 @@ async def _fail_single_dl(db, shorturl, hm, text, uid, job_id):
 
 async def handle_message(m: Message):
 
-    url = get_urls_from_string(m.text)
-    if not url:
+    from tools import get_all_urls_from_string
+    urls = get_all_urls_from_string(m.text)
+    if not urls:
         from utils.errors import send_user_error as _sue
         return await _sue(m, "unsupported_link")
+
+    # Use first URL for this download, enqueue the rest
+    url = urls[0]
+    extra_urls = urls[1:] if len(urls) > 1 else []
 
     # Maintenance mode check
     if is_maintenance():
@@ -2114,6 +2198,20 @@ async def handle_message(m: Message):
         cooldown = check_cooldown(m.sender_id)
         if cooldown > 0:
             return await m.reply(f"⏳ Please wait **{cooldown} seconds** before downloading again.")
+
+    # Enqueue extra URLs
+    if extra_urls:
+        from utils.jobs import enqueue_download
+        from tools import extract_surl_from_url
+        for u in extra_urls:
+            surl = extract_surl_from_url(u) or u[:30]
+            enqueue_download(db, m.sender_id, u, f"TeraBox: {surl}")
+        if len(extra_urls) > 0:
+            await m.reply(
+                f"📥 **Added {len(extra_urls)} more link(s) to queue**\n"
+                f"Use `/queue` to view your queue.",
+                parse_mode="markdown",
+            )
 
     # Track active user today
     today_key = f"active_{time.strftime('%Y-%m-%d')}"
@@ -2144,7 +2242,33 @@ async def handle_message(m: Message):
         check_if = await is_user_on_chat(bot, gr, m.sender_id)
         if not check_if:
             return await m.reply(f"Please join {gr} then send me the link again.")
-    
+
+    # ---- Download Queue Check ----
+    from utils.jobs import get_queue, is_queue_paused, enqueue_download
+    queue = get_queue(db, m.sender_id)
+    is_paused = is_queue_paused(db, m.sender_id)
+    is_owner = (m.sender_id == OWNER_ID)
+
+    # Owner bypasses queue
+    if not is_owner and (queue or is_paused):
+        # Get all URLs from message
+        from tools import get_all_urls_from_string, extract_surl_from_url
+        urls = get_all_urls_from_string(m.text)
+        if not urls:
+            urls = [url]  # fallback to single url
+
+        from utils.jobs import enqueue_download
+        for u in urls:
+            surl = extract_surl_from_url(u) or u[:30]
+            enqueue_download(db, m.sender_id, u, f"TeraBox: {surl}")
+        pos = len(queue) + 1
+        return await m.reply(
+            f"📥 **Added to queue** (position: {pos})\n"
+            f"{'⏸️ Queue is paused.' if is_paused else '⏳ Waiting for previous downloads...'}\n\n"
+            f"Use `/queue` to view your queue.",
+            parse_mode="markdown",
+        )
+
     hm = await m.reply(
         "Sending you the media wait...",
         buttons=[[Button.inline("❌ Cancel", data="jobx_tap")]],
@@ -2152,15 +2276,18 @@ async def handle_message(m: Message):
 
     count = db.get(f"check_{m.sender_id}")
 
-    # Free user rate limit: 10 downloads per hour
-    if not is_premium and not is_admin(m.sender_id):
-        if count and int(count) >= 10:
+    # Free user rate limit (configurable)
+    # Owner and premium/admins bypass all limits
+    is_owner = (m.sender_id == OWNER_ID)
+    if not is_premium and not is_admin(m.sender_id) and not is_owner:
+        # Check for custom user limit
+        custom_limit = db.get(f"user_limit:{m.sender_id}")
+        free_limit = int(custom_limit) if custom_limit else FREE_DOWNLOAD_LIMIT
+        if count and int(count) >= free_limit:
             ttl = db.ttl(f"check_{m.sender_id}")
             ttl_text = convert_seconds(ttl) if ttl and ttl > 0 else "1 hour"
             return await hm.edit(
-                f"You've reached your limit (10 videos/hour).\n"
-                f"Try again in **{ttl_text}**.\n"
-                f"Upgrade to **Premium** for unlimited downloads."
+                t(m.sender_id, "rate_limit", limit=free_limit, time=ttl_text)
             )
 
     shorturl = extract_code_from_url(url)
@@ -2173,20 +2300,24 @@ async def handle_message(m: Message):
         from utils.errors import send_user_error as _sue
         return await _sue(hm, "api_unavailable", via="edit")
 
-    # Max files per request check
-    if len(files) > MAX_FILES_PER_REQUEST and not is_premium:
+    # Max files per request check (configurable)
+    max_files = MAX_FILES_PER_REQUEST
+    if len(files) > max_files and not is_premium and not is_owner:
         return await hm.edit(
             f"⚠️ This link has **{len(files)} files**.\n"
-            f"Free users can download max **{MAX_FILES_PER_REQUEST}** files.\n"
+            f"Free users can download max **{max_files}** files.\n"
             f"Upgrade to **Premium** for unlimited."
         )
 
-    # Set cooldown after successful API call (skip for premium/admin)
-    if not is_premium and not is_admin(m.sender_id):
+    # Set cooldown after successful API call (skip for premium/admin/owner)
+    if not is_premium and not is_admin(m.sender_id) and not is_owner:
         set_cooldown(m.sender_id)
 
-    # Premium users get all files, free users get only the first one
-    files_to_process = files if is_premium else files[:1]
+    # Premium users get all files, free users get only the first one (owner gets all)
+    if is_premium or is_owner:
+        files_to_process = files
+    else:
+        files_to_process = files[:1]
     total = len(files_to_process)
 
     # Cached forwarding — only for single-file links
@@ -2332,7 +2463,7 @@ async def handle_message(m: Message):
                     ".dav", ".hdv", ".svi", ".swf", ".amv", ".nsv",
                     ".roq", ".mng", ".ogm", ".trp", ".tp", ".pva",
                 ])
-        wm_limit = 500_000_000 if not is_premium else 200_000_000
+        wm_limit = 200_000_000  # Skip watermark for files > 200MB
         if WATERMARK_ENABLED and fname_lower.endswith(".mp4") and 10240 < file_size < wm_limit and not skip_wm:
             try:
                 await hm.edit(f"✅ Downloaded `{data['file_name']}` — adding watermark...")
@@ -2428,12 +2559,26 @@ async def handle_message(m: Message):
 
         if sent_id is None:
             try:
-                file = await bot.send_file(
-                    PRIVATE_CHAT_ID, file=download, thumb=thumbnail if thumbnail else None,
-                    progress_callback=lambda c, t: progress_bar(c, t, "Uploading"), caption=caption, video=True,
-                    supports_streaming=True, duration=vduration, attributes=[], spoiler=True,
+                file = await asyncio.wait_for(
+                    bot.send_file(
+                        PRIVATE_CHAT_ID, file=download, thumb=thumbnail if thumbnail else None,
+                        progress_callback=lambda c, t: progress_bar(c, t, "Uploading"), caption=caption, video=True,
+                        supports_streaming=True, duration=vduration, attributes=[], spoiler=True,
+                    ),
+                    timeout=300,
                 )
                 sent_id = file.id
+            except asyncio.TimeoutError:
+                log.info(f"Telethon upload timed out after 300s")
+                try:
+                    os.unlink(download)
+                except Exception:
+                    pass
+                return await _fail_single_dl(
+                    db, shorturl, hm,
+                    f"Sorry! Upload timed out but you can download it from [here]({url}).",
+                    m.sender_id, _job["id"],
+                )
             except Exception as e:
                 log.info(f"Telethon upload failed: {e}")
                 try:
@@ -2521,6 +2666,10 @@ async def handle_message(m: Message):
                         pass
             release_inflight(db, shorturl)
             unregister_job(db, m.sender_id, _job["id"])
+
+            # Process next item in queue
+            await process_next_in_queue(bot, db, m.sender_id)
+
             import json as _json
             history_entry = _json.dumps({
                 "file": data["file_name"], "size": data["size"],
@@ -2677,13 +2826,18 @@ async def handle_message(m: Message):
 
                 if sent_id is None:
                     try:
-                        file = await bot.send_file(
-                            PRIVATE_CHAT_ID, file=download, caption=caption,
-                            video=True, supports_streaming=True, spoiler=True,
-                            thumb=_mthumb if _mthumb and os.path.isfile(_mthumb) else None,
-                            progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                        file = await asyncio.wait_for(
+                            bot.send_file(
+                                PRIVATE_CHAT_ID, file=download, caption=caption,
+                                video=True, supports_streaming=True, spoiler=True,
+                                thumb=_mthumb if _mthumb and os.path.isfile(_mthumb) else None,
+                                progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                            ),
+                            timeout=300,
                         )
                         sent_id = file.id
+                    except asyncio.TimeoutError:
+                        log.info(f"Multi Telethon upload timed out after 300s")
                     except Exception as e:
                         log.info(f"Multi Telethon upload failed: {e}")
 
@@ -2988,7 +3142,8 @@ async def update_bot(m: UpdateNewMessage):
                      "commands/analytics.py", "commands/maintenance.py",
                      "commands/ux.py", "commands/redeem_core.py",
                      "commands/config_editor.py", "commands/user_status.py",
-                     "utils/tags.py", "utils/premium.py"],
+                     "commands/broadcast.py", "utils/tags.py", "utils/premium.py",
+                     "utils/loadbalancer.py"],
                     capture_output=True, text=True, cwd=cwd, timeout=30,
                 )
                 if check.returncode != 0:
@@ -3281,7 +3436,11 @@ async def admin_commands(m: UpdateNewMessage):
 /configview — View runtime config
 /configset `<KEY>` `<VALUE>` — Edit runtime config
 /configreset `<KEY>` — Reset key to default
-/configreset `<KEY>` — Reset key to default
+/setlimit `free|premium` `<n>` — Set download limit
+/maxfiles `<number>` — Set max files per request
+/setcooldown `<seconds>` — Set download cooldown
+/userlimit `<user_id>` `<n>` — Custom user limit (0 = unlimited)
+/showlimit `[user_id]` — Show current limits (or specific user)
 /setapi `<primary|fallback>` `<template>` — Rotate API live
 /reloadconfig — Reload API templates
 /backup — Full Redis snapshot
@@ -3324,6 +3483,11 @@ async def admin_commands(m: UpdateNewMessage):
 /auditlog `[count]` — View admin action log
 /maxfiles `<number>` — Set max files per request
 /setcooldown `<seconds>` — Set download cooldown
+/setlimit `free|premium` `<n>` — Set download limits
+/userlimit `<user_id>` `<n>` — Custom user limit (0 = unlimited)
+/showlimit `[user_id]` — Show current limits (or specific user)
+/config_backup — Send config.py to bot
+/set_config — Restore config.py (reply to file)
 
 **── Admin Management (Owner) ──**
 /addadmin `<user_id>` — Add new admin
@@ -3433,7 +3597,7 @@ LANG_MESSAGES = {
         "upload_fail": "Upload Failed but you can download it from {link}.",
         "unsupported": "File type `{ext}` is not supported.\nSupported: {formats}",
         "too_big": "Sorry! File is too big. I can download only 500MB and this file is of {size}.",
-        "rate_limit": "You've reached your limit (10 videos/hour).\nTry again in {time}.\nUpgrade to Premium for unlimited downloads.",
+        "rate_limit": "You've reached your limit ({limit} downloads/hour).\nTry again in {time}.\nUpgrade to Premium for unlimited downloads.",
         "join_required": "Please join {chat} then send me the link again.",
         "invalid_link": "Seems like your link is invalid.",
         "api_error": "Sorry! API is dead or maybe your link is broken.",
@@ -3453,7 +3617,7 @@ LANG_MESSAGES = {
         "upload_fail": "अपलोड असफल तर तपाईंले यहाँबाट डाउनलोड गर्न सक्नुहुन्छ: {link}",
         "unsupported": "फाइल प्रकार `{ext}` समर्थित छैन।\nसमर्थित: {formats}",
         "too_big": "खेद छ! फाइल धेरै ठूलो छ। मैले 500MB सम्म मात्र डाउनलोड गर्न सक्छु र यो फाइल {size} को छ।",
-        "rate_limit": "तपाईंको सीमा पुग्यो (१० भिडियो/घण्टा)।\n{time} मा फेरि प्रयास गर्नुहोस्।\nअसीमित डाउनलोडको लागि Premium मा अपग्रेड गर्नुहोस्।",
+        "rate_limit": "तपाईंको सीमा पुग्यो ({limit} भिडियो/घण्टा)।\n{time} मा फेरि प्रयास गर्नुहोस्।\nअसीमित डाउनलोडको लागि Premium मा अपग्रेड गर्नुहोस्।",
         "join_required": "कृपया {chat} मा सामेल हुनुहोस् र फेरि लिङ्क पठाउनुहोस्।",
         "invalid_link": "तपाईंको लिङ्क अमान्य जस्तो देखिन्छ।",
         "api_error": "खेद छ! API मृत छ वा तपाईंको लिङ्क टुटेको छ।",
@@ -3473,7 +3637,7 @@ LANG_MESSAGES = {
         "upload_fail": "अपलोड विफल लेकिन आप यहां से डाउनलोड कर सकते हैं: {link}",
         "unsupported": "फाइल प्रकार `{ext}` समर्थित नहीं है।\nसमर्थित: {formats}",
         "too_big": "माफ़ करें! फाइल बहुत बड़ी है। मैं केवल 500MB तक डाउनलोड कर सकता हूं और यह फाइल {size} की है।",
-        "rate_limit": "आपकी सीमा पूरी हो गई (10 वीडियो/घंटा)।\n{time} में फिर से प्रयास करें।\nअसीमित डाउनलोड के लिए Premium में अपग्रेड करें।",
+        "rate_limit": "आपकी सीमा पूरी हो गई ({limit} वीडियो/घंटा)।\n{time} में फिर से प्रयास करें।\nअसीमित डाउनलोड के लिए Premium में अपग्रेड करें।",
         "join_required": "कृपया {chat} में शामिल हों और फिर लिंक भेजें।",
         "invalid_link": "आपका लिंक अमान्य लगता है।",
         "api_error": "माफ़ करें! API डेड है या आपका लिंक टूटा है।",
@@ -3735,13 +3899,18 @@ async def folder_download(m: UpdateNewMessage):
 
             if sent_id is None:
                 try:
-                    file = await bot.send_file(
-                        PRIVATE_CHAT_ID, file=download, caption=caption,
-                        video=True, supports_streaming=True, spoiler=True,
-                        thumb=_fthumb if _fthumb and os.path.isfile(_fthumb) else None,
-                        progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                    file = await asyncio.wait_for(
+                        bot.send_file(
+                            PRIVATE_CHAT_ID, file=download, caption=caption,
+                            video=True, supports_streaming=True, spoiler=True,
+                            thumb=_fthumb if _fthumb and os.path.isfile(_fthumb) else None,
+                            progress_callback=lambda c, t: progress_bar(c, t, "Uploading"),
+                        ),
+                        timeout=300,
                     )
                     sent_id = file.id
+                except asyncio.TimeoutError:
+                    log.info(f"Folder Telethon upload timed out after 300s")
                 except Exception as e:
                     log.info(f"Folder Telethon upload failed: {e}")
 
@@ -4099,6 +4268,8 @@ async def view_audit_log(m: UpdateNewMessage):
 async def set_max_files(m: UpdateNewMessage):
     global MAX_FILES_PER_REQUEST
     MAX_FILES_PER_REQUEST = int(m.pattern_match.group(1))
+    import config
+    config.MAX_FILES_PER_REQUEST = MAX_FILES_PER_REQUEST
     log_audit("SET_MAX_FILES", m.sender_id, f"Set to {MAX_FILES_PER_REQUEST}")
     await m.reply(f"✅ Max files per request set to **{MAX_FILES_PER_REQUEST}**.")
 
@@ -4116,8 +4287,123 @@ async def set_max_files(m: UpdateNewMessage):
 async def set_cooldown_timer(m: UpdateNewMessage):
     global DOWNLOAD_COOLDOWN_SECONDS
     DOWNLOAD_COOLDOWN_SECONDS = int(m.pattern_match.group(1))
+    import config
+    config.DOWNLOAD_COOLDOWN_SECONDS = DOWNLOAD_COOLDOWN_SECONDS
     log_audit("SET_COOLDOWN", m.sender_id, f"Set to {DOWNLOAD_COOLDOWN_SECONDS}s")
     await m.reply(f"✅ Download cooldown set to **{DOWNLOAD_COOLDOWN_SECONDS} seconds**.")
+
+
+# ==================== /setlimit — SET DOWNLOAD LIMITS ====================
+
+@bot.on(
+    events.NewMessage(
+        pattern=r"/setlimit\s+(free|premium)\s+(\d+)",
+        incoming=True,
+        outgoing=False,
+        from_users=[OWNER_ID],
+    )
+)
+async def set_download_limit(m: UpdateNewMessage):
+    import config
+    limit_type = m.pattern_match.group(1)
+    limit_val = int(m.pattern_match.group(2))
+    if limit_type == "free":
+        global FREE_DOWNLOAD_LIMIT
+        FREE_DOWNLOAD_LIMIT = limit_val
+        config.FREE_DOWNLOAD_LIMIT = limit_val
+        log_audit("SET_FREE_LIMIT", m.sender_id, f"Set to {limit_val}")
+        await m.reply(f"✅ Free user download limit set to **{limit_val}** downloads/hour.")
+    elif limit_type == "premium":
+        global PREMIUM_DOWNLOAD_LIMIT
+        PREMIUM_DOWNLOAD_LIMIT = limit_val
+        config.PREMIUM_DOWNLOAD_LIMIT = limit_val
+        log_audit("SET_PREMIUM_LIMIT", m.sender_id, f"Set to {limit_val}")
+        if limit_val == 0:
+            await m.reply("✅ Premium user download limit set to **unlimited**.")
+        else:
+            await m.reply(f"✅ Premium user download limit set to **{limit_val}** downloads/hour.")
+
+
+# ==================== /userlimit — SET CUSTOM USER LIMIT ====================
+
+@bot.on(
+    events.NewMessage(
+        pattern=r"/userlimit\s+(\d+)\s+(\d+)",
+        incoming=True,
+        outgoing=False,
+        from_users=[OWNER_ID],
+    )
+)
+async def set_user_limit(m: UpdateNewMessage):
+    user_id = int(m.pattern_match.group(1))
+    limit_val = int(m.pattern_match.group(2))
+    db.set(f"user_limit:{user_id}", limit_val)
+    log_audit("SET_USER_LIMIT", m.sender_id, f"User {user_id} -> {limit_val}")
+    if limit_val == 0:
+        await m.reply(f"✅ User `{user_id}` download limit set to **unlimited**.")
+    else:
+        await m.reply(f"✅ User `{user_id}` download limit set to **{limit_val}** downloads/hour.")
+
+
+# ==================== /showlimit — SHOW CURRENT LIMITS ====================
+
+@bot.on(
+    events.NewMessage(
+        pattern=r"^/showlimit(?:\s+(\d+))?$",
+        incoming=True,
+        outgoing=False,
+        from_users=[OWNER_ID],
+    )
+)
+async def show_limit(m: UpdateNewMessage):
+    """Show current limit settings. Owner only."""
+    args = (m.pattern_match.group(1) or "").strip()
+
+    if args:
+        # Show specific user's custom limit
+        target_id = int(args)
+        custom = db.get(f"user_limit:{target_id}")
+        is_prem = is_premium_user(target_id)
+        text = (
+            f"📊 **Limit Info for `{target_id}`**\n\n"
+            f"Premium: **{'Yes' if is_prem else 'No'}**\n"
+            f"Custom limit: **{custom or 'None (uses default)'}**\n"
+            f"Effective limit: **{custom if custom else (0 if is_prem else FREE_DOWNLOAD_LIMIT)}** downloads/hour"
+        )
+        await m.reply(text, parse_mode="markdown")
+        return
+
+    # Show global settings
+    text = (
+        f"📊 **Current Limit Settings**\n\n"
+        f"**Global Defaults:**\n"
+        f"Free users: **{FREE_DOWNLOAD_LIMIT}** downloads/hour\n"
+        f"Premium users: **{'Unlimited' if PREMIUM_DOWNLOAD_LIMIT == 0 else str(PREMIUM_DOWNLOAD_LIMIT)}**\n"
+        f"Max files per link (free): **{MAX_FILES_PER_REQUEST}**\n"
+        f"Download cooldown: **{DOWNLOAD_COOLDOWN_SECONDS}s**\n\n"
+        f"**Custom User Limits:**\n"
+    )
+    # List users with custom limits - run scan in executor to avoid blocking
+    try:
+        loop = asyncio.get_running_loop()
+        def _scan():
+            custom_users = []
+            for key in db.scan_iter("user_limit:*"):
+                uid = key.decode().split(":")[1]
+                val = db.get(key)
+                custom_users.append(f"`{uid}` → **{val}**/hour")
+            return custom_users
+        custom_users = await loop.run_in_executor(None, _scan)
+        if custom_users:
+            text += "\n".join(custom_users[:20])
+            if len(custom_users) > 20:
+                text += f"\n... and {len(custom_users) - 20} more"
+        else:
+            text += "None set"
+    except Exception:
+        text += "Unable to fetch (Redis scan error)"
+
+    await m.reply(text, parse_mode="markdown")
 
 
 # ==================== /addadmin — ADD NEW ADMIN ====================
@@ -4241,10 +4527,12 @@ except Exception as e:
 
 try:
     from commands.analytics import register as _reg_analytics, track_download as _track_dl
+    from utils.loadbalancer import get_balancer as _get_lb
     _reg_analytics(bot, {
         "db": db, "is_admin": is_admin, "get_formatted_size": get_formatted_size,
         "api_templates": {"primary": TERABOX_API_TEMPLATE, "fallback": TERABOX_FALLBACK_API_TEMPLATE},
         "log_path": LOG_FILE,
+        "get_balancer": _get_lb,
     })
     _loaded_packs.append("analytics")
 except Exception as e:
@@ -4253,6 +4541,7 @@ except Exception as e:
 
 def _apply_api_templates(primary=None, fallback=None):
     import terabox as _tb
+    from utils.loadbalancer import build_balancer
     if primary:
         _tb.TERABOX_API_TEMPLATE = primary
         try:
@@ -4265,6 +4554,26 @@ def _apply_api_templates(primary=None, fallback=None):
             db.set("api_template:fallback", fallback)
         except Exception:
             pass
+    # Rebuild load balancer with updated templates
+    try:
+        _tb._balancer = build_balancer(API_ENDPOINTS)
+    except (NameError, Exception):
+        # API_ENDPOINTS not in config — rebuild from legacy templates
+        def _parse_legacy(tpl):
+            if "?" not in tpl:
+                return tpl, ""
+            base = tpl.split("?")[0]
+            token = ""
+            if "authkey=" in tpl:
+                token = tpl.split("authkey=")[1].split("&")[0]
+            return base, token
+        _p1, _t1 = _parse_legacy(_tb.TERABOX_API_TEMPLATE)
+        _p2, _t2 = _parse_legacy(_tb.TERABOX_FALLBACK_API_TEMPLATE)
+        eps = [
+            {"name": "primary", "url": _p1, "token": _t1},
+            {"name": "secondary", "url": _p2, "token": _t2},
+        ]
+        _tb._balancer = build_balancer(eps)
     return {"primary": _tb.TERABOX_API_TEMPLATE, "fallback": _tb.TERABOX_FALLBACK_API_TEMPLATE}
 
 
@@ -4272,6 +4581,26 @@ def _apply_saved_api_templates():
     """Boot: re-apply API templates persisted via /setapi."""
     try:
         import terabox as _tb
+        import json as _json
+
+        # Try loading persisted endpoints list first
+        try:
+            saved_eps = db.get("api_endpoints")
+        except Exception:
+            saved_eps = None
+
+        if saved_eps:
+            try:
+                eps = _json.loads(saved_eps)
+                if isinstance(eps, list) and eps:
+                    from utils.loadbalancer import build_balancer, APIEndpoint
+                    _tb._balancer = build_balancer(eps)
+                    log.info(f"Loaded {len(eps)} API endpoints from Redis")
+                    return
+            except Exception:
+                pass
+
+        # Fallback: load legacy primary/fallback templates
         for slot, attr in (("primary", "TERABOX_API_TEMPLATE"),
                            ("fallback", "TERABOX_FALLBACK_API_TEMPLATE")):
             try:
@@ -4280,6 +4609,25 @@ def _apply_saved_api_templates():
                 saved = None
             if saved and "{url}" in str(saved):
                 setattr(_tb, attr, str(saved))
+        # Rebuild balancer with updated templates
+        try:
+            from utils.loadbalancer import build_balancer
+            def _parse_legacy(tpl):
+                if "?" not in tpl:
+                    return tpl, ""
+                base = tpl.split("?")[0]
+                token = ""
+                if "authkey=" in tpl:
+                    token = tpl.split("authkey=")[1].split("&")[0]
+                return base, token
+            _p1, _t1 = _parse_legacy(_tb.TERABOX_API_TEMPLATE)
+            _p2, _t2 = _parse_legacy(_tb.TERABOX_FALLBACK_API_TEMPLATE)
+            _tb._balancer = build_balancer([
+                {"name": "primary", "url": _p1, "token": _t1},
+                {"name": "secondary", "url": _p2, "token": _t2},
+            ])
+        except Exception:
+            pass
     except Exception as e:
         try:
             log.warning(f"saved API templates not applied: {e}")
@@ -4337,6 +4685,17 @@ try:
     _loaded_packs.append("ux")
 except Exception as e:
     log.warning(f"ux pack not loaded: {e}")
+
+try:
+    from commands.broadcast import register as _reg_broadcast
+    _reg_broadcast(bot, {
+        "db": db,
+        "OWNER_ID": OWNER_ID,
+        "get_all_users": lambda: db.smembers("all_known_users"),
+    })
+    _loaded_packs.append("broadcast")
+except Exception as e:
+    log.warning(f"broadcast pack not loaded: {e}")
 
 # ---- Runtime config overrides (persisted in Redis, applied on boot) ----
 # Specs live in commands/config_editor.py (single source of truth).
@@ -4569,7 +4928,7 @@ async def _boot_notify():
             f"🆔 **Build:** `{sha}` (#{boots})\n"
             f"🕒 **Started:** `{started}`\n"
             f"🐍 **Python:** `{py_ver}` | **Telethon:** `{tl_ver}`\n\n"
-            f"📦 **Packs:** `{packs}/12 loaded`\n"
+            f"📦 **Packs:** `{packs} loaded`\n"
             f"🛠 **Maintenance:** `{maint}`\n\n"
             f"🗄️ **Redis:** {redis_str}\n"
             f"💿 **Disk:** `{disk_str}`\n\n"

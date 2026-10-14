@@ -19,6 +19,13 @@
 
 ---
 
+> ⚠️ **Disclaimer: For educational purposes only.**  
+> This project is intended for learning and research.  
+> Respect TeraBox's Terms of Service and copyright laws.  
+> The authors are not responsible for any misuse. 🤷‍♂️🤣
+
+---
+
 ## How It Works
 
 ```
@@ -47,9 +54,16 @@ Forwards to you instantly
 - Quality selector — `/dl 720p <link>` or `/dl 1080p <link>`
 - Folder download — `/folder <link>` (premium)
 - Batch multi-file download
-- Fallback API — if primary fails, auto-tries secondary
+- **API load balancer** — distributes requests across N endpoints with health-aware routing
+- **Circuit breaker** — auto-disables failing APIs for 120s, auto-recovers
 - Cache system — instantly re-sends previously downloaded files
 - Searchable library — `/search <query>` to find past downloads
+
+### 🔑 Get Free TeraBox API
+- **Source:** [ntmterabox.me](https://ntmterabox.me/) — Message **@ntmteraapi** on Telegram
+- **How:** Pick a plan → get `token_id.secret` → add to `API_ENDPOINTS` in config.py
+- **Format:** `{"name": "api-1", "url": "https://your-domain.ntmterabox.me/", "token": "token_id.secret"}`
+- Free tier: 100K requests/30 days; Pro: 500K; Custom for bots
 
 ### Premium System
 - Time-based expiry (1d, 2d, 3d, 7d, 1w, 1m, unlimited)
@@ -63,7 +77,7 @@ Forwards to you instantly
 ### Media Tools
 - `/mp3` — Extract audio with bitrate selector (128/192/256/320 kbps)
 - `/compress` — Compress video with resolution selector (480p/720p/1080p, no upscaling)
-- Video watermark — `@TERA_NTM_BOT` on every video (mp4 only, veryfast preset)
+- Video watermark — `@TERA_NTM_BOT` on every video (mp4 only, veryfast preset, skipped >200MB)
 - Photos sent as native Telegram images (no watermark, no compression)
 
 ### User Experience
@@ -87,9 +101,9 @@ Forwards to you instantly
 - `/gclist` — paginated gift card list with usage tracking
 - `/stats` — bot statistics with top users/links
 - `/userstats` — per-user download stats
-- `/apihealth` — check API response times
+- `/apihealth` — API load balancer stats (success rate, latency, circuit state)
 - `/errors` — recent error log entries
-- `/broadcast` — send message to all users (reply-to-forward preserves format)
+- `/broadcast` — modern broadcast center (text, photo, video, sticker, forward)
 - `/announce 30 <msg>` — scheduled broadcast
 - `/cleandownloads` — clean downloads folder
 - `/maintenance` — toggle maintenance mode
@@ -100,7 +114,8 @@ Forwards to you instantly
 - `/panic` — emergency stop all services
 - `/resume` — bring bot back online
 - `/backup` `/restore` — full Redis snapshot and merge restore
-- `/setapi` `/reloadconfig` — rotate API templates live
+- `/setapi add|remove|edit` — manage API load balancer endpoints from bot
+- `/reloadconfig` — rebuild load balancer
 - Parallel downloads — 5 concurrent, 10 total backpressure
 - FloodWait protection — global edit backoff, patient forwarding/replies
 - In-flight dedup — prevents duplicate downloads for same link
@@ -204,12 +219,14 @@ Forwards to you instantly
 | `/setcooldown <s>` | Set cooldown |
 | `/setplan <text>` | Update plan text |
 | `/announce <min> <msg>` | Scheduled broadcast |
-| `/setapi` | Rotate API template |
-| `/reloadconfig` | Reload API templates |
+| `/setapi [add\|remove\|edit ...]` | Manage API endpoints (load balancer) |
+| `/reloadconfig` | Rebuild load balancer |
 | `/logrotate` | Rotate bot.log |
 | `/configview` | View runtime config |
 | `/configset` | Edit runtime config |
 | `/configreset` | Reset config key |
+| `/config_backup` | Send config.py to bot |
+| `/set_config` | Restore config.py (reply to file) |
 | `/backup` | Export Redis data |
 | `/restore` | Restore from backup |
 | `/auditlog` | View admin action log |
@@ -308,14 +325,13 @@ ADMINS = [123456789]
 FORCE_CHANNELS = ["@your_channel"]
 FORCE_GROUPS = ["@your_group"]
 
-# TeraBox API
-TERABOX_API_BASE = "https://your-terabox-api.com/"
-TERABOX_API_TOKEN = "your_token"
-TERABOX_API_TEMPLATE = f"{TERABOX_API_BASE}?authkey={TERABOX_API_TOKEN}&url={{url}}"
-
-# Fallback API
-TERABOX_FALLBACK_API_BASE = "https://your-fallback-api.com/"
-TERABOX_FALLBACK_API_TEMPLATE = f"{TERABOX_FALLBACK_API_BASE}?authkey={TERABOX_API_TOKEN}&url={{url}}"
+# TeraBox API — load-balanced across all endpoints
+# Get free API from https://ntmterabox.me/ (Message @ntmteraapi)
+# Format: {"name": "api-1", "url": "https://your-domain.ntmterabox.me/", "token": "token_id.secret"}
+API_ENDPOINTS = [
+    {"name": "api-1", "url": "https://your-api.ntmterabox.me/", "token": "your_token_id.secret"},
+    {"name": "api-2", "url": "https://your-api2.ntmterabox.me/", "token": "your_token_id.secret"},
+]
 
 # Self-hosted Bot API (2GB uploads)
 TG_API_BASE = "https://your-bot-api-server.com"
@@ -346,6 +362,7 @@ TeraBox-Downloader-Bot/
 │   ├── admin_users.py   # /finduser, /ban, /unban, /addpremium, /masstag
 │   ├── analytics.py     # /stats, /userstats, /apihealth, /errors
 │   ├── backup.py        # /backup, /restore
+│   ├── broadcast.py     # Modern broadcast (text, media, sticker, forward)
 │   ├── cacheux.py       # Cache prompt (auto-send + Download Again)
 │   ├── cancel.py        # /cancel with tap-to-cancel buttons
 │   ├── config_editor.py # /configview, /configset, /configreset
@@ -356,12 +373,13 @@ TeraBox-Downloader-Bot/
 │   ├── redeem_core.py   # Shared gift card redeem logic
 │   ├── referral.py      # /referral, /refstats, expiry reminders
 │   ├── user_status.py   # /mystatus text builder
-│   └── ux.py            # /broadcast, /quick, /preview, gift card buttons
+│   └── ux.py            # /quick, /preview, gift card buttons
 │
 ├── utils/               # Shared utilities
 │   ├── errors.py        # Centralized user-facing error messages
 │   ├── flood.py         # FloodWait protection (edit backoff, patient helpers)
 │   ├── jobs.py          # Job registry, FFmpeg kill-on-cancel, inflight dedup
+│   ├── loadbalancer.py  # API load balancer (health-aware round-robin + circuit breaker)
 │   ├── logx.py          # API log redaction (URLs/tokens stripped)
 │   ├── premium.py       # Premium grant/revoke/check + tag cleanup
 │   └── tags.py          # Tag resolve/set/clear with premium expiry
@@ -385,6 +403,7 @@ TeraBox-Downloader-Bot/
 | Bot Framework | Telethon 1.42 (MTProto) |
 | Bot API Upload | aiohttp + self-hosted Bot API (2GB) |
 | Download | aiohttp (async, 3 retries) |
+| API Load Balancer | Health-aware round-robin + circuit breaker |
 | Photo Support | sendPhoto (native Telegram images) |
 | Database | Redis (cloud) |
 | Video Processing | ffmpeg (watermark, compress, extract) |

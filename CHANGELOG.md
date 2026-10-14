@@ -4,6 +4,137 @@ All notable changes to the TeraBox Downloader Bot.
 
 ---
 
+## v3.8 — Limits, Multi-Link & User Management (2026-09-21)
+
+### Configurable Download Limits
+- **New config vars**: `FREE_DOWNLOAD_LIMIT`, `PREMIUM_DOWNLOAD_LIMIT`, `MAX_FILES_PER_REQUEST`, `DOWNLOAD_COOLDOWN_SECONDS`
+- **Runtime commands** (owner only):
+  - `/setlimit free <n>` — set free user hourly limit
+  - `/setlimit premium <n>` — set premium user hourly limit (0 = unlimited)
+  - `/maxfiles <n>` — max files per single link (free users)
+  - `/setcooldown <seconds>` — download cooldown for free users
+  - `/userlimit <user_id> <n>` — custom limit for specific user (0 = unlimited)
+- **Owner bypasses all limits** — no rate limits, no file limits, no cooldowns
+
+### Multi-Link Support
+- **`get_all_urls_from_string()`** in tools.py extracts all valid TeraBox URLs from a message
+- When multiple links sent in one message, bot processes each sequentially
+
+### New User Notification with Tap-to-Contact
+- Admin notification now includes clickable user name (`tg://user?id=ID`) for direct contact
+- Works even when user has no username
+
+### Other Improvements
+- Updated welcome text to show current free user limit dynamically
+- Rate limit error messages use translation system with `{limit}` placeholder
+- Nepali/Hindi translations updated
+
+---
+
+## v3.7 — Upload Timeout Fixes (2026-09-21)
+
+### Upload Stuck-for-Hours Fixed
+- **Bot API upload timeout reduced** from 1800s (30 min) → 300s (5 min) in `_bot_api_send` (tools.py:346)
+- **Telethon send_file fallback wrapped** with `asyncio.wait_for(timeout=300)` at all 3 upload paths (main.py)
+- **send_document_via_api async wrapper** now has 330s timeout as safety net
+- Prevents uploads hanging for 30-60 minutes on network issues
+
+---
+
+## v3.6 — Broadcast Fixes (2026-09-21)
+
+### Broadcast Overhaul
+- **Removed duplicate legacy `/broadcast` handler** in `commands/ux.py` — both handlers were firing, causing double sends (one with forward tag, one preview)
+- **Removed "Forwarded from" tag** — reply+`/broadcast` now uses `drop_author=True` (sends as copy)
+- **Fixed caption flow** — media broadcast now correctly switches to `wait_caption` state (caption input was silently ignored before)
+- **Sticker detection fixed** — `m.sticker` checked before `m.document`; sticker mode requires a sticker, media mode rejects stickers
+- **Async-safe user collection** — `_collect_ids` awaits coroutines directly instead of `run_until_complete` (crashed inside running loop)
+- **Consolidated send logic** — single `_deliver()` helper (text/media/sticker/forward) used for normal + FloodWait-retry paths
+- **Commands no longer swallowed** — `/command` messages ignored by broadcast content handler while waiting for input
+- **Progress updates every chunk** — removed broken modulo check that rarely triggered
+
+---
+
+## v3.5 — Config Backup/Restore (2026-09-21)
+
+### Config Backup
+- **`/config_backup`** — sends config.py file to owner via bot
+- **`/set_config`** — restore config.py by replying to a file
+- Syntax check before replacing — invalid config rejected
+- Auto-backup old config to `config.py.bak`
+- Audit log for both operations
+
+---
+
+## v3.4 — API Management + Watermark Skip (2026-09-21)
+
+### API Endpoint Management from Bot
+- **`/setapi`** — shows current endpoints with health status
+- **`/setapi add <name> <url> [token]`** — add new API endpoint
+- **`/setapi remove <name>`** — remove endpoint
+- **`/setapi edit <name> <url> [token]`** — update endpoint URL/token
+- **`/setapi list`** — show all endpoints with stats
+- **Persisted to Redis** — endpoints survive restarts
+- **Legacy compatibility** — `/setapi primary|fallback <tpl>` still works
+
+### Watermark Optimization
+- **200MB limit for all users** — watermark skipped for files > 200MB (was 500MB for free, 200MB for premium)
+
+### Updated Commands
+- **`/reloadconfig`** — now rebuilds load balancer from persisted endpoints
+
+---
+
+## v3.3 — Modern Broadcast (2026-09-21)
+
+### Broadcast Center
+- **Button-based menu** — `/broadcast` opens interactive broadcast center
+- **📝 Text** — type message, preview, confirm, send
+- **📷 Media** — send photo/video, optionally add caption, preview, confirm
+- **🎭 Sticker** — send sticker, preview, confirm
+- **↩️ Forward** — reply to message, forward as-is (preserves format)
+- **Preview step** — see type, caption, recipient count before sending
+- **Edit before send** — go back to change content
+- **Cancel at any stage** — clean state reset
+
+### Progress & Reliability
+- **Live progress bar** — sent/failed/remaining counter
+- **FloodWait auto-resume** — waits and continues automatically
+- **Skip owner** — doesn't broadcast to bot owner
+- **Chunked sending** — 50 users per batch with 2s delay
+
+### New Files
+- **`commands/broadcast.py`** — state machine, menu, preview, send with progress
+
+### Updated Files
+- **`utils/flood.py`** — added `patient_send_file` for media broadcasts
+- **`main.py`** — registered broadcast pack, updated admin panel button
+- **`README.md`** — updated broadcast description, project structure
+- **`CHANGELOG.md`** — this entry
+
+---
+
+## v3.2 — API Load Balancer (2026-09-15)
+
+### Load Balancing
+- **Health-Aware Round-Robin** — distributes requests across N API endpoints
+- **Circuit Breaker** — auto-disables endpoints after 5 consecutive failures (120s cooldown)
+- **Auto-recovery** — failing APIs automatically retried after cooldown expires
+- **Config-driven** — `API_ENDPOINTS` list in config.py, add/remove APIs without code changes
+- **Per-API stats** — success rate, avg latency, request count, circuit state
+
+### New Files
+- **`utils/loadbalancer.py`** — `APIEndpoint` class + `LoadBalancer` singleton
+
+### Config Changes
+- **`API_ENDPOINTS`** — new list format replaces old `TERABOX_API_TEMPLATE`/`TERABOX_FALLBACK_API_TEMPLATE`
+- Legacy templates kept for backward compatibility
+
+### Updated Commands
+- **`/apihealth`** — now shows load balancer stats (per-API success rate, latency, circuit state) + live probe
+
+---
+
 ## v3.1 — Extended Format Support (2026-09-15)
 
 ### Format Expansion
