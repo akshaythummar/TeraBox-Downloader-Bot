@@ -12,7 +12,6 @@ OWNER_ID = "618879443"
 ADMINS = "618879443"              # comma-separated
 FORCE_CHANNELS = "@AT_BOTZ"       # comma-separated; bot must be admin there
 FORCE_GROUPS = ""
-PRIVATE_CHAT_ID = "-1002386227767" # old storage channel: videos already uploaded there are still served from it
 SPOILER_VIDEOS = "true"
 TZ = "Asia/Kolkata"               # dates in messages (Python used the server's local time)
 VIDEOS_FREE_MODE = "false"

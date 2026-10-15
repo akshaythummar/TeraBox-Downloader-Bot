@@ -140,6 +140,24 @@ export async function resolveShare(cfg, code) {
   }
 }
 
+// Resolver results are reused for 30 min: repeat links skip the ~3s resolver call and
+// the player starts faster. A stream URL from a 10-min-old resolve was verified to still
+// play; /m3u8 re-resolves fresh if a cached one ever fails.
+const SHARE_TTL = 1800;
+export async function resolveCached(env, db, code, fresh = false) {
+  const key = `tbshare:${code}`;
+  if (!fresh) {
+    const hit = await db.get(key);
+    if (hit) return { ...JSON.parse(hit), cached: true };
+  }
+  const d = await resolveShare(await teraboxCfg(env, db), code);
+  if (d) {
+    const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size })) };
+    await db.set(key, JSON.stringify(slim), { ex: SHARE_TTL });
+  }
+  return d;
+}
+
 // Same URL terabox.py::_build_stream_url built, proxied through the HLS worker.
 export const streamUrl = (cfg, d, fid, quality = DEFAULT_QUALITY) =>
   `${cfg.proxy}/?hls=${encodeURIComponent(
@@ -300,19 +318,57 @@ export function createBot(env, api, db, origin) {
     }
   }
 
-  const storageChat = async () => (await db.get('storage_chat_id')) || env.PRIVATE_CHAT_ID || null;
-
   // --- TeraBox files ---
   async function getFiles(url) {
     const code = shareCode(url);
     if (!code) return false;
-    const d = await resolveShare(await teraboxCfg(env, db), code);
+    const d = await resolveCached(env, db, code);
     if (!d) { await logx(`Resolver worker error for ${code}`); return false; }
     const files = d.list.filter(i => i.fs_id).map(i => ({
       file_name: sanitize(i.server_filename || 'video.mp4'), fid: String(i.fs_id), sizebytes: +i.size || 0,
-      size: +i.size ? fmtSize(+i.size) : 'Unknown', thumb: i.thumbs?.url3 || i.thumbs?.url2 || null, code,
+      size: +i.size ? fmtSize(+i.size) : 'Unknown', code,
     }));
     return files.length ? files : false;
+  }
+
+  // Everything the link handler checks, read in one D1 round trip.
+  async function gate(uid) {
+    const u = String(uid);
+    const [kv, h, s] = await db.d.batch([
+      db.q('SELECT key, value, expires_at FROM kv WHERE key IN (?1, ?2, ?3)', MAINTENANCE_KEY, `${COOLDOWN_KEY}_${u}`, `check_${u}`),
+      db.q('SELECT key, value FROM hashes WHERE field = ?1 AND key IN (?2, ?3)', u, PREMIUM_EXPIRY_KEY, THUMB_KEY),
+      db.q('SELECT key FROM sets WHERE member = ?1 AND key IN (?2, ?3)', u, BANNED_USERS_KEY, DYNAMIC_ADMINS_KEY),
+    ]);
+    const now = nowS();
+    const k = Object.fromEntries(kv.results.filter(r => r.expires_at == null || r.expires_at > now).map(r => [r.key, r]));
+    const hv = Object.fromEntries(h.results.map(r => [r.key, r.value]));
+    const sv = new Set(s.results.map(r => r.key));
+    const exp = hv[PREMIUM_EXPIRY_KEY];
+    return {
+      maintenance: k[MAINTENANCE_KEY]?.value === '1',
+      banned: sv.has(BANNED_USERS_KEY),
+      admin: ADMINS.includes(int(uid)) || sv.has(DYNAMIC_ADMINS_KEY),
+      premium: exp != null && now < int(exp),
+      expired: exp != null && now >= int(exp),
+      lastDl: k[`${COOLDOWN_KEY}_${u}`]?.value,
+      count: k[`check_${u}`]?.value,
+      countExp: k[`check_${u}`]?.expires_at,
+      thumb: hv[THUMB_KEY] || null,
+    };
+  }
+
+  // track active-today / member-since / new-user in one round trip
+  async function trackActivity(uid) {
+    try {
+      const todayKey = `active_${ymd()}`;
+      const [a, , b] = await db.d.batch([
+        db.q("INSERT INTO kv(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING value", todayKey),
+        db.q('INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `member_since:${uid}`, ymd()),
+        db.q("SELECT 1 FROM sets WHERE key = 'all_known_users' AND member = ? LIMIT 1", String(uid)),
+      ]);
+      if (int(a.results[0].value) === 1) await db.expire(todayKey, 86400);
+      if (!b.results.length) { await db.sadd('all_known_users', String(uid)); await db.hincrby(STATS_KEY, 'total_users', 1); }
+    } catch (e) { console.log('track_activity', e.message); }
   }
 
   async function watchUrl(code, fid, q) {
@@ -333,11 +389,11 @@ export function createBot(env, api, db, origin) {
          @AT_BOTZ
 `;
 
-  // The stream "video post": thumbnail (TeraBox's, else the user's /setthumb) + caption + play buttons.
-  async function sendStream(chatId, isPrivate, f, caption, q, uid) {
+  // The stream "video post": caption + play buttons, as a photo when the user set a /setthumb.
+  // (TeraBox's own thumbnail URLs aren't used: Telegram can't fetch them.)
+  async function sendStream(chatId, isPrivate, f, caption, q, photo) {
     const href = await watchUrl(f.code, f.fid, q);
     const buttons = [[isPrivate ? Button.webapp('▶️ Watch Online', href) : Button.url('▶️ Watch Online', href)], [Button.url('🌐 Open in Browser', href)]];
-    const photo = f.thumb || (uid && (await db.hget(THUMB_KEY, String(uid))));
     if (photo) {
       const r = await api.call('sendPhoto', { chat_id: chatId, photo, caption: md(caption), parse_mode: 'HTML', has_spoiler: SPOILER, reply_markup: { inline_keyboard: buttons } });
       if (r.ok) return true;
@@ -1028,113 +1084,88 @@ Contact @buggybeats for premium.
 
   // ==================== the link handler (handle_message) ====================
   async function handleMessage(m, quality = null) {
+    const T0 = Date.now();
     const url = getUrl(m.text);
     if (!url) return m.reply(ERRORS.unsupported_link);
-    if (await isMaintenance()) return m.reply('🔧 Bot is currently under maintenance. Please try again later.');
-    if (await isBanned(m.uid)) return m.reply('🚫 You are banned from using this bot.');
+    const shorturl = shareCode(url);
+    if (!shorturl) return m.reply(ERRORS.invalid_link);
 
-    const premium = await isPremium(m.uid), admin = await isAdmin(m.uid), rt = await runtime();
-    if (!premium && !admin) {
-      const cd = await checkCooldown(m.uid);
+    // 1 D1 round trip for every check (was ~10 sequential queries)
+    const [g, rt] = await Promise.all([gate(m.uid), runtime()]);
+    if (g.maintenance) return m.reply('🔧 Bot is currently under maintenance. Please try again later.');
+    if (g.banned) return m.reply('🚫 You are banned from using this bot.');
+    const free = !g.premium && !g.admin;
+    if (free && g.lastDl) {
+      const cd = Math.floor(rt.DOWNLOAD_COOLDOWN_SECONDS - (nowS() - parseFloat(g.lastDl)));
       if (cd > 0) return m.reply(`⏳ Please wait **${cd} seconds** before downloading again.`);
     }
-
-    // track active-today / member-since / new-user in one round trip
-    try {
-      const todayKey = `active_${ymd()}`;
-      const [a, , b] = await db.d.batch([
-        db.q("INSERT INTO kv(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING value", todayKey),
-        db.q('INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `member_since:${m.uid}`, ymd()),
-        db.q("SELECT 1 FROM sets WHERE key = 'all_known_users' AND member = ? LIMIT 1", String(m.uid)),
-      ]);
-      if (int(a.results[0].value) === 1) await db.expire(todayKey, 86400);
-      if (!b.results.length) { await db.sadd('all_known_users', String(m.uid)); await db.hincrby(STATS_KEY, 'total_users', 1); }
-    } catch (e) { console.log('track_activity', e.message); }
-
-    for (const ch of rt.FORCE_CHANNELS) if (!(await isUserOnChat(ch, m.uid))) return m.reply(`Please join ${ch} then send me the link again.`);
-    for (const gr of rt.FORCE_GROUPS) if (!(await isUserOnChat(gr, m.uid))) return m.reply(`Please join ${gr} then send me the link again.`);
-
-    const hm = await m.reply('Sending you the media wait...');
-    const count = await db.get(`check_${m.uid}`);
-    if (!premium && !admin && count && int(count) >= 10) {
-      const ttl = await db.ttl(`check_${m.uid}`);
-      return hm.edit(`You've reached your limit (10 videos/hour).\nTry again in **${ttl > 0 ? convertSeconds(ttl) : '1 hour'}**.\nUpgrade to **Premium** for unlimited downloads.`);
+    if (free && int(g.count) >= 10) {
+      const ttl = g.countExp ? Math.floor(g.countExp - nowS()) : 0;
+      return m.reply(`You've reached your limit (10 videos/hour).\nTry again in **${ttl > 0 ? convertSeconds(ttl) : '1 hour'}**.\nUpgrade to **Premium** for unlimited downloads.`);
     }
-    const shorturl = shareCode(url);
-    if (!shorturl) return hm.edit(ERRORS.invalid_link);
 
-    const t0 = Date.now();
-    const files = await getFiles(url);
+    // The resolver (the slow part) runs while we post the status message and check membership.
+    const filesP = getFiles(url);
+    const [hm, joined, tag] = await Promise.all([
+      m.reply('Sending you the media wait...'),
+      (async () => {
+        for (const ch of [...rt.FORCE_CHANNELS, ...rt.FORCE_GROUPS]) if (!(await isUserOnChat(ch, m.uid))) return ch;
+        return null;
+      })(),
+      getCustomTag(m.uid), // also drops the tag of an expired premium user
+      trackActivity(m.uid),
+      g.expired ? revokePremium(m.uid) : null,
+    ]);
+    if (joined) return hm.edit(`Please join ${joined} then send me the link again.`);
+
+    const files = await filesP;
     if (!files) return hm.edit(ERRORS.api_unavailable);
-    if (files.length > rt.MAX_FILES_PER_REQUEST && !premium)
+    if (files.length > rt.MAX_FILES_PER_REQUEST && !g.premium)
       return hm.edit(`⚠️ This link has **${files.length} files**.\nFree users can download max **${rt.MAX_FILES_PER_REQUEST}** files.\nUpgrade to **Premium** for unlimited.`);
-    if (!premium && !admin) await setCooldown(m.uid);
 
-    const todo = premium ? files : files.slice(0, 1);
-    const total = todo.length;
-    const tag = await getCustomTag(m.uid);
-
-    // Videos the old bot already uploaded to the storage channel are still served
-    // from there (copyMessage costs nothing — no download involved).
-    const fileid = await db.get(shorturl);
-    const store = fileid && total === 1 && (await storageChat());
-    if (store) {
-      const ids = String(fileid).split(',').map(int).filter(Boolean);
-      let sent = 0;
-      for (const [i, id] of ids.entries()) {
-        const r = await api.call('copyMessage', { chat_id: m.chatId, from_chat_id: store, message_id: id, ...(ids.length === 1 ? { caption: md(cardCaption(todo[0], m.from, tag, null)), parse_mode: 'HTML' } : { caption: '' }) });
-        if (r.ok) sent++;
-        else if (i === 0) break;
-      }
-      if (sent) {
-        await recordDl(m.uid, 0, shorturl, true);
-        await hm.delete();
-        await db.set(`check_${m.uid}`, count ? int(count) + 1 : 1, { ex: 3600 });
-        return;
-      }
-      await logx(`Cache forward failed for ${shorturl}`);
-      await db.delete(shorturl);
-    }
-
-    const took = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
-    if (total === 1) {
+    const todo = g.premium ? files : files.slice(0, 1);
+    const after = () => [free ? setCooldown(m.uid) : null, db.set(`check_${m.uid}`, int(g.count) + 1, { ex: g.countExp ? Math.max(Math.ceil(g.countExp - nowS()), 1) : 3600 })];
+    if (todo.length === 1) {
       const f = todo[0], ext = extOf(f.file_name);
       if (!VIDEO_EXTENSIONS.has(ext))
         return hm.edit(`Sorry! File type \`${ext}\` is not supported (photos aren't supported right now).\nSupported: ${[...VIDEO_EXTENSIONS].sort().join(', ')}`);
-      if (!(await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, took), quality, m.uid))) {
+      const took = `${((Date.now() - T0) / 1000).toFixed(1)}s`;
+      if (!(await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, took), quality, g.thumb))) {
         await recordDl(m.uid, 0, shorturl, false);
         return hm.edit(`Sorry! Download Failed but you can download it from [here](${url}).`, { buttons: [] });
       }
-      await hm.edit('✅ Video sent successfully to your chat!', { buttons: [] });
-      await recordDl(m.uid, f.sizebytes, shorturl, true);
-      await libIndex([f]);
-      await addHistory(m.uid, [f]);
-      await db.set(`check_${m.uid}`, count ? int(count) + 1 : 1, { ex: 3600 });
+      console.log(`link ${shorturl} posted in ${Date.now() - T0}ms`);
+      await Promise.all([
+        hm.edit('✅ Video sent successfully to your chat!', { buttons: [] }),
+        recordDl(m.uid, f.sizebytes, shorturl, true), libIndex([f]), addHistory(m.uid, [f]), ...after(),
+      ]);
       return;
     }
-    const [sent, failed] = await sendMany(m, todo, tag, quality, shorturl);
-    await hm.edit(`✅ Complete!\nSent: ${sent}/${total} | Failed: ${failed}`, { buttons: [] });
+    const [sent, failed] = await sendMany(m, todo, tag, quality, shorturl, g.thumb);
+    await Promise.all([hm.edit(`✅ Complete!\nSent: ${sent}/${todo.length} | Failed: ${failed}`, { buttons: [] }), ...after()]);
   }
 
   // multi-file / folder: one stream post per video
   // ponytail: 15 posts per message keeps one request under the free plan's 50 subrequests
   // (each post can cost 2 Telegram calls); the rest are listed so the user can open them.
   const MAX_POSTS = 15;
-  async function sendMany(m, todo, tag, quality, link) {
+  async function sendMany(m, todo, tag, quality, link, thumb = null) {
     const ok = [];
     let failed = 0, sendFails = 0;
     const videos = todo.filter(f => VIDEO_EXTENSIONS.has(extOf(f.file_name)));
     failed += todo.length - videos.length;
     for (const f of videos.slice(0, MAX_POSTS)) {
-      if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, m.uid)) ok.push(f);
+      if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, thumb)) ok.push(f);
       else { failed++; sendFails++; }
     }
     const rest = videos.slice(MAX_POSTS);
     if (rest.length) await m.reply(`➕ ${rest.length} more video(s) in this link:\n${rest.slice(0, 40).map(f => `• \`${captionName(f.file_name)}\``).join('\n')}\n\nUse /search <name> to open them.`);
-    await recordDl(m.uid, ok.reduce((a, f) => a + f.sizebytes, 0), link, true, ok.length);
-    await recordDl(m.uid, 0, link, false, sendFails);
-    await libIndex([...ok, ...rest]);
-    await addHistory(m.uid, ok);
+    await Promise.all([
+      recordDl(m.uid, ok.reduce((a, f) => a + f.sizebytes, 0), link, true, ok.length),
+      recordDl(m.uid, 0, link, false, sendFails),
+      libIndex([...ok, ...rest]),
+      addHistory(m.uid, ok),
+    ]);
     return [ok.length, failed];
   }
 
@@ -1160,14 +1191,6 @@ Contact @buggybeats for premium.
   }
   on(/^\/update/, m => m.reply('On Cloudflare the bot updates by deploying: run `npx wrangler deploy` in the `cloudflare` folder. No restart needed.'), OWNER);
   on(/^\/(restart|force)/, async m => { await m.reply(m.text.startsWith('/force') ? 'Force restarting bot...' : 'Restarting bot...'); await bootCard(m.chatId); }, OWNER);
-
-  on(/^\/setstorage\s*$/, async m => m.reply(`**Usage:** \`/setstorage <chat_id>\`\nExample: \`/setstorage -1001684570979\`\n\nActive: \`${await storageChat()}\` | Persisted: \`${await db.get('storage_chat_id')}\``), OWNER);
-  on(/^\/setstorage\s+([-–—−]?\d+)/, async (m, g) => {
-    const id = int(g[1].replace(/[–—−]/g, '-'));
-    await db.set('storage_chat_id', id);
-    await m.reply(`Storage chat updated to \`${id}\`.\nCached videos are now copied from this chat.\nRedis: saved.\nNote: files cached from the old chat stay there; old links still forward from it.`);
-  }, OWNER);
-  on(/^\/getstorage/, async m => m.reply(`Active (runtime): \`${await storageChat()}\`\nRedis override: \`${await db.get('storage_chat_id')}\`\nwrangler.toml: \`${env.PRIVATE_CHAT_ID || null}\``), OWNER);
 
   on(/^\/setforce\s+(channel|group)\s+(\S+)/, async (m, g) => {
     const key = g[1] === 'channel' ? 'FORCE_CHANNELS' : 'FORCE_GROUPS', list = (await runtime())[key];
@@ -1256,8 +1279,6 @@ Contact @buggybeats for premium.
     if (m.uid === OWNER_ID) text += `
 **── Owner Only ──**
 /update — Pull latest code & restart bot
-/setstorage \`<chat_id>\` — Update storage chat
-/getstorage — Show active/persisted storage IDs
 /setforce channel \`@username\` — Add force channel
 /setforce group \`@username\` — Add force group
 /removeforce channel \`@username\` — Remove force channel
@@ -1321,7 +1342,7 @@ Contact @buggybeats for premium.
     const files = await getFiles(url);
     if (!files) return hm.edit('Sorry! Could not fetch folder contents.');
     if (files.length === 1) { await hm.delete(); return handleMessage({ ...m, text: url }); }
-    const [sent, failed] = await sendMany(m, files, await getCustomTag(m.uid), null, url);
+    const [sent, failed] = await sendMany(m, files, await getCustomTag(m.uid), null, url, await db.hget(THUMB_KEY, String(m.uid)));
     await hm.edit(`✅ Folder complete!\nSent: ${sent}/${files.length} | Failed: ${failed}`, { buttons: [] });
   });
 
@@ -1560,7 +1581,7 @@ Contact @buggybeats for premium.
   // ==================== commands/backup.py ====================
   const B_SETS = ['premium_users', 'banned_users', 'dynamic_admins', 'all_known_users'];
   const B_HASHES = ['premium_expiry', 'custom_tags', 'gift_cards', 'gc_tags', 'gc_used', 'bot_stats', 'config_overrides'];
-  const B_STRINGS = ['storage_chat_id', 'maintenance_mode', 'maintenance_mode:reason', 'stats:broadcasts', 'stats:boot_count'];
+  const B_STRINGS = ['maintenance_mode', 'maintenance_mode:reason', 'stats:broadcasts', 'stats:boot_count'];
   on(/^\/backup$/, async m => {
     const msg = await m.reply('Backing up Redis data...');
     try {
@@ -1617,7 +1638,8 @@ Contact @buggybeats for premium.
       for (const [norm, raw] of Object.entries(await db.hgetall(INDEX_KEY))) {
         let entries; try { entries = JSON.parse(raw); } catch { continue; }
         const et = new Set(norm.split(' ')), hits = qt.filter(t => et.has(t)).length;
-        if (hits) for (const e of entries) scored.push([hits === qt.length, hits, e, norm]);
+        // entries the old bot indexed point at storage-channel messages (no share code) — skipped
+        if (hits) for (const e of entries) if (e.s) scored.push([hits === qt.length, hits, e, norm]);
       }
       scored.sort((a, b) => (b[0] - a[0]) || (b[1] - a[1]));
     }
@@ -1635,7 +1657,7 @@ Contact @buggybeats for premium.
   });
   async function dropEntry(norm, r) {
     const raw = await db.hget(INDEX_KEY, norm);
-    const kept = (raw ? JSON.parse(raw) : []).filter(e => !(r.mid ? e.mid === r.mid : e.s === r.s && e.f === r.f));
+    const kept = (raw ? JSON.parse(raw) : []).filter(e => !(e.s === r.s && e.f === r.f));
     if (kept.length) await db.hset(INDEX_KEY, norm, JSON.stringify(kept)); else await db.hdel(INDEX_KEY, norm);
   }
   onCb(/^lib_/, async e => {
@@ -1645,21 +1667,15 @@ Contact @buggybeats for premium.
     const raw = await db.get(`lib:search:${e.uid}`), results = raw ? JSON.parse(raw) : [];
     if (idx >= results.length) return e.answer('Expired — /search again.', true);
     const r = results[idx];
-    let ok;
-    if (r.mid) { // entry indexed by the old bot: a message in the storage chat
-      const store = await storageChat();
-      ok = store && (await api.call('forwardMessage', { chat_id: e.uid, from_chat_id: store, message_id: int(r.mid) })).ok;
-    } else {
-      const f = { file_name: r.name, size: r.size, sizebytes: r.bytes, fid: r.f, code: r.s, thumb: null };
-      ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, e.uid);
-    }
+    const f = { file_name: r.name, size: r.size, sizebytes: r.bytes, fid: r.f, code: r.s };
+    const ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, await db.hget(THUMB_KEY, String(e.uid)));
     if (!ok) { await dropEntry(r.norm, r); return e.answer('Removed stale entry — resend the link to fetch fresh.', true); }
     await db.hincrby(STATS_KEY, 'lib_hits', 1);
     await e.answer('Sent from library!');
   });
   on(/^\/reindex$/, async m => {
     if (m.uid !== OWNER_ID && !(await isAdmin(m.uid))) return;
-    await m.reply('The library already indexes every link automatically. (A full rescan of the storage chat needs MTProto, which Cloudflare Workers cannot run.)');
+    await m.reply('The library already indexes every link automatically — nothing to rescan.');
   });
 
   // ==================== commands/cancel.py / media.py (no jobs or ffmpeg on Workers) ====================

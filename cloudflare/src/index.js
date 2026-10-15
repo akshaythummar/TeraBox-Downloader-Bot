@@ -3,7 +3,7 @@
 
 import { DB } from './db.js';
 import { makeApi } from './tg.js';
-import { createBot, sign, teraboxCfg, resolveShare, streamUrl } from './bot.js';
+import { createBot, sign, teraboxCfg, resolveCached, streamUrl } from './bot.js';
 
 function params(url) {
   const g = k => url.searchParams.get(k) || '';
@@ -15,20 +15,26 @@ async function m3u8(env, db, url) {
   const p = params(url);
   if (!p || p.t !== (await sign(env.WEBHOOK_SECRET, `${p.s}:${p.f}:${p.q}`))) return new Response('Bad link', { status: 403 });
   const cfg = await teraboxCfg(env, db);
-  const d = await resolveShare(cfg, p.s); // fresh sign/timestamp on every play
-  if (!d) return new Response('Link expired or TeraBox unavailable', { status: 502 });
   // Serve the playlist from this origin: the HLS proxy sends no CORS header, so a
   // redirect to it is blocked by the browser. Segment URLs stay as the proxy wrote them.
-  const src = streamUrl(cfg, d, p.f, p.q);
-  let r;
-  try {
-    r = await fetch(src, { signal: AbortSignal.timeout(20000) });
-  } catch {
-    return new Response('HLS proxy unreachable', { status: 502 });
+  const playlist = async d => {
+    const src = streamUrl(cfg, d, p.f, p.q);
+    try {
+      const r = await fetch(src, { signal: AbortSignal.timeout(20000) });
+      const body = await r.text();
+      return r.ok && body.startsWith('#EXTM3U') ? body.replace(/^(?!#)(\S.*)$/gm, u => new URL(u, src).href) : null;
+    } catch {
+      return null;
+    }
+  };
+  let d = await resolveCached(env, db, p.s);
+  let abs = d && (await playlist(d));
+  if (!abs && d?.cached) { // cached sign/timestamp no longer accepted: resolve fresh once
+    d = await resolveCached(env, db, p.s, true);
+    abs = d && (await playlist(d));
   }
-  const body = await r.text();
-  if (!r.ok || !body.startsWith('#EXTM3U')) return new Response('HLS proxy error', { status: 502 });
-  const abs = body.replace(/^(?!#)(\S.*)$/gm, u => new URL(u, src).href);
+  if (!d) return new Response('Link expired or TeraBox unavailable', { status: 502 });
+  if (!abs) return new Response('HLS proxy error', { status: 502 });
   return new Response(abs, { headers: { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' } });
 }
 

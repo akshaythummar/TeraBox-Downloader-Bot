@@ -20,10 +20,10 @@ Because the tables and keys match the Python bot, you can import your existing T
 
 ```
 User sends link ─▶ Telegram ─webhook─▶ Worker
-   same checks as Python: maintenance, ban, premium, cooldown, force-join, 10/hour limit, max files
-   RESOLVER/?q=<surl> → file list
-   ├─ the old bot already uploaded this link to the storage channel → copyMessage it (free, no download)
-   └─ otherwise → a "video post": thumbnail + the usual caption + [▶️ Watch Online] [🌐 Open in Browser]
+   same checks as Python (maintenance, ban, premium, cooldown, 10/hour limit) — one D1 round trip
+   in parallel: RESOLVER/?q=<surl> (cached 30 min) · force-join check · "Sending you the media wait..."
+   → a "video post": the usual caption + [▶️ Watch Online] [🌐 Open in Browser]
+     (sent as a photo when the user set /setthumb; no storage channel is used at all)
 
 ▶️  → /watch     player page (hls.js), opens inside Telegram as a Mini App
       /m3u8      checks the link signature, re-resolves the share (fresh sign/timestamp),
@@ -57,7 +57,7 @@ npx wrangler deploy
 
 - **Stop the Python bot before step 4.** A bot token can't receive messages by webhook and by polling at the same time.
 - **Make the bot an admin in every force-join channel or group.** If it isn't, Telegram won't tell the bot who is a member, and the bot then blocks everyone. The Python bot behaved the same way.
-- `wrangler.toml` already holds the values from your `config.py`: workers, owner, admins, force channel, storage channel and the `/videos` settings. Set `VIDEOS_PROMO_URL` yourself; I left it empty because it was redacted when I read `config.py`.
+- `wrangler.toml` already holds the values from your `config.py`: workers, owner, admins, force channel and the `/videos` settings.
 
 ## 3. Before going live: check the HLS proxy (couldn't verify from here)
 
@@ -76,7 +76,7 @@ turso db shell <your-turso-db> .dump > dump.sql
 grep -vE '^(BEGIN TRANSACTION|COMMIT|PRAGMA)' dump.sql | sed 's/^CREATE TABLE /CREATE TABLE IF NOT EXISTS /' > import.sql
 npx wrangler d1 execute terabox-bot --remote --file import.sql
 ```
-Run `schema.sql` first (deploy step 1), then this. Videos the old bot uploaded stay usable: the link→message cache comes across in the import, so those links are copied straight from the storage channel (`PRIVATE_CHAT_ID`). The bot has to stay an admin of that channel.
+Run `schema.sql` first (deploy step 1), then this. The old link→storage-message cache rows come across too but are simply ignored: every link now gets a fresh stream post.
 
 ## 5. Free-tier limits and how this bot stays inside them
 
@@ -102,7 +102,8 @@ Everything not listed here works the same way.
 | `/dl 720p` re-encoded with ffmpeg | Chooses TeraBox's 720p HLS rendition | Same result, nothing to encode |
 | Multi-file: one forward per file, plus a "✅ sent!" reply each | One post per file, maximum 15 per message, the rest listed | Free plan limit of 50 calls per request |
 | `/mp3`, `/compress` | Same checks, then "ffmpeg not installed on server." | No ffmpeg on Workers |
-| `/setthumb` changed the uploaded video's thumbnail | Used as the stream post's picture when TeraBox has none | There is no upload |
+| `/setthumb` changed the uploaded video's thumbnail | Used as the stream post's picture | There is no upload (TeraBox's own thumbnails can't be fetched by Telegram) |
+| Storage channel cache, `/setstorage`, `/getstorage` | Removed | Nothing is uploaded, so there is nothing to copy from a channel |
 | `/cancel`, Cancel buttons | `/cancel` → "You don't have any active downloads." | Nothing long-running to cancel |
 | `/broadcast_legacy`, `/announce` sent to channel `-1001336746488`'s members | Sent to the bot's known users (`all_known_users`) | The Bot API can't list channel members |
 | `/broadcast` looped inside the command | Queued; the cron sends 40/minute and edits the status message at the end | Free plan limit of 50 calls per request |
@@ -110,7 +111,7 @@ Everything not listed here works the same way.
 | `/usage`, `/cleandownloads` | Same commands; disk and RAM show N/A | No server |
 | `/logs`, `/errors`, `/logrotate` read `bot.log` | Read a `bot_log` list in D1 (resolver and cache failures are logged there) | No log file |
 | `/backup`/`/restore` | Same JSON format; restore is batched | — |
-| `/reindex` rescanned the storage channel | Explains that the library indexes automatically | The Bot API can't read channel history |
+| `/reindex` rescanned the storage channel | Explains that the library indexes automatically | Every link is indexed when it is sent |
 | `/setforce`, `/maxfiles`, `/setcooldown` changed memory only (lost on restart) | Saved in `config_overrides` (same as `/configset`) | Workers keep no memory between requests |
 | `/configset` keys | `MAX_FILES_PER_REQUEST`, `DOWNLOAD_COOLDOWN_SECONDS`, `FORCE_CHANNELS`, `FORCE_GROUPS` | The others (watermark, download dir, parallel downloads…) no longer exist |
 | `/setplan` text was saved but `/plan` never showed it | `/plan` shows it | Bug fix |
