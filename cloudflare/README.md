@@ -1,121 +1,126 @@
-# TeraBox Stream Bot on Cloudflare (free tier)
+# TeraBox Bot on Cloudflare (free tier)
 
-The bot gives users a **stream link** for a TeraBox share. It does not download a file, upload it to a channel, or forward it. Everything runs on one Cloudflare Worker, with D1 and KV for data. R2 is not used.
+This folder is a JavaScript port of the Python bot on the `amazon-ktworker` branch (`main.py` + `commands/*`). It keeps the same commands, menus, message texts and database keys. The one big change is what happens when someone sends a TeraBox link. The Python bot downloaded the video, uploaded it to a channel and forwarded it. This bot replies with a **stream link** instead, and playback goes through your existing resolver and HLS proxy workers.
 
-## 1. Why the current bot cannot run on Cloudflare
+The whole bot runs on one Cloudflare Worker with one D1 database. It does not use R2 or KV.
 
-| Current piece (`amazon-ktworker`) | Problem on Workers | Replacement |
-|---|---|---|
-| Telethon (MTProto, long-lived TCP connection) | Workers have no persistent processes or raw MTProto support | Telegram **Bot API webhook** (plain HTTPS) |
-| yt-dlp download, then ffmpeg/OpenCV, then upload up to 2 GB | Free plan allows 10 ms CPU per request, no disk, ~128 MB memory | No download: the user streams the HLS directly |
-| Private channel cache + `copy_message` | Only needed because files were uploaded | Dropped. Each play re-resolves the link (1 request) |
-| Turso "Redis" emulation (`storage.py`) | — | **D1** (users, views, broadcasts) + **KV** (jsToken, maintenance flag) |
-| Self-hosted Bot API server (`TG_API_BASE`) | Only needed for 2 GB uploads | `api.telegram.org` |
-| Resolver worker + HLS proxy worker | Already on Cloudflare | **Kept as they are**, with the same URL format as `terabox.py::_build_stream_url` |
+## Files
 
-## 2. How it works
+| File | What it is |
+|---|---|
+| `src/index.js` | Worker entry point: the Telegram webhook, the player page (`/watch`), the stream redirect (`/m3u8`), one-time `/setup`, and the cron |
+| `src/bot.js` | Every command and button handler, ported from the Python code |
+| `src/db.js` | `storage.py` (the Turso "Redis" layer) rewritten for D1, with the same 5 tables and the same keys |
+| `src/tg.js` | Bot API calls. It also converts the Telethon-style markdown in the copied texts (`**bold**`, `` `code` ``) to HTML |
+| `schema.sql` | The 5 storage tables plus a `broadcasts` queue |
+
+Because the tables and keys match the Python bot, you can import your existing Turso data as it is (section 4). That includes users, premium, gift cards, tags, referrals, history, stats and the audit log.
+
+## 1. How a link is handled
 
 ```
-User ──link──▶ Telegram ──webhook──▶ terabox-stream-bot (this Worker)
-                                       │  D1: user/ban/premium/rate-limit
-                                       │  RESOLVER/?q=<surl>  → file list
-                                       ▼
-            reply: [▶️ name (Mini App)] [🌐 browser]  → /watch?s=&f=&t=<hmac>
+User sends link ─▶ Telegram ─webhook─▶ Worker
+   same checks as Python: maintenance, ban, premium, cooldown, force-join, 10/hour limit, max files
+   RESOLVER/?q=<surl> → file list
+   ├─ the old bot already uploaded this link to the storage channel → copyMessage it (free, no download)
+   └─ otherwise → a "video post": thumbnail + the usual caption + [▶️ Watch Online] [🌐 Open in Browser]
 
-/watch  → HTML page with hls.js (opens inside Telegram as a Mini App)
-/m3u8   → checks the HMAC, re-resolves (fresh sign/timestamp), reads jsToken from KV,
-          302 → HLS_PROXY/?hls=<1024tera streaming.m3u8 URL>
-hls.js  → plays the playlist and segments from the HLS proxy worker
+▶️  → /watch     player page (hls.js), opens inside Telegram as a Mini App
+      /m3u8      checks the link signature, re-resolves the share (fresh sign/timestamp),
+                 302 → HLS_PROXY/?hls=<1024tera streaming.m3u8 … jsToken …>
 ```
 
-Because the link is re-resolved every time someone presses play, an expired `sign` or `timestamp` never breaks old links. The HMAC on the link means nobody can use your `/m3u8` endpoint (and your request quota) for share codes the bot didn't issue.
+The share is resolved again every time someone presses play, so old links keep working after TeraBox's `sign`/`timestamp` expire. Every link is signed, so nobody can use your `/m3u8` endpoint to burn your request quota on share codes the bot didn't issue. `/dl 720p <link>` chooses the TeraBox `M3U8_AUTO_720` rendition; the Python bot re-encoded with ffmpeg instead.
 
-## 3. Free-tier budget
-
-These are the free limits as of this writing. Check the [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) page before relying on them.
-
-| Resource | Free limit | Usage in this bot |
-|---|---|---|
-| Worker requests | 100k/day **per account** | Bot worker: ~3 per link (webhook, watch, m3u8) |
-| CPU | 10 ms/request | Only I/O and small JSON work. Fine |
-| Subrequests | 50/request | Broadcast sends 40 messages per cron tick |
-| D1 | 5M rows read, 100k rows written per day | ~2 writes per link |
-| KV | 100k reads, **1k writes** per day | Writes only on `/jstoken` and `/maintenance` |
-
-**The real bottleneck is the HLS proxy worker.** Every HLS segment the player fetches is one request to it. A 30-minute video with ~6–10 s segments is about 200–300 requests. On one free account that comes to roughly **300–500 full plays per day**. To raise that:
-1. **Best fix:** if the TeraBox CDN serves segments with CORS and without a referer check, have the proxy rewrite *only the playlists* and point segment URLs straight at the CDN. That brings it down to about 3 requests per play. Test this first.
-2. Keep the bot, resolver and proxy on **separate** accounts so each gets its own 100k/day.
-3. Workers Paid ($5/month) gives 10M requests per month, if usage grows.
-
-## 4. Check these before going live (I could not verify them)
-
-1. **CORS on the HLS proxy.** On Android and desktop, hls.js fetches the playlist and segments with `fetch`, so every proxy response (playlists *and* segments) needs `Access-Control-Allow-Origin: *`. My test request to the proxy got an error response with no CORS header. iOS uses native HLS and doesn't need CORS. If you control the proxy, add the header in its response.
-2. **The proxy rewrites segment URLs.** The playlist it returns must point segments back through the proxy, or straight at a CDN that allows CORS.
-3. **The resolver hangs on an invalid code.** It took 45 s or more on a fake code in my test. This Worker gives up after 20 s and replies "Could not resolve". It would be better to make the resolver fail fast.
-4. **jsToken expires.** When plays start failing, send `/jstoken NEW_TOKEN` to the bot. No redeploy is needed.
-
-## 5. Deploy steps
+## 2. Deploy
 
 ```bash
 cd cloudflare
 npx wrangler login
 
-# 1. Storage
-npx wrangler d1 create terabox-bot             # paste database_id into wrangler.toml
-npx wrangler kv namespace create KV            # paste id into wrangler.toml
+# 1. Database — paste the printed database_id into wrangler.toml
+npx wrangler d1 create terabox-bot
 npx wrangler d1 execute terabox-bot --remote --file schema.sql
 
-# 2. Secrets (WEBHOOK_SECRET: letters, digits, _ and - only, 32+ chars)
-npx wrangler secret put BOT_TOKEN
-npx wrangler secret put WEBHOOK_SECRET
-npx wrangler secret put JSTOKEN
+# 2. Secrets
+npx wrangler secret put BOT_TOKEN        # from @BotFather
+npx wrangler secret put WEBHOOK_SECRET   # any random 32+ chars, only A-Z a-z 0-9 _ -
+npx wrangler secret put JSTOKEN          # TERABOX_JSTOKEN from config.py
 
-# 3. Deploy, then register the webhook (one time)
+# 3. (optional) import the Python bot's data — section 4
+
+# 4. Deploy and connect Telegram (one time)
 npx wrangler deploy
-curl "https://terabox-stream-bot.<your-subdomain>.workers.dev/setup?key=<WEBHOOK_SECRET>"
+#    then open in a browser:  https://terabox-stream-bot.<your-subdomain>.workers.dev/setup?key=<WEBHOOK_SECRET>
+#    you should see "ok": true
 ```
 
-After step 3, **stop the Python bot**. A bot token can use either polling or a webhook, not both.
+- **Stop the Python bot before step 4.** A bot token can't receive messages by webhook and by polling at the same time.
+- **Make the bot an admin in every force-join channel or group.** If it isn't, Telegram won't tell the bot who is a member, and the bot then blocks everyone. The Python bot behaved the same way.
+- `wrangler.toml` already holds the values from your `config.py`: workers, owner, admins, force channel, storage channel and the `/videos` settings. Set `VIDEOS_PROMO_URL` yourself; I left it empty because it was redacted when I read `config.py`.
 
-Make the bot an **admin** in every `FORCE_CHANNELS` channel, otherwise `getChatMember` fails. In that case the check fails open: users are let through instead of being blocked.
+## 3. Before going live: check the HLS proxy (couldn't verify from here)
 
-### Local testing
+1. **CORS.** On Android and desktop, the player fetches the playlist and every video segment from the proxy, so each of those responses needs `Access-Control-Allow-Origin: *`. My test request to `amzon.ktnetwork002` got an error response without that header. iPhone works without it. Add this to the proxy's response:
+   ```js
+   const h = new Headers(res.headers); h.set('Access-Control-Allow-Origin', '*');
+   return new Response(res.body, { status: res.status, headers: h });
+   ```
+2. **Segment URLs.** The playlist the proxy returns must point segments back through the proxy, or at a CDN that allows CORS.
+3. **The resolver hangs on bad codes.** It took 45 s or more on a fake code in my test. This bot gives up after 20 s and shows the normal "Unable to process this link" error.
+
+## 4. Move data from Turso (optional, recommended)
+
+```bash
+turso db shell <your-turso-db> .dump > dump.sql
+grep -vE '^(BEGIN TRANSACTION|COMMIT|PRAGMA)' dump.sql | sed 's/^CREATE TABLE /CREATE TABLE IF NOT EXISTS /' > import.sql
+npx wrangler d1 execute terabox-bot --remote --file import.sql
+```
+Run `schema.sql` first (deploy step 1), then this. Videos the old bot uploaded stay usable: the link→message cache comes across in the import, so those links are copied straight from the storage channel (`PRIVATE_CHAT_ID`). The bot has to stay an admin of that channel.
+
+## 5. Free-tier limits and how this bot stays inside them
+
+| Limit (free plan) | How the bot handles it |
+|---|---|
+| 100k Worker requests/day per account | About 3 per link (webhook + player page + stream redirect) |
+| 50 outgoing calls per request (Telegram, resolver…) | A link with many files posts 15 videos and lists the rest (they open via `/search`). Name lookups in lists stop at 35. Broadcasts send 40 users per minute from the cron |
+| 50 D1 queries per request | Writes are batched. Measured locally: about 28 statements for a new user's link, about 30 round trips for a 30-file link |
+| 10 ms CPU per request | Only I/O and small JSON work |
+
+**The real limit is the HLS proxy worker.** Every video segment is one request to it, so a 30-minute video costs about 200–300 requests, which works out to roughly 300–500 full plays a day on one free account. Ways to raise that:
+1. Have the proxy rewrite only the playlist, so segments load straight from the TeraBox CDN (if it allows that). That's about 3 requests per play.
+2. Put the bot, the resolver and the proxy on separate Cloudflare accounts, so each one gets its own 100k/day.
+3. Workers Paid ($5/month).
+
+## 6. What is different from the Python bot
+
+Everything not listed here works the same way.
+
+| Python | Here | Why |
+|---|---|---|
+| Download → upload → forward | Stream post with ▶️ / 🌐 buttons | No disk, no ffmpeg, no 2 GB uploads on Workers |
+| `/dl 720p` re-encoded with ffmpeg | Chooses TeraBox's 720p HLS rendition | Same result, nothing to encode |
+| Multi-file: one forward per file, plus a "✅ sent!" reply each | One post per file, maximum 15 per message, the rest listed | Free plan limit of 50 calls per request |
+| `/mp3`, `/compress` | Same checks, then "ffmpeg not installed on server." | No ffmpeg on Workers |
+| `/setthumb` changed the uploaded video's thumbnail | Used as the stream post's picture when TeraBox has none | There is no upload |
+| `/cancel`, Cancel buttons | `/cancel` → "You don't have any active downloads." | Nothing long-running to cancel |
+| `/broadcast_legacy`, `/announce` sent to channel `-1001336746488`'s members | Sent to the bot's known users (`all_known_users`) | The Bot API can't list channel members |
+| `/broadcast` looped inside the command | Queued; the cron sends 40/minute and edits the status message at the end | Free plan limit of 50 calls per request |
+| `/update`, `/restart`, `/force` | `/update` explains `wrangler deploy`; `/restart` shows the "SYSTEM ONLINE" card | No process to restart |
+| `/usage`, `/cleandownloads` | Same commands; disk and RAM show N/A | No server |
+| `/logs`, `/errors`, `/logrotate` read `bot.log` | Read a `bot_log` list in D1 (resolver and cache failures are logged there) | No log file |
+| `/backup`/`/restore` | Same JSON format; restore is batched | — |
+| `/reindex` rescanned the storage channel | Explains that the library indexes automatically | The Bot API can't read channel history |
+| `/setforce`, `/maxfiles`, `/setcooldown` changed memory only (lost on restart) | Saved in `config_overrides` (same as `/configset`) | Workers keep no memory between requests |
+| `/configset` keys | `MAX_FILES_PER_REQUEST`, `DOWNLOAD_COOLDOWN_SECONDS`, `FORCE_CHANNELS`, `FORCE_GROUPS` | The others (watermark, download dir, parallel downloads…) no longer exist |
+| `/setplan` text was saved but `/plan` never showed it | `/plan` shows it | Bug fix |
+| Language-menu tap added a second Admin Panel button for admins | Only one | Bug fix |
+
+## 7. Local testing
+
 ```bash
 printf 'BOT_TOKEN=123:fake\nWEBHOOK_SECRET=testsecret\nJSTOKEN=tok\n' > .dev.vars
 npx wrangler d1 execute terabox-bot --local --file schema.sql
-npx wrangler dev --test-scheduled      # POST updates to /webhook with header x-telegram-bot-api-secret-token
+npx wrangler dev --test-scheduled
 ```
-
-## 6. Commands
-
-Users: send a link, `/start`, `/help`.
-
-Admins (`OWNER_ID` + `ADMINS`):
-
-| Command | Effect |
-|---|---|
-| `/stats` | Users, premium count, links and active users in the last 24 h |
-| `/ban ID`, `/unban ID` | Ban or unban a user |
-| `/premium ID DAYS` | Give premium for DAYS days; `0` revokes |
-| `/jstoken TOKEN` | Replace the TeraBox jsToken (stored in KV) |
-| `/maintenance on\|off` | Turn maintenance mode on or off |
-| `/broadcast` | Reply to any message with this. Sends about 40 users per minute via cron and reports when finished |
-
-Free users get the first file of a share and 10 links per hour. Premium users and admins get up to 20 files per share and no limit.
-
-## 7. Not ported yet
-
-Each of these is a separate small addition when you need it:
-- Gift codes, `/redeem`, custom tags, referral **rewards** (referrals are already *recorded* in `users.referred_by`).
-- `/videos` paywall. It already uses workers (`VIDEOS_PAYMENT_API`, `VIDEOS_POOL_WORKER`), so it ports over directly. Note that Bot API `sendVideo` by URL only works for files up to 20 MB, so give a link instead.
-- Multi-language menus, inline menu panels, analytics charts, `/update`, `/restart`, `/setstorage`, cleanup jobs. These don't apply on Workers or aren't needed.
-
-## 8. Migrating existing users from Turso (optional)
-
-`storage.py` keeps users in the `sets` table under key `all_known_users`. Export the IDs and load them into D1:
-```bash
-turso db shell <db> "SELECT member FROM sets WHERE key='all_known_users'" > ids.txt
-awk 'NF && $1 ~ /^[0-9]+$/ {printf "INSERT OR IGNORE INTO users (id, joined) VALUES (%s, %d);\n", $1, systime()}' ids.txt > import.sql
-npx wrangler d1 execute terabox-bot --remote --file import.sql
-```
-Re-grant premium with `/premium ID DAYS` (only a few users).
+POST Telegram updates to `http://127.0.0.1:8787/webhook` with the header `x-telegram-bot-api-secret-token: testsecret`. To see what the bot sends without a real bot, add `TG_API=http://127.0.0.1:<port>` (a fake Bot API server) and `RESOLVER=…` to `.dev.vars`. `curl /__scheduled` runs the cron once.

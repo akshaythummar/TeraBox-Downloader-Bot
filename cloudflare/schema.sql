@@ -1,28 +1,26 @@
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY,          -- Telegram user id
-  name TEXT,
-  username TEXT,
-  joined INTEGER NOT NULL,         -- unix seconds
-  referred_by INTEGER,
-  premium_until INTEGER NOT NULL DEFAULT 0,
-  banned INTEGER NOT NULL DEFAULT 0
-);
+-- Same 5 tables as the Python bot's storage.py (Turso), so a Turso dump imports as-is.
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, expires_at REAL);
+CREATE TABLE IF NOT EXISTS hashes (key TEXT NOT NULL, field TEXT NOT NULL, value TEXT, PRIMARY KEY (key, field));
+CREATE TABLE IF NOT EXISTS sets (key TEXT NOT NULL, member TEXT NOT NULL, PRIMARY KEY (key, member));
+CREATE TABLE IF NOT EXISTS sorted_sets (key TEXT NOT NULL, member TEXT NOT NULL, score REAL NOT NULL, PRIMARY KEY (key, member));
+CREATE TABLE IF NOT EXISTS lists (key TEXT NOT NULL, position INTEGER NOT NULL, value TEXT, PRIMARY KEY (key, position));
+CREATE INDEX IF NOT EXISTS kv_expires ON kv (expires_at);
 
--- one row per link resolved; drives the free-tier hourly limit and /stats (pruned after 7 days)
-CREATE TABLE IF NOT EXISTS views (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  surl TEXT NOT NULL,
-  ts INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS views_user_ts ON views (user_id, ts);
-CREATE INDEX IF NOT EXISTS views_ts ON views (ts);
-
+-- Broadcast queue (/broadcast, /broadcast_legacy, /announce): the cron sends 40 users/minute.
 CREATE TABLE IF NOT EXISTS broadcasts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  from_chat INTEGER NOT NULL,
-  msg_id INTEGER NOT NULL,
-  cursor INTEGER NOT NULL DEFAULT 0,  -- last user id sent to
+  kind TEXT NOT NULL,                 -- broadcast | legacy | announce
+  mode TEXT NOT NULL,                 -- forward | text
+  text TEXT,
+  from_chat INTEGER,
+  msg_id INTEGER,
+  exclude INTEGER,
+  send_at INTEGER NOT NULL DEFAULT 0,
+  cursor TEXT NOT NULL DEFAULT '',    -- last all_known_users member sent to
+  total INTEGER NOT NULL DEFAULT 0,
   sent INTEGER NOT NULL DEFAULT 0,
-  done INTEGER NOT NULL DEFAULT 0
+  failed INTEGER NOT NULL DEFAULT 0,
+  done INTEGER NOT NULL DEFAULT 0,
+  status_chat INTEGER,
+  status_msg INTEGER
 );

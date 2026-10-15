@@ -4,22 +4,31 @@ compatibility_date = "2026-06-01"
 # lets this worker fetch the resolver/proxy workers even if they live on the same account
 compatibility_flags = ["global_fetch_strictly_public"]
 
+# Same values as config.py on the amazon-ktworker branch
 [vars]
-RESOLVER = "https://old.wawof50236.workers.dev"
-HLS_PROXY = "https://amzon.ktnetwork002.workers.dev"
+RESOLVER = "https://old.wawof50236.workers.dev"        # TERABOX_RESOLVER_WORKER
+HLS_PROXY = "https://amzon.ktnetwork002.workers.dev"   # TERABOX_HLS_PROXY_WORKER
 OWNER_ID = "618879443"
-ADMINS = ""                   # comma-separated extra admin ids
-FORCE_CHANNELS = "@AT_BOTZ"   # comma-separated; bot must be admin there
-FREE_PER_HOUR = "10"
+ADMINS = "618879443"              # comma-separated
+FORCE_CHANNELS = "@AT_BOTZ"       # comma-separated; bot must be admin there
+FORCE_GROUPS = ""
+PRIVATE_CHAT_ID = "-1002386227767" # old storage channel: videos already uploaded there are still served from it
+SPOILER_VIDEOS = "true"
+TZ = "Asia/Kolkata"               # dates in messages (Python used the server's local time)
+VIDEOS_FREE_MODE = "false"
+VIDEOS_PAYMENT_API = "https://terabox-payment-d1.akshaythummar.workers.dev"
+VIDEOS_POOL_WORKER = "https://videosave.hoyakey802.workers.dev"
+VIDEOS_TRIAL_SECONDS = "180"
+VIDEOS_COOLDOWN_SECONDS = "1"
+VIDEOS_PROMO_URL = ""             # set to your config.py VIDEOS_PROMO_URL
 
 [[d1_databases]]
 binding = "DB"
 database_name = "terabox-bot"
 database_id = "REPLACE_WITH_D1_ID"   # from: npx wrangler d1 create terabox-bot
 
-[[kv_namespaces]]
-binding = "KV"
-id = "REPLACE_WITH_KV_ID"            # from: npx wrangler kv namespace create KV
+[version_metadata]
+binding = "CF_VERSION"               # shown as "Build" on /restart
 
 [triggers]
-crons = ["* * * * *"]                # broadcast batches + pruning
+crons = ["* * * * *"]                # broadcasts every minute; reminders + cleanup hourly
