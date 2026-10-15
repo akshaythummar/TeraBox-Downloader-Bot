@@ -401,9 +401,13 @@ export function createBot(env, api, db, origin) {
     if (!photo && f.thumb) {
       // ponytail: data.1024terabox.com sometimes answers Workers with a Cloudflare 530; the
       // same thumbnail is served by TeraBox's other data hosts, so try those next.
+      // 3s budget for the whole poster download, so a hanging host never delays the post much
+      const deadline = Date.now() + 3000;
       for (const host of ['data.1024terabox.com', 'data.terabox.com', 'data.1024tera.com']) {
+        const left = deadline - Date.now();
+        if (left < 200) break;
         try {
-          const img = await fetch(f.thumb.replace(/^https:\/\/[^/]+/, `https://${host}`), { signal: AbortSignal.timeout(5000) });
+          const img = await fetch(f.thumb.replace(/^https:\/\/[^/]+/, `https://${host}`), { signal: AbortSignal.timeout(left) });
           if (!img.ok || !(img.headers.get('content-type') || '').startsWith('image/')) { console.log('poster', host, img.status, (await img.text()).slice(0, 80)); continue; }
           const form = new FormData();
           for (const [k, v] of Object.entries(base)) form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
