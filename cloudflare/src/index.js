@@ -17,7 +17,19 @@ async function m3u8(env, db, url) {
   const cfg = await teraboxCfg(env, db);
   const d = await resolveShare(cfg, p.s); // fresh sign/timestamp on every play
   if (!d) return new Response('Link expired or TeraBox unavailable', { status: 502 });
-  return Response.redirect(streamUrl(cfg, d, p.f, p.q), 302);
+  // Serve the playlist from this origin: the HLS proxy sends no CORS header, so a
+  // redirect to it is blocked by the browser. Segment URLs stay as the proxy wrote them.
+  const src = streamUrl(cfg, d, p.f, p.q);
+  let r;
+  try {
+    r = await fetch(src, { signal: AbortSignal.timeout(20000) });
+  } catch {
+    return new Response('HLS proxy unreachable', { status: 502 });
+  }
+  const body = await r.text();
+  if (!r.ok || !body.startsWith('#EXTM3U')) return new Response('HLS proxy error', { status: 502 });
+  const abs = body.replace(/^(?!#)(\S.*)$/gm, u => new URL(u, src).href);
+  return new Response(abs, { headers: { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' } });
 }
 
 function watch(url) {
@@ -34,9 +46,22 @@ function watch(url) {
 <script>
 try { Telegram.WebApp.ready(); Telegram.WebApp.expand(); } catch {}
 const v = document.getElementById('v'), src = ${JSON.stringify(src)};
-const fail = m => document.getElementById('e').textContent = 'Playback failed: ' + m;
-if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; v.onerror = () => fail('stream error'); }
-else if (Hls.isSupported()) { const h = new Hls(); h.loadSource(src); h.attachMedia(v); h.on(Hls.Events.ERROR, (_, d) => d.fatal && fail(d.details)); }
+const msg = t => document.getElementById('e').textContent = t;
+const fail = m => msg('Playback failed: ' + m);
+msg('Loading video...');
+v.addEventListener('playing', () => msg(''));
+if (Hls.isSupported()) {
+  // segments come through a proxy that is slow on its first request, so be patient and retry
+  const h = new Hls({ fragLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } }, maxBufferLength: 60 });
+  h.loadSource(src); h.attachMedia(v);
+  h.on(Hls.Events.ERROR, (_, d) => {
+    if (!d.fatal) return;
+    if (d.type === Hls.ErrorTypes.NETWORK_ERROR && d.details !== 'manifestLoadError') return h.startLoad();
+    if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return h.recoverMediaError();
+    fail(d.details + (d.response?.code ? ' (' + d.response.code + ')' : ''));
+  });
+}
+else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; v.onerror = () => fail('stream error'); }
 else fail('browser has no HLS support');
 </script></body></html>`,
     { headers: { 'content-type': 'text/html;charset=utf-8' } }
