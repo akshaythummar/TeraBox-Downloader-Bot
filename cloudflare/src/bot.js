@@ -126,18 +126,29 @@ export async function teraboxCfg(env, db) {
   });
 }
 
+// The resolver fails now and then for links that work a moment later, so a quick failure is
+// retried once (terabox.py's retry_request did 2 attempts too). No retry on a 4xx (dead link)
+// or a timeout: the resolver hangs on invalid codes, and retrying would double that wait.
 export async function resolveShare(cfg, code) {
-  try {
-    const r = await fetch(`${cfg.resolver}/?q=${encodeURIComponent(code)}`, {
-      signal: AbortSignal.timeout(20000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36', Accept: 'application/json, text/plain, */*' },
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d?.errno === 0 && d.list?.length ? d : null;
-  } catch {
-    return null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const r = await fetch(`${cfg.resolver}/?q=${encodeURIComponent(code)}`, {
+        signal: AbortSignal.timeout(15000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36', Accept: 'application/json, text/plain, */*' },
+      });
+      const text = await r.text();
+      let d = null;
+      try { d = JSON.parse(text); } catch {}
+      if (r.ok && d?.errno === 0 && d.list?.length) return d;
+      console.log(`resolver ${code} attempt ${attempt}: HTTP ${r.status} errno=${d?.errno} ${d?.show_msg || d?.errmsg || ''} ${d ? '' : text.slice(0, 150)}`);
+      if (r.status >= 400 && r.status < 500 && r.status !== 429) return null;
+    } catch (e) {
+      console.log(`resolver ${code} attempt ${attempt}: ${e.name} ${e.message}`);
+      if (e.name === 'TimeoutError') return null;
+    }
+    if (attempt === 1) await new Promise(res => setTimeout(res, 1000));
   }
+  return null;
 }
 
 // Resolver results are reused for 30 min: repeat links skip the ~3s resolver call and
