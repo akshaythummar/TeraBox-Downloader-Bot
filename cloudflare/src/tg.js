@@ -30,13 +30,15 @@ export function md(src) {
 
 export function makeApi(token, base = 'https://api.telegram.org') {
   let calls = 0;
+  // body: plain object (sent as JSON) or FormData (file uploads)
   const call = async (method, body) => {
     calls++;
     try {
+      const form = body instanceof FormData;
       const r = await fetch(`${base}/bot${token}/${method}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        ...(form ? {} : { headers: { 'content-type': 'application/json' } }),
+        body: form ? body : JSON.stringify(body),
       });
       const j = await r.json();
       if (!j.ok) console.log(method, 'failed:', j.description);

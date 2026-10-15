@@ -152,7 +152,7 @@ export async function resolveCached(env, db, code, fresh = false) {
   }
   const d = await resolveShare(await teraboxCfg(env, db), code);
   if (d) {
-    const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size })) };
+    const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size, thumb: i.thumbs?.url3 || i.thumbs?.url1 || null })) };
     await db.set(key, JSON.stringify(slim), { ex: SHARE_TTL });
   }
   return d;
@@ -326,7 +326,7 @@ export function createBot(env, api, db, origin) {
     if (!d) { await logx(`Resolver worker error for ${code}`); return false; }
     const files = d.list.filter(i => i.fs_id).map(i => ({
       file_name: sanitize(i.server_filename || 'video.mp4'), fid: String(i.fs_id), sizebytes: +i.size || 0,
-      size: +i.size ? fmtSize(+i.size) : 'Unknown', code,
+      size: +i.size ? fmtSize(+i.size) : 'Unknown', thumb: i.thumb || i.thumbs?.url3 || i.thumbs?.url1 || null, code,
     }));
     return files.length ? files : false;
   }
@@ -389,15 +389,34 @@ export function createBot(env, api, db, origin) {
          @AT_BOTZ
 `;
 
-  // The stream "video post": caption + play buttons, as a photo when the user set a /setthumb.
-  // (TeraBox's own thumbnail URLs aren't used: Telegram can't fetch them.)
-  async function sendStream(chatId, isPrivate, f, caption, q, photo) {
+  // The stream "video post": TeraBox's poster (else the user's /setthumb) + caption + play buttons.
+  // Telegram can't fetch TeraBox thumbnail URLs itself, so the worker downloads the image and
+  // uploads it once; Telegram's file_id is then remembered and reused for that video.
+  async function sendStream(chatId, isPrivate, f, caption, q, userThumb) {
     const href = await watchUrl(f.code, f.fid, q);
     const buttons = [[isPrivate ? Button.webapp('▶️ Watch Online', href) : Button.url('▶️ Watch Online', href)], [Button.url('🌐 Open in Browser', href)]];
-    if (photo) {
-      const r = await api.call('sendPhoto', { chat_id: chatId, photo, caption: md(caption), parse_mode: 'HTML', has_spoiler: SPOILER, reply_markup: { inline_keyboard: buttons } });
-      if (r.ok) return true;
+    const base = { chat_id: chatId, caption: md(caption), parse_mode: 'HTML', has_spoiler: SPOILER, reply_markup: { inline_keyboard: buttons } };
+    const posterKey = `tbposter:${f.code}:${f.fid}`;
+    let photo = (await db.get(posterKey)) || null;
+    if (!photo && f.thumb) {
+      // ponytail: data.1024terabox.com sometimes answers Workers with a Cloudflare 530; the
+      // same thumbnail is served by TeraBox's other data hosts, so try those next.
+      for (const host of ['data.1024terabox.com', 'data.terabox.com', 'data.1024tera.com']) {
+        try {
+          const img = await fetch(f.thumb.replace(/^https:\/\/[^/]+/, `https://${host}`), { signal: AbortSignal.timeout(5000) });
+          if (!img.ok || !(img.headers.get('content-type') || '').startsWith('image/')) { console.log('poster', host, img.status, (await img.text()).slice(0, 80)); continue; }
+          const form = new FormData();
+          for (const [k, v] of Object.entries(base)) form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+          form.append('photo', new Blob([await img.arrayBuffer()], { type: 'image/jpeg' }), 'poster.jpg');
+          const r = await api.call('sendPhoto', form);
+          if (!r.ok) break;
+          await db.set(posterKey, r.result.photo.at(-1).file_id, { ex: 30 * 86400 });
+          return true;
+        } catch (e) { console.log('poster', host, e.message); }
+      }
     }
+    photo ||= userThumb;
+    if (photo && (await api.call('sendPhoto', { ...base, photo })).ok) return true;
     return !!(await api.send(chatId, caption, { buttons }));
   }
 
