@@ -24,6 +24,7 @@ const LINK_COUNTS_KEY = 'link_counts';
 const INDEX_KEY = 'lib:index';
 const LOG_KEY = 'bot_log';
 const FREE_MODE_KEY = 'videos_free_mode';
+const PLANS_PHOTO = 'https://iili.io/nXUjApR.md.png';
 const GC_LIST_PER_PAGE = 10;
 const TIERS = [[5, 1], [10, 3], [25, 7]];
 
@@ -65,7 +66,7 @@ const WELCOME_TEXT = `
 
 Simply send me a **TeraBox link** and I'll download the video for you instantly.
 
-⚡ Free: 10 downloads/hour
+⚡ Free: Unlimited streaming links
 ⭐ Premium: Unlimited + no limits
 
 Choose an option below 👇
@@ -74,6 +75,7 @@ Choose an option below 👇
 // ---------------- pure helpers (tools.py) ---------------- //
 
 const nowS = () => Date.now() / 1000;
+const escHtml = t => String(t ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
 const int = v => { const n = parseInt(v, 10); return Number.isNaN(n) ? 0 : n; };
 const fmtSize = b => {
   b = +b || 0;
@@ -206,6 +208,7 @@ export function createBot(env, api, db, origin) {
     return {
       MAX_FILES_PER_REQUEST: int(o.MAX_FILES_PER_REQUEST ?? 10),
       DOWNLOAD_COOLDOWN_SECONDS: int(o.DOWNLOAD_COOLDOWN_SECONDS ?? 10),
+      FREE_HOURLY_LIMIT: int(o.FREE_HOURLY_LIMIT ?? 0),
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
     };
@@ -738,11 +741,11 @@ mp4, mkv, webm, mov, avi, flv, wmv, m4v, mpg, mpeg, 3gp, ts, and more...
 **Your Status:** ${status}
 
 **Free Plan:**
-• 10 downloads/hour
+• Unlimited streaming links
 • Single file only
 
 **Premium Plan:**
-• ✅ Unlimited downloads
+• ✅ /videos access
 • ✅ Multi-file support
 • ✅ No size limit
 • ✅ Priority speed
@@ -993,6 +996,7 @@ Use: \`/logs\` or \`/logs 50\`
   const SPECS = {
     MAX_FILES_PER_REQUEST: { section: 'Limits', kind: 'int', min: 1, max: 50 },
     DOWNLOAD_COOLDOWN_SECONDS: { section: 'Limits', kind: 'int', min: 0, max: 300 },
+    FREE_HOURLY_LIMIT: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
@@ -1045,11 +1049,11 @@ Restore: reply to the file with \`/restore\`
 ┗━━━━━━━━━━━━━━━━━━━━━⍟
 
 🌟 **Free Plan**
-• 10 downloads/hour
+• Unlimited streaming links
 • Single file only
 
 ⚡ **Premium Plan**
-• Unlimited downloads
+• /videos access
 • Multi-file support
 • No size limit
 • Priority speed
@@ -1109,9 +1113,10 @@ Contact @buggybeats for premium.
       const cd = Math.floor(rt.DOWNLOAD_COOLDOWN_SECONDS - (nowS() - parseFloat(g.lastDl)));
       if (cd > 0) return m.reply(`⏳ Please wait **${cd} seconds** before downloading again.`);
     }
-    if (free && int(g.count) >= 10) {
+    // 0 = unlimited links for everyone (default); /configset FREE_HOURLY_LIMIT 10 brings the old cap back
+    if (free && rt.FREE_HOURLY_LIMIT && int(g.count) >= rt.FREE_HOURLY_LIMIT) {
       const ttl = g.countExp ? Math.floor(g.countExp - nowS()) : 0;
-      return m.reply(`You've reached your limit (10 videos/hour).\nTry again in **${ttl > 0 ? convertSeconds(ttl) : '1 hour'}**.\nUpgrade to **Premium** for unlimited downloads.`);
+      return m.reply(`You've reached your limit (${rt.FREE_HOURLY_LIMIT} videos/hour).\nTry again in **${ttl > 0 ? convertSeconds(ttl) : '1 hour'}**.\nUpgrade to **Premium** for unlimited downloads.`);
     }
 
     // The resolver (the slow part) runs while we post the status message and check membership.
@@ -1801,8 +1806,10 @@ Contact @buggybeats for premium.
     const vkey = uid => `video_state:${int(uid)}`;
     const setState = async (uid, fields) => { for (const [k, v] of Object.entries(fields)) await db.hset(vkey(uid), k, String(v)); };
     const freeMode = () => cached('vfree', async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; });
+    // Bot premium (referral, gift code, /pre…) and admins also unlock /videos.
     async function hasAccess(uid, state) {
       if (await freeMode()) return true;
+      if ((await isAdmin(uid)) || (await isPremium(uid))) return true;
       if ((await getJ(`${pay}/api/subscription/status/${int(uid)}`))?.subscribed) return true;
       const el = nowS() - parseFloat(state.trial_start_time);
       return state.trial_start_time && el >= 0 && el <= trialSeconds;
@@ -1836,20 +1843,100 @@ Contact @buggybeats for premium.
       if (!state.trial_start_time || int(parseFloat(state.trial_start_time)) === 0)
         return m.reply('🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to claim your <b>3-minute free trial</b> and start watching videos right now:', { html: true, buttons: [[Button.inline('🎁 Get Free 3-Min Trial', 'vid_trial')]] });
       await m.reply('⏰ <b>Your 3-minute free trial has expired!</b>\nPlease choose a plan below to continue watching.', { html: true });
-      const plans = ((await getJ(`${pay}/api/plans`))?.plans || []).filter(p => p.status === 'active');
-      if (!plans.length) return m.reply('⚠️ No plans available right now. Contact admin.');
-      await m.reply('🗂️ Select a Plan for Unlimited Videos\n\n📋 Available Plans:', { buttons: plans.map(p => [Button.inline(`${p.name} - ₹${p.price} (${p.validity_days} days)`, `vid_plan_${p.id}`)]) });
+      await showPlans(m.chatId);
     });
+
+    async function showPlans(chatId) {
+      const res = await getJ(`${pay}/api/plans`);
+      if (!res) return api.send(chatId, '⚠️ Error loading plans. Please try again later.');
+      const plans = (res.plans || []).filter(p => p.status === 'active');
+      if (!plans.length) return api.send(chatId, '⚠️ No plans available right now. Contact admin.');
+      const buttons = plans.map(p => [Button.inline(`${p.name} - ₹${p.price} (${p.validity_days} days)`, `vid_plan_${p.id}`)]);
+      const caption = '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
+      const r = await api.call('sendPhoto', { chat_id: chatId, photo: PLANS_PHOTO, caption, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+      if (!r.ok) await api.send(chatId, caption, { html: true, buttons });
+    }
     onCb(/^vid_trial$/, async e => {
       await setState(e.uid, { trial_start_time: nowS() });
       await e.answer('Trial activated!');
       await e.reply('🎉 <b>Your 3-minute free trial is now ACTIVE!</b>', { html: true });
       await serveVideo(e.chatId, e.uid, e);
     });
-    onCb(/^vid_plan_(.+)$/, async e => {
-      await e.answer('Contact admin to complete payment.', true);
-      await e.reply(`📋 Selected plan #${e.data.slice(9)}.\n\nPayment completion isn't wired up yet — contact an admin to finish your purchase.`);
+    // /purchase<N> from the old bot: create an order on the payment worker, show Pay + Verify.
+    onCb(/^vid_plan_(\d+)$/, async e => {
+      await e.answer();
+      const chatId = e.chatId, uid = e.uid, planId = int(e.data.slice(9));
+      const busyMsg = await api.send(chatId, '⏳ Creating payment request...');
+      const done = async text => { await busyMsg?.delete(); return text ? api.send(chatId, text, { html: true }) : null; };
+
+      const status = await getJ(`${pay}/api/subscription/status/${uid}`);
+      if (!status) return done('❌ Error fetching user data. Please try again.');
+      if (status.subscribed) return done('✅ You already have an active subscription!');
+      let token = status.user_token;
+      if (!token) token = (await getJ(`${pay}/api/telegram/register`, { telegram_id: uid, name: e.from.username || 'User' }))?.user_token;
+      if (!token) return done('❌ Error fetching user data. Please try again.');
+
+      const plan = ((await getJ(`${pay}/api/plans`))?.plans || []).find(p => int(p.id) === planId);
+      if (!plan) return done('❌ Plan not found. Please try again.');
+
+      let order;
+      try {
+        const r = await fetch(`${pay}/api/create-order`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({
+            customer_mobile: '9999999999', user_token: token, amount: int(plan.price),
+            order_id: `ORD${Math.floor(nowS())}${String(token).slice(-4)}`, plan_id: int(plan.id),
+            redirect_url: 'https://t.me/at_botz', remark1: `plan_${plan.id}`, remark2: 'telegram_bot',
+          }),
+        });
+        if (![200, 201].includes(r.status)) { await logx(`create-order ${uid} HTTP ${r.status}`); return done(`❌ Payment server error (${r.status}). Please try again.`); }
+        order = await r.json();
+      } catch (err) {
+        await logx(`create-order ${uid} failed: ${err.message}`);
+        return done('❌ Could not create the payment. Please try again.');
+      }
+      if (!order?.status || !order.result?.payment_url) return done(`❌ Failed to create order: ${escHtml(order?.message || 'Unknown error')}`);
+
+      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId }), { ex: 86400 });
+      await done();
+      await api.send(chatId,
+        `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${plan.price}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
+        "<b>📱 How to Pay:</b>\n1️⃣ Scan QR or click Pay button\n2️⃣ Complete payment in UPI app\n3️⃣ Click 'I've Paid' below\n\n⏰ Payment link expires in 5 minutes",
+        { html: true, buttons: [[Button.url(`💳 Pay ₹${plan.price}`, order.result.payment_url)], [Button.inline("✅ I've Paid - Verify", 'vid_verify')]] });
     });
+
+    // /verifynew from the old bot: ask the payment worker whether the order was paid.
+    onCb(/^vid_verify$/, async e => {
+      await e.answer();
+      const chatId = e.chatId, raw = await db.get(`vid_order:${e.uid}`);
+      if (!raw) return api.send(chatId, '❌ No payment found. Please start again with /videos');
+      const o = JSON.parse(raw);
+      const checking = await api.send(chatId, '🔍 Checking payment status...');
+      let res = null;
+      try {
+        const r = await fetch(`${pay}/api/payment-status`, {
+          method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, signal: AbortSignal.timeout(15000),
+          body: new URLSearchParams({ order_id: o.order_id }),
+        });
+        res = r.status === 200 ? (await r.text()).trim() : null;
+      } catch (err) { await logx(`payment-status ${e.uid} failed: ${err.message}`); }
+      await checking?.delete();
+      if (res == null) return api.send(chatId, '❌ Error checking payment status.\n\nPlease try again later or contact support.');
+      if (res === 'success') {
+        await db.delete(`vid_order:${e.uid}`);
+        await logx(`payment ok ${e.uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}`);
+        for (const a of await getAllAdmins())
+          await api.send(a, `💰 Payment received\nUser: ${escHtml(e.from.first_name || '-')} (@${escHtml(e.from.username || '-')})\nID: <code>${e.uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
+        return api.send(chatId,
+          `🎉 <b>Payment Verified!</b>\n\n✅ Your payment of ₹${o.amount} has been confirmed.\n📋 Plan: ${escHtml(o.plan)}\n🆔 Order ID: <code>${o.order_id}</code>\n\nThank you! Your subscription has been activated.\nSend /videos to start watching 🎬`,
+          { html: true });
+      }
+      if (res === 'FAILURE') return api.send(chatId, '❌ <b>Payment Failed</b>\n\nYour payment was not successful. Please try again.', { html: true });
+      await api.send(chatId,
+        `⏳ <b>Payment Pending</b>\n\nYour payment has not been confirmed yet.\nPlease complete the payment and click verify again.\n\nOrder ID: <code>${o.order_id}</code>`,
+        { html: true, buttons: [[Button.inline("✅ I've Paid - Verify", 'vid_verify')]] });
+    });
+
     on(/^\/videosfreemode(?:\s+(on|off))?$/, async (m, g) => {
       if (!(await isAdmin(m.uid))) return m.reply('Not authorized.');
       const arg = (g[1] || '').toLowerCase();

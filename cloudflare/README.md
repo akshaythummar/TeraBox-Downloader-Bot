@@ -115,6 +115,9 @@ Everything not listed here works the same way.
 | `/setforce`, `/maxfiles`, `/setcooldown` changed memory only (lost on restart) | Saved in `config_overrides` (same as `/configset`) | Workers keep no memory between requests |
 | `/configset` keys | `MAX_FILES_PER_REQUEST`, `DOWNLOAD_COOLDOWN_SECONDS`, `FORCE_CHANNELS`, `FORCE_GROUPS` | The others (watermark, download dir, parallel downloads…) no longer exist |
 | `/setplan` text was saved but `/plan` never showed it | `/plan` shows it | Bug fix |
+| Free users: 10 links/hour | Unlimited (`FREE_HOURLY_LIMIT` = 0). `/configset FREE_HOURLY_LIMIT 10` brings the cap back | Requested |
+| `/videos` plan buttons said "contact admin" | Plan button → `create-order` → 💳 Pay + ✅ I've Paid - Verify (`/api/payment-status`), admins get a "💰 Payment received" message | Same flow as the old `/purchase1-4` + `/verifynew` |
+| `/videos` needed a payment subscription or the trial | Bot premium (referral, gift code, `/pre`) and admins also get `/videos` | Requested |
 | Language-menu tap added a second Admin Panel button for admins | Only one | Bug fix |
 
 ## 7. Local testing
