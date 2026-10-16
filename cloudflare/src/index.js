@@ -43,34 +43,90 @@ function watch(url) {
   if (!p) return new Response('Bad link', { status: 400 });
   const src = `/m3u8?s=${p.s}&f=${p.f}&q=${p.q}&t=${p.t}`;
   return new Response(
-    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>TeraBox Player</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
-<style>html,body{margin:0;height:100%;background:#000;color:#ccc;font:14px system-ui}video{width:100%;height:100%}#e{position:fixed;top:45%;width:100%;text-align:center}</style>
-</head><body><video id="v" controls autoplay playsinline></video><div id="e"></div>
+<style>
+html,body{margin:0;height:100%;background:#000;color:#eee;font:14px system-ui,sans-serif;overflow:hidden}
+video{width:100%;height:100%;object-fit:contain;background:#000}
+.spin{position:fixed;top:50%;left:50%;width:44px;height:44px;margin:-22px 0 0 -22px;border:4px solid #ffffff33;border-top-color:#fff;border-radius:50%;animation:r .8s linear infinite;pointer-events:none}
+@keyframes r{to{transform:rotate(360deg)}}
+.pill{position:fixed;top:max(12px,env(safe-area-inset-top));left:12px;padding:8px 14px;border:0;border-radius:20px;background:#000a;color:#fff;font:600 14px system-ui;cursor:pointer;backdrop-filter:blur(6px)}
+.flash{position:fixed;top:50%;transform:translateY(-50%);padding:10px 16px;border-radius:24px;background:#000a;color:#fff;font:600 16px system-ui;pointer-events:none;opacity:0;transition:opacity .2s}
+#err{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#000d;text-align:center;padding:24px}
+#err button{padding:10px 22px;border:0;border-radius:20px;background:#fff;color:#000;font:600 14px system-ui;cursor:pointer}
+[hidden]{display:none!important}
+</style>
+</head><body>
+<video id="v" controls autoplay muted playsinline preload="auto"></video>
+<div id="spin" class="spin"></div>
+<button id="unmute" class="pill" hidden>🔇 Tap to unmute</button>
+<div id="fl" class="flash"></div>
+<div id="err"><div id="em"></div><button onclick="location.reload()">↻ Retry</button></div>
 <script>
-try { Telegram.WebApp.ready(); Telegram.WebApp.expand(); } catch {}
-const v = document.getElementById('v'), src = ${JSON.stringify(src)};
-const msg = t => document.getElementById('e').textContent = t;
-const fail = m => msg('Playback failed: ' + m);
-msg('Loading video...');
-v.addEventListener('playing', () => msg(''));
-if (Hls.isSupported()) {
+const tg = window.Telegram && Telegram.WebApp;
+try { tg.ready(); tg.expand(); tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000'); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch {}
+const $ = id => document.getElementById(id), v = $('v'), src = ${JSON.stringify(src)};
+const KEY = 'pos:' + ${JSON.stringify(`${p.s}:${p.f}`)};
+const store = { get: () => { try { return +localStorage.getItem(KEY) || 0; } catch { return 0; } }, set: x => { try { x ? localStorage.setItem(KEY, x) : localStorage.removeItem(KEY); } catch {} } };
+
+// spinner while loading / buffering — no text
+const busy = on => $('spin').hidden = !on;
+['waiting', 'seeking', 'stalled'].forEach(e => v.addEventListener(e, () => busy(true)));
+['playing', 'canplay', 'seeked', 'pause'].forEach(e => v.addEventListener(e, () => busy(v.readyState < 3 && !v.paused)));
+
+// muted by default (also lets autoplay work everywhere); one tap to turn sound on
+v.muted = true;
+const syncMute = () => $('unmute').hidden = !v.muted || v.paused && !v.currentTime;
+v.addEventListener('volumechange', syncMute); v.addEventListener('playing', syncMute);
+$('unmute').onclick = () => { v.muted = false; if (v.volume === 0) v.volume = 1; v.play(); };
+
+// resume where you left off
+let resumed = false;
+v.addEventListener('loadedmetadata', () => {
+  const at = store.get();
+  if (!resumed && at > 5 && at < v.duration - 15) { v.currentTime = at; flash('⏯ Resumed ' + fmt(at), 50); }
+  resumed = true;
+});
+let last = 0;
+v.addEventListener('timeupdate', () => { if (Date.now() - last > 4000) { last = Date.now(); store.set(v.currentTime > 5 && v.currentTime < v.duration - 15 ? Math.floor(v.currentTime) : 0); } });
+v.addEventListener('ended', () => store.set(0));
+
+// double-tap left / right side to skip 10s (phones); keyboard on desktop
+const fmt = s => (s = Math.floor(s), Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'));
+let ft;
+function flash(t, x) { const f = $('fl'); f.textContent = t; f.style.left = x + '%'; f.style.transform = 'translate(-50%,-50%)'; f.style.opacity = 1; clearTimeout(ft); ft = setTimeout(() => f.style.opacity = 0, 700); }
+const skip = d => { v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + d)); flash(d < 0 ? '« 10s' : '10s »', d < 0 ? 22 : 78); };
+let tap = 0;
+v.addEventListener('touchend', e => {
+  const x = e.changedTouches[0].clientX / innerWidth, now = Date.now();
+  if (now - tap < 300 && (x < 0.35 || x > 0.65)) { e.preventDefault(); skip(x < 0.35 ? -10 : 10); tap = 0; } else tap = now;
+});
+addEventListener('keydown', e => {
+  if (e.key === ' ' || e.key === 'k') { e.preventDefault(); v.paused ? v.play() : v.pause(); }
+  else if (e.key === 'ArrowLeft' || e.key === 'j') skip(-10);
+  else if (e.key === 'ArrowRight' || e.key === 'l') skip(10);
+  else if (e.key === 'm') v.muted = !v.muted;
+  else if (e.key === 'f') document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen?.();
+});
+
+const fail = m => { busy(false); $('em').textContent = '⚠️ Video could not be played (' + m + '). The link may have expired — try again or resend it to the bot.'; $('err').style.display = 'flex'; };
+if (window.Hls && Hls.isSupported()) {
   // segments come through a proxy that is slow on its first request, so be patient and retry
-  const h = new Hls({ fragLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } }, maxBufferLength: 60 });
+  const h = new Hls({ fragLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } }, maxBufferLength: 60, startFragPrefetch: true });
   h.loadSource(src); h.attachMedia(v);
   h.on(Hls.Events.ERROR, (_, d) => {
     if (!d.fatal) return;
     if (d.type === Hls.ErrorTypes.NETWORK_ERROR && d.details !== 'manifestLoadError') return h.startLoad();
     if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return h.recoverMediaError();
-    fail(d.details + (d.response?.code ? ' (' + d.response.code + ')' : ''));
+    fail(d.details + (d.response?.code ? ' ' + d.response.code : ''));
   });
-}
-else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; v.onerror = () => fail('stream error'); }
-else fail('browser has no HLS support');
+} else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; v.onerror = () => fail('stream error'); }
+else fail('this browser cannot play HLS');
+v.play().catch(() => {});
 </script></body></html>`,
-    { headers: { 'content-type': 'text/html;charset=utf-8' } }
+    { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } }
   );
 }
 
