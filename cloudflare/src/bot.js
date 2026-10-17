@@ -1838,65 +1838,25 @@ Contact @buggybeats for premium.
     }
     // ---- per-user pool list (same as the old bot) ----
     // Each user gets 200 random links from the pool, served in order; when they run out, a new
-    // 200 is fetched. Two additions: most pool links are long expired (TeraBox 403), so the next
-    // WINDOW links are checked (1 byte each, in parallel) and dead ones skipped; and once a video
-    // has been sent, Telegram's file_id is kept (vid_meta: md5 → file_id) so any user who gets
+    // 200 is fetched. Once a video has been sent, Telegram's file_id is kept (vid_meta: md5 → file_id) so any user who gets
     // that video again receives it instantly, without Telegram downloading the file again.
-    const META = 'vid_meta', WINDOW = 40; // ponytail: 40 checks + ~6 other calls stays under 50 subrequests
+    const META = 'vid_meta';
     const md5Of = u => (String(u).match(/\/file\/([0-9a-f]{32})/) || [])[1] || null;
     const fidOf = v => { try { return JSON.parse(v).f || null; } catch { return v || null; } };
-    async function linkAlive(u) {
-      try {
-        const r = await fetch(u, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000) });
-        await r.arrayBuffer();
-        const size = +(r.headers.get('content-range') || '').split('/')[1] || 0;
-        // Telegram's send-by-URL limit is 20 MB
-        return (r.status === 206 || r.status === 200) && (r.headers.get('content-type') || '').startsWith('video/') && size <= 20 * 1048576;
-      } catch { return false; }
-    }
-    // The user's next playable video from their own list: { url, md5, fid } or null.
-    // Check results are remembered (video_ok = playable indexes, video_checked = checked up to),
-    // so most /videos calls need no checks at all. At most WINDOW links are checked per request.
+    // The user's next link from their own 200 (old bot behaviour): sent as-is, no checks.
+    // When the 200 are used up, a new 200 is fetched.
     async function nextVideo(uid, state) {
-      let links = state.video_links ? JSON.parse(state.video_links) : [];
-      let idx = int(state.video_index), checked = int(state.video_checked);
-      let ok = state.video_ok ? JSON.parse(state.video_ok) : [];
-      const fidsFor = async md5s => (md5s.length
-        ? Object.fromEntries((await db.all(`SELECT field, value FROM hashes WHERE key = ? AND field IN (${md5s.map(() => '?').join(',')})`, META, ...md5s)).map(r => [r.field, fidOf(r.value)]))
-        : {});
-      let budget = WINDOW, refetched = false;
-      for (;;) {
-        // 1) a link already found playable
-        const known = ok.filter(i => i >= idx && i < links.length);
-        if (known.length) {
-          const i = known[0], md5 = md5Of(links[i]);
-          const fid = md5 ? (await fidsFor([md5]))[md5] : null;
-          await setState(uid, { video_index: i + 1, video_ok: JSON.stringify(known.slice(1)) });
-          return { url: links[i], md5, fid };
-        }
-        idx = Math.max(idx, checked);
-        // 2) list used up → a new 200 (once per request), like the old bot
-        if (!links.length || idx >= links.length) {
-          if (refetched) break;
-          refetched = true;
-          links = (await getJ(`${pool}/?random=200`))?.links || [];
-          if (!links.length) break;
-          idx = checked = 0;
-          ok = [];
-          await setState(uid, { video_links: JSON.stringify(links), video_index: 0, video_checked: 0, video_ok: '[]' });
-        }
-        if (budget <= 0) break;
-        // 3) check the next links in parallel (1 byte each); file_id ones need no check
-        const win = links.slice(idx, idx + budget).map((url, k) => ({ url, i: idx + k, md5: md5Of(url) }));
-        budget -= win.length;
-        const fids = await fidsFor(win.map(c => c.md5).filter(Boolean));
-        const alive = await Promise.all(win.map(c => (fids[c.md5] ? true : linkAlive(c.url))));
-        ok = win.filter((c, k) => alive[k]).map(c => c.i);
-        checked = idx + win.length;
-        await setState(uid, { video_index: idx, video_checked: checked, video_ok: JSON.stringify(ok) });
+      let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index);
+      if (!links.length || idx >= links.length) {
+        links = (await getJ(`${pool}/?random=200`))?.links || [];
+        if (!links.length) return null;
+        idx = 0;
+        await setState(uid, { video_links: JSON.stringify(links) });
       }
-      await setState(uid, { video_index: idx });
-      return null;
+      await setState(uid, { video_index: idx + 1 });
+      const url = links[idx], md5 = md5Of(url);
+      const fid = md5 ? fidOf(await db.hget(META, md5)) : null;
+      return { url, md5, fid };
     }
     async function serveVideo(chatId, uid, target) {
       const [, state] = await Promise.all([
