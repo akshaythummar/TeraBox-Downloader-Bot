@@ -1794,7 +1794,6 @@ Contact @buggybeats for premium.
   });
 
   // ==================== commands/videos.py ====================
-  let poolTick = null; // set below when /videos is configured; run by the cron
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, ''), pool = env.VIDEOS_POOL_WORKER.replace(/\/$/, '');
     const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), cooldown = parseFloat(env.VIDEOS_COOLDOWN_SECONDS || 1), promo = env.VIDEOS_PROMO_URL || '';
@@ -1837,97 +1836,81 @@ Contact @buggybeats for premium.
       const el = nowS() - parseFloat(state.trial_start_time);
       return state.trial_start_time && el >= 0 && el <= trialSeconds;
     }
-    // ---- video library ----
-    // Most pool links are long expired (TeraBox 403), and a link makes Telegram download the
-    // whole file on every send. So: the cron collects pool links that still work (vid_lib, in
-    // order found), and once a video is sent, Telegram's file_id is kept — later sends of it are
-    // instant and never expire. vid_meta: md5 → {u: url, f: file_id}.
-    const LIB = 'vid_lib', META = 'vid_meta', LIB_TARGET = 400;
+    // ---- per-user pool list (same as the old bot) ----
+    // Each user gets 200 random links from the pool, served in order; when they run out, a new
+    // 200 is fetched. Two additions: most pool links are long expired (TeraBox 403), so the next
+    // WINDOW links are checked (1 byte each, in parallel) and dead ones skipped; and once a video
+    // has been sent, Telegram's file_id is kept (vid_meta: md5 → file_id) so any user who gets
+    // that video again receives it instantly, without Telegram downloading the file again.
+    const META = 'vid_meta', WINDOW = 40; // ponytail: 40 checks + ~6 other calls stays under 50 subrequests
     const md5Of = u => (String(u).match(/\/file\/([0-9a-f]{32})/) || [])[1] || null;
-    async function libAdd(md5, url, fid) {
-      const meta = JSON.stringify(fid ? { u: url, f: fid } : { u: url });
-      await db.d.batch([
-        db.q('INSERT INTO sorted_sets(key, member, score) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', LIB, md5, Date.now()),
-        fid ? db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', META, md5, meta)
-          : db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', META, md5, meta),
-      ]);
+    const fidOf = v => { try { return JSON.parse(v).f || null; } catch { return v || null; } };
+    async function linkAlive(u) {
+      try {
+        const r = await fetch(u, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000) });
+        await r.arrayBuffer();
+        const size = +(r.headers.get('content-range') || '').split('/')[1] || 0;
+        // Telegram's send-by-URL limit is 20 MB
+        return (r.status === 206 || r.status === 200) && (r.headers.get('content-type') || '').startsWith('video/') && size <= 20 * 1048576;
+      } catch { return false; }
     }
-    const libDrop = md5 => db.d.batch([db.q('DELETE FROM sorted_sets WHERE key = ? AND member = ?', LIB, md5), db.q('DELETE FROM hashes WHERE key = ? AND field = ?', META, md5)]);
-    // the user's next library video: after their last position, wrapping to the start;
-    // a new user starts at a random place so everyone doesn't get the same first videos
-    async function libNext(state) {
-      const pos = parseFloat(state.vid_pos);
-      let row;
-      if (pos > 0) {
-        row = (await db.one('SELECT member, score FROM sorted_sets WHERE key = ? AND score > ? ORDER BY score LIMIT 1', LIB, pos))
-          || (await db.one('SELECT member, score FROM sorted_sets WHERE key = ? ORDER BY score LIMIT 1', LIB));
-      } else {
-        const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', LIB)).n;
-        if (n) row = await db.one('SELECT member, score FROM sorted_sets WHERE key = ? ORDER BY score LIMIT 1 OFFSET ?', LIB, Math.floor(Math.random() * n));
+    // The user's next playable video from their own list: { url, md5, fid } or null.
+    // Check results are remembered (video_ok = playable indexes, video_checked = checked up to),
+    // so most /videos calls need no checks at all. At most WINDOW links are checked per request.
+    async function nextVideo(uid, state) {
+      let links = state.video_links ? JSON.parse(state.video_links) : [];
+      let idx = int(state.video_index), checked = int(state.video_checked);
+      let ok = state.video_ok ? JSON.parse(state.video_ok) : [];
+      const fidsFor = async md5s => (md5s.length
+        ? Object.fromEntries((await db.all(`SELECT field, value FROM hashes WHERE key = ? AND field IN (${md5s.map(() => '?').join(',')})`, META, ...md5s)).map(r => [r.field, fidOf(r.value)]))
+        : {});
+      let budget = WINDOW, refetched = false;
+      for (;;) {
+        // 1) a link already found playable
+        const known = ok.filter(i => i >= idx && i < links.length);
+        if (known.length) {
+          const i = known[0], md5 = md5Of(links[i]);
+          const fid = md5 ? (await fidsFor([md5]))[md5] : null;
+          await setState(uid, { video_index: i + 1, video_ok: JSON.stringify(known.slice(1)) });
+          return { url: links[i], md5, fid };
+        }
+        idx = Math.max(idx, checked);
+        // 2) list used up → a new 200 (once per request), like the old bot
+        if (!links.length || idx >= links.length) {
+          if (refetched) break;
+          refetched = true;
+          links = (await getJ(`${pool}/?random=200`))?.links || [];
+          if (!links.length) break;
+          idx = checked = 0;
+          ok = [];
+          await setState(uid, { video_links: JSON.stringify(links), video_index: 0, video_checked: 0, video_ok: '[]' });
+        }
+        if (budget <= 0) break;
+        // 3) check the next links in parallel (1 byte each); file_id ones need no check
+        const win = links.slice(idx, idx + budget).map((url, k) => ({ url, i: idx + k, md5: md5Of(url) }));
+        budget -= win.length;
+        const fids = await fidsFor(win.map(c => c.md5).filter(Boolean));
+        const alive = await Promise.all(win.map(c => (fids[c.md5] ? true : linkAlive(c.url))));
+        ok = win.filter((c, k) => alive[k]).map(c => c.i);
+        checked = idx + win.length;
+        await setState(uid, { video_index: idx, video_checked: checked, video_ok: JSON.stringify(ok) });
       }
-      if (!row) return null;
-      const meta = JSON.parse((await db.hget(META, row.member)) || '{}');
-      return { md5: row.member, pos: row.score, url: meta.u, fid: meta.f, lib: true };
-    }
-    // fallback while the library is empty: the user's own random pool list (old behaviour)
-    async function poolNext(uid, state) {
-      let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index);
-      if (!links.length || idx >= links.length) {
-        links = (await getJ(`${pool}/?random=200`))?.links || [];
-        if (!links.length) return null;
-        idx = 0;
-        state.video_links = JSON.stringify(links);
-        await setState(uid, { video_links: state.video_links });
-      }
-      state.video_index = idx + 1;
-      await setState(uid, { video_index: idx + 1 });
-      return { md5: md5Of(links[idx]), url: links[idx] };
+      await setState(uid, { video_index: idx });
+      return null;
     }
     async function serveVideo(chatId, uid, target) {
       const [, state] = await Promise.all([
         api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" right away
         db.hgetall(vkey(uid)),
       ]);
+      const c = await nextVideo(uid, state);
+      if (!c) return target.reply('❌ No videos found, try again in a moment.');
       const markup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
-      for (let attempt = 0; attempt < 3; attempt++) { // a dead link → try the next one
-        const c = (await libNext(state)) || (await poolNext(uid, state));
-        if (!c) return target.reply('❌ No videos found, try again in a moment.');
-        if (c.lib) { state.vid_pos = c.pos; await setState(uid, { vid_pos: c.pos }); }
-        const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
-        if (r.ok) {
-          const fid = r.result?.video?.file_id;
-          if (fid && !c.fid && c.md5) await libAdd(c.md5, c.url, fid);
-          return;
-        }
-        if (c.lib && !c.fid) await libDrop(c.md5); // its link died since the cron checked it
-      }
-      await target.reply('❌ Video error: server busy, please try again in a moment.');
+      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
+      if (!r.ok) return target.reply('❌ Video error: server busy, please try again in a moment.');
+      const fid = r.result?.video?.file_id;
+      if (fid && !c.fid && c.md5) await db.hset(META, c.md5, fid);
     }
-    // cron: check pool links (1 byte each) and keep the ones that still play and fit
-    // Telegram's 20 MB send-by-URL limit. ~1 in 40 pool links works today.
-    poolTick = async minute => {
-      const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', LIB)).n;
-      if (n >= LIB_TARGET && minute % 15) return; // library full: top up every 15 min only
-      const links = ((await getJ(`${pool}/?random=200`))?.links || []).sort(() => Math.random() - 0.5);
-      const cand = [...new Map(links.map(u => [md5Of(u), u])).entries()].filter(([m]) => m).slice(0, 35);
-      if (!cand.length) return;
-      const known = new Set((await db.all(`SELECT member FROM sorted_sets WHERE key = ? AND member IN (${cand.map(() => '?').join(',')})`, LIB, ...cand.map(([m]) => m))).map(r => r.member));
-      const alive = (await Promise.all(cand.filter(([m]) => !known.has(m)).map(async ([m, u]) => {
-        try {
-          const r = await fetch(u, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000) });
-          await r.arrayBuffer();
-          const size = +(r.headers.get('content-range') || '').split('/')[1] || 0;
-          return (r.status === 206 || r.status === 200) && (r.headers.get('content-type') || '').startsWith('video/') && size <= 20 * 1048576 ? [m, u] : null;
-        } catch { return null; }
-      }))).filter(Boolean);
-      for (const [m, u] of alive) await libAdd(m, u);
-      if (alive.length) console.log(`video library +${alive.length} (had ${n})`);
-    };
-
-    on(/^\/videoslib$/, async m => {
-      const r = await db.one("SELECT (SELECT COUNT(*) FROM sorted_sets WHERE key = ?1) n, (SELECT COUNT(*) FROM hashes WHERE key = ?2 AND value LIKE '%\"f\":%') f", LIB, META);
-      await m.reply(`🎬 Video library: **${r.n}** videos (${r.f} with Telegram file_id = instant)\nTarget: ${LIB_TARGET}. The cron adds working pool links every minute.`);
-    }, ADMIN);
 
     on(/^\/videos$/, async m => {
       const state = await db.hgetall(vkey(m.uid));
@@ -2142,12 +2125,7 @@ Contact @buggybeats for premium.
   }
 
   async function cron(minute) {
-    const broadcasting = await broadcastTick();
-    // ponytail: pool checks share the free plan's 50-subrequest budget, so they skip minutes
-    // that already send a broadcast batch or the hourly reminders
-    if (poolTick && !broadcasting && minute !== 0) {
-      try { await poolTick(minute); } catch (e) { console.log('poolTick', e.message); }
-    }
+    await broadcastTick();
     if (minute === 0) {
       await reminderSweep();
       await db.run('DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?', nowS());
