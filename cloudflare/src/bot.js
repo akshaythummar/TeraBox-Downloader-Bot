@@ -1860,11 +1860,11 @@ Contact @buggybeats for premium.
       return { url, md5, fid };
     }
     // ---- pre-uploaded videos (instant /videos) ----
-    // The cron uploads working pool videos to VIDEOS_CHANNEL (the old storage channel) and keeps
+    // The cron uploads pool videos to VIDEOS_CHANNEL (the old storage channel) and keeps
     // their Telegram file_id: vid_ready = md5 → upload order, vid_meta = md5 → {u, f}. Each user
     // walks vid_ready from the start (vid_pos); once they've had them all, /videos falls back to
     // their own 200 links exactly as before.
-    const READY = 'vid_ready', CHANNEL = env.VIDEOS_CHANNEL || '';
+    const READY = 'vid_ready';
     const readyMarkup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
     async function nextReady(state) {
       const row = await db.one('SELECT member, score FROM sorted_sets WHERE key = ? AND score > ? ORDER BY score LIMIT 1', READY, parseFloat(state.vid_pos) || 0);
@@ -1872,40 +1872,52 @@ Contact @buggybeats for premium.
       const fid = fidOf(await db.hget(META, row.member));
       return fid ? { md5: row.member, pos: row.score, fid } : null;
     }
-    // ponytail: 30 one-byte checks + ≤5 uploads + 1 pool fetch stays under the free plan's 50
-    // subrequests; ~1 in 15–40 pool links still works, so this adds roughly 1–2 videos a minute
+    // ponytail: 45 sends + 1 pool fetch stays under the free plan's 50 subrequests per cron run.
+    // Telegram caps how fast a bot may post into one channel: a 429 drops that channel until the
+    // next run. More channels in VIDEOS_CHANNEL (comma-separated) = more uploads per minute.
+    // Daily cap keeps D1 under its free 100k rows written/day (2 rows per upload).
+    const CHANNELS = String(env.VIDEOS_CHANNEL || '').split(',').map(x => x.trim()).filter(Boolean);
+    const PER_RUN = 45, PER_DAY = int(env.VIDEOS_UPLOADS_PER_DAY || 25000);
     uploadTick = async () => {
-      if (!CHANNEL) return;
-      const links = ((await getJ(`${pool}/?random=200`))?.links || []).sort(() => Math.random() - 0.5);
-      const cand = [...new Map(links.map(u => [md5Of(u), u])).entries()].filter(([m]) => m).slice(0, 30);
-      if (!cand.length) return;
-      const have = new Set((await db.all(`SELECT field FROM hashes WHERE key = ? AND value LIKE '%"f":%' AND field IN (${cand.map(() => '?').join(',')})`, META, ...cand.map(([m]) => m))).map(r => r.field));
-      const todo = cand.filter(([m]) => !have.has(m));
-      const alive = (await Promise.all(todo.map(async ([m, u]) => {
-        try {
-          const r = await fetch(u, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000) });
-          await r.arrayBuffer();
-          const size = +(r.headers.get('content-range') || '').split('/')[1] || 0;
-          return (r.status === 206 || r.status === 200) && (r.headers.get('content-type') || '').startsWith('video/') && size <= 20 * 1048576 ? [m, u] : null;
-        } catch { return null; }
-      }))).filter(Boolean).slice(0, 5);
-      let added = 0;
-      for (const [m, u] of alive) {
-        const r = await api.call('sendVideo', { chat_id: CHANNEL, video: u, supports_streaming: true, disable_notification: true });
-        const fid = r.result?.video?.file_id;
-        if (!fid) continue;
-        await db.d.batch([
-          db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', META, m, JSON.stringify({ u, f: fid })),
-          db.q('INSERT INTO sorted_sets(key, member, score) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', READY, m, Date.now()),
-        ]);
-        added++;
+      if (!CHANNELS.length) return;
+      const dayKey = `vid_up:${new Date().toISOString().slice(0, 10)}`;
+      const today = int(await db.get(dayKey));
+      if (today >= PER_DAY) return;
+      const links = (await getJ(`${pool}/?random=200`))?.links || [];
+      const cand = [...new Map(links.map(u => [md5Of(u), u])).entries()].filter(([m]) => m);
+      const have = new Set();
+      for (let i = 0; i < cand.length; i += 90) { // D1: max 100 bound parameters per query
+        const part = cand.slice(i, i + 90).map(([m]) => m);
+        for (const r of await db.all(`SELECT field FROM hashes WHERE key = ? AND value LIKE '%"f":%' AND field IN (${part.map(() => '?').join(',')})`, META, ...part)) have.add(r.field);
       }
-      if (added) console.log(`videos ready +${added}`);
+      const todo = cand.filter(([m]) => !have.has(m)).slice(0, Math.min(PER_RUN, PER_DAY - today));
+      const live = [...CHANNELS], done = [];
+      let k = 0;
+      for (const [m, u] of todo) {
+        if (!live.length) break;
+        const ch = live[k++ % live.length];
+        const r = await api.call('sendVideo', { chat_id: ch, video: u, supports_streaming: true, disable_notification: true });
+        const fid = r.result?.video?.file_id;
+        if (fid) done.push([m, u, fid]);
+        else if (r.error_code === 429) live.splice(live.indexOf(ch), 1); // channel rate limit: stop it for this run
+      }
+      for (let i = 0; i < done.length; i += 30) { // multi-row writes, 90 parameters each
+        const part = done.slice(i, i + 30), now = Date.now();
+        await db.d.batch([
+          db.q(`INSERT INTO hashes(key, field, value) VALUES ${part.map(() => `('${META}', ?, ?)`).join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
+            ...part.flatMap(([m, u, f]) => [m, JSON.stringify({ u, f })])),
+          db.q(`INSERT INTO sorted_sets(key, member, score) VALUES ${part.map(() => `('${READY}', ?, ?)`).join(', ')} ON CONFLICT DO NOTHING`,
+            ...part.flatMap(([m], j) => [m, now + i + j])),
+        ]);
+      }
+      if (done.length) await db.set(dayKey, today + done.length, { ex: 2 * 86400 });
+      console.log(`videos uploaded ${done.length}/${todo.length} (today ${today + done.length})${live.length < CHANNELS.length ? ' — channel rate limit hit' : ''}`);
     };
 
     on(/^\/videosready$/, async m => {
       const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', READY)).n;
-      await m.reply(`🎬 Instant videos ready: **${n}**\nChannel: \`${CHANNEL || 'not set'}\` — the cron uploads ~1–2 a minute.`);
+      const today = int(await db.get(`vid_up:${new Date().toISOString().slice(0, 10)}`));
+      await m.reply(`🎬 Instant videos ready: **${n}**\nUploaded today: ${today}/${PER_DAY}\nChannel(s): \`${CHANNELS.join(', ') || 'not set'}\` — up to ${PER_RUN} per minute.`);
     }, ADMIN);
 
     async function serveVideo(chatId, uid, target) {
