@@ -1794,6 +1794,7 @@ Contact @buggybeats for premium.
   });
 
   // ==================== commands/videos.py ====================
+  let uploadTick = null; // set below when /videos is configured; run by the cron
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, ''), pool = env.VIDEOS_POOL_WORKER.replace(/\/$/, '');
     const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), cooldown = parseFloat(env.VIDEOS_COOLDOWN_SECONDS || 1), promo = env.VIDEOS_PROMO_URL || '';
@@ -1858,18 +1859,78 @@ Contact @buggybeats for premium.
       const fid = md5 ? fidOf(await db.hget(META, md5)) : null;
       return { url, md5, fid };
     }
+    // ---- pre-uploaded videos (instant /videos) ----
+    // The cron uploads working pool videos to VIDEOS_CHANNEL (the old storage channel) and keeps
+    // their Telegram file_id: vid_ready = md5 → upload order, vid_meta = md5 → {u, f}. Each user
+    // walks vid_ready from the start (vid_pos); once they've had them all, /videos falls back to
+    // their own 200 links exactly as before.
+    const READY = 'vid_ready', CHANNEL = env.VIDEOS_CHANNEL || '';
+    const readyMarkup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
+    async function nextReady(state) {
+      const row = await db.one('SELECT member, score FROM sorted_sets WHERE key = ? AND score > ? ORDER BY score LIMIT 1', READY, parseFloat(state.vid_pos) || 0);
+      if (!row) return null;
+      const fid = fidOf(await db.hget(META, row.member));
+      return fid ? { md5: row.member, pos: row.score, fid } : null;
+    }
+    // ponytail: 30 one-byte checks + ≤5 uploads + 1 pool fetch stays under the free plan's 50
+    // subrequests; ~1 in 15–40 pool links still works, so this adds roughly 1–2 videos a minute
+    uploadTick = async () => {
+      if (!CHANNEL) return;
+      const links = ((await getJ(`${pool}/?random=200`))?.links || []).sort(() => Math.random() - 0.5);
+      const cand = [...new Map(links.map(u => [md5Of(u), u])).entries()].filter(([m]) => m).slice(0, 30);
+      if (!cand.length) return;
+      const have = new Set((await db.all(`SELECT field FROM hashes WHERE key = ? AND value LIKE '%"f":%' AND field IN (${cand.map(() => '?').join(',')})`, META, ...cand.map(([m]) => m))).map(r => r.field));
+      const todo = cand.filter(([m]) => !have.has(m));
+      const alive = (await Promise.all(todo.map(async ([m, u]) => {
+        try {
+          const r = await fetch(u, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000) });
+          await r.arrayBuffer();
+          const size = +(r.headers.get('content-range') || '').split('/')[1] || 0;
+          return (r.status === 206 || r.status === 200) && (r.headers.get('content-type') || '').startsWith('video/') && size <= 20 * 1048576 ? [m, u] : null;
+        } catch { return null; }
+      }))).filter(Boolean).slice(0, 5);
+      let added = 0;
+      for (const [m, u] of alive) {
+        const r = await api.call('sendVideo', { chat_id: CHANNEL, video: u, supports_streaming: true, disable_notification: true });
+        const fid = r.result?.video?.file_id;
+        if (!fid) continue;
+        await db.d.batch([
+          db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', META, m, JSON.stringify({ u, f: fid })),
+          db.q('INSERT INTO sorted_sets(key, member, score) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', READY, m, Date.now()),
+        ]);
+        added++;
+      }
+      if (added) console.log(`videos ready +${added}`);
+    };
+
+    on(/^\/videosready$/, async m => {
+      const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', READY)).n;
+      await m.reply(`🎬 Instant videos ready: **${n}**\nChannel: \`${CHANNEL || 'not set'}\` — the cron uploads ~1–2 a minute.`);
+    }, ADMIN);
+
     async function serveVideo(chatId, uid, target) {
       const [, state] = await Promise.all([
         api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" right away
         db.hgetall(vkey(uid)),
       ]);
+      // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant
+      for (let tries = 0; tries < 2; tries++) {
+        const rv = await nextReady(state);
+        if (!rv) break;
+        state.vid_pos = rv.pos;
+        await setState(uid, { vid_pos: rv.pos });
+        const r = await api.call('sendVideo', { chat_id: chatId, video: rv.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
+        if (r.ok) return;
+        await db.run('DELETE FROM sorted_sets WHERE key = ? AND member = ?', READY, rv.md5); // unusable file_id
+      }
+      // 2) otherwise the user's own 200 links, as before
       const c = await nextVideo(uid, state);
       if (!c) return target.reply('❌ No videos found, try again in a moment.');
       const markup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
       const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
       if (!r.ok) return target.reply('❌ Video error: server busy, please try again in a moment.');
       const fid = r.result?.video?.file_id;
-      if (fid && !c.fid && c.md5) await db.hset(META, c.md5, fid);
+      if (fid && !c.fid && c.md5) await db.hset(META, c.md5, JSON.stringify({ u: c.url, f: fid }));
     }
 
     on(/^\/videos$/, async m => {
@@ -2085,7 +2146,11 @@ Contact @buggybeats for premium.
   }
 
   async function cron(minute) {
-    await broadcastTick();
+    const broadcasting = await broadcastTick();
+    // uploads share the free plan's 50-subrequest budget: skip minutes with a broadcast batch or reminders
+    if (uploadTick && !broadcasting && minute !== 0) {
+      try { await uploadTick(); } catch (e) { console.log('uploadTick', e.message); }
+    }
     if (minute === 0) {
       await reminderSweep();
       await db.run('DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?', nowS());
