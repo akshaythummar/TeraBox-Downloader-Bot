@@ -1794,6 +1794,7 @@ Contact @buggybeats for premium.
   });
 
   // ==================== commands/videos.py ====================
+  let poolTick = null; // set below when /videos is configured; run by the cron
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, ''), pool = env.VIDEOS_POOL_WORKER.replace(/\/$/, '');
     const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), cooldown = parseFloat(env.VIDEOS_COOLDOWN_SECONDS || 1), promo = env.VIDEOS_PROMO_URL || '';
@@ -1804,42 +1805,144 @@ Contact @buggybeats for premium.
       } catch { return null; }
     };
     const vkey = uid => `video_state:${int(uid)}`;
-    const setState = async (uid, fields) => { for (const [k, v] of Object.entries(fields)) await db.hset(vkey(uid), k, String(v)); };
+    // all fields in one statement (was one D1 query per field)
+    const setState = async (uid, fields) => {
+      const e = Object.entries(fields);
+      if (!e.length) return;
+      await db.run(`INSERT INTO hashes(key, field, value) VALUES ${e.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
+        ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)]));
+    };
     const freeMode = () => cached('vfree', async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; });
+    // A paid subscription's end time is remembered (sub_until), so the payment worker is only
+    // asked again after it ends; a "not subscribed" answer is trusted for SUB_RECHECK seconds.
+    const SUB_RECHECK = 120;
+    const subUntil = st => {
+      const t = Date.parse(st.subscription_end_at || '') / 1000;
+      return t > 0 ? t : +st.seconds_remaining > 0 ? nowS() + +st.seconds_remaining : 0;
+    };
     // Bot premium (referral, gift code, /pre…) and admins also unlock /videos.
     async function hasAccess(uid, state) {
       if (await freeMode()) return true;
       if ((await isAdmin(uid)) || (await isPremium(uid))) return true;
-      if ((await getJ(`${pay}/api/subscription/status/${int(uid)}`))?.subscribed) return true;
+      const now = nowS();
+      if (+state.sub_until > now) return true;
+      if (!(+state.sub_checked > now - SUB_RECHECK)) {
+        const st = await getJ(`${pay}/api/subscription/status/${int(uid)}`);
+        if (st) { // API down → not cached, asked again next time
+          const until = st.subscribed ? subUntil(st) : 0;
+          await setState(uid, { sub_checked: now, ...(until > now ? { sub_until: until } : {}) });
+          if (st.subscribed) return true;
+        }
+      }
       const el = nowS() - parseFloat(state.trial_start_time);
       return state.trial_start_time && el >= 0 && el <= trialSeconds;
     }
-    async function nextLink(uid, state) {
+    // ---- video library ----
+    // Most pool links are long expired (TeraBox 403), and a link makes Telegram download the
+    // whole file on every send. So: the cron collects pool links that still work (vid_lib, in
+    // order found), and once a video is sent, Telegram's file_id is kept — later sends of it are
+    // instant and never expire. vid_meta: md5 → {u: url, f: file_id}.
+    const LIB = 'vid_lib', META = 'vid_meta', LIB_TARGET = 400;
+    const md5Of = u => (String(u).match(/\/file\/([0-9a-f]{32})/) || [])[1] || null;
+    async function libAdd(md5, url, fid) {
+      const meta = JSON.stringify(fid ? { u: url, f: fid } : { u: url });
+      await db.d.batch([
+        db.q('INSERT INTO sorted_sets(key, member, score) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', LIB, md5, Date.now()),
+        fid ? db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', META, md5, meta)
+          : db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', META, md5, meta),
+      ]);
+    }
+    const libDrop = md5 => db.d.batch([db.q('DELETE FROM sorted_sets WHERE key = ? AND member = ?', LIB, md5), db.q('DELETE FROM hashes WHERE key = ? AND field = ?', META, md5)]);
+    // the user's next library video: after their last position, wrapping to the start;
+    // a new user starts at a random place so everyone doesn't get the same first videos
+    async function libNext(state) {
+      const pos = parseFloat(state.vid_pos);
+      let row;
+      if (pos > 0) {
+        row = (await db.one('SELECT member, score FROM sorted_sets WHERE key = ? AND score > ? ORDER BY score LIMIT 1', LIB, pos))
+          || (await db.one('SELECT member, score FROM sorted_sets WHERE key = ? ORDER BY score LIMIT 1', LIB));
+      } else {
+        const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', LIB)).n;
+        if (n) row = await db.one('SELECT member, score FROM sorted_sets WHERE key = ? ORDER BY score LIMIT 1 OFFSET ?', LIB, Math.floor(Math.random() * n));
+      }
+      if (!row) return null;
+      const meta = JSON.parse((await db.hget(META, row.member)) || '{}');
+      return { md5: row.member, pos: row.score, url: meta.u, fid: meta.f, lib: true };
+    }
+    // fallback while the library is empty: the user's own random pool list (old behaviour)
+    async function poolNext(uid, state) {
       let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index);
       if (!links.length || idx >= links.length) {
         links = (await getJ(`${pool}/?random=200`))?.links || [];
         if (!links.length) return null;
         idx = 0;
-        await setState(uid, { video_links: JSON.stringify(links) });
+        state.video_links = JSON.stringify(links);
+        await setState(uid, { video_links: state.video_links });
       }
+      state.video_index = idx + 1;
       await setState(uid, { video_index: idx + 1 });
-      return links[idx];
+      return { md5: md5Of(links[idx]), url: links[idx] };
     }
     async function serveVideo(chatId, uid, target) {
-      const link = await nextLink(uid, await db.hgetall(vkey(uid)));
-      if (!link) return target.reply('❌ No videos found, try again in a moment.');
-      const r = await api.call('sendVideo', { chat_id: chatId, video: link, has_spoiler: true, protect_content: true, supports_streaming: true, ...(promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {}) });
-      if (!r.ok) await target.reply('❌ Video error: server busy, please try again in a moment.');
+      const [, state] = await Promise.all([
+        api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" right away
+        db.hgetall(vkey(uid)),
+      ]);
+      const markup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
+      for (let attempt = 0; attempt < 3; attempt++) { // a dead link → try the next one
+        const c = (await libNext(state)) || (await poolNext(uid, state));
+        if (!c) return target.reply('❌ No videos found, try again in a moment.');
+        if (c.lib) { state.vid_pos = c.pos; await setState(uid, { vid_pos: c.pos }); }
+        const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
+        if (r.ok) {
+          const fid = r.result?.video?.file_id;
+          if (fid && !c.fid && c.md5) await libAdd(c.md5, c.url, fid);
+          return;
+        }
+        if (c.lib && !c.fid) await libDrop(c.md5); // its link died since the cron checked it
+      }
+      await target.reply('❌ Video error: server busy, please try again in a moment.');
     }
+    // cron: check pool links (1 byte each) and keep the ones that still play and fit
+    // Telegram's 20 MB send-by-URL limit. ~1 in 40 pool links works today.
+    poolTick = async minute => {
+      const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', LIB)).n;
+      if (n >= LIB_TARGET && minute % 15) return; // library full: top up every 15 min only
+      const links = ((await getJ(`${pool}/?random=200`))?.links || []).sort(() => Math.random() - 0.5);
+      const cand = [...new Map(links.map(u => [md5Of(u), u])).entries()].filter(([m]) => m).slice(0, 35);
+      if (!cand.length) return;
+      const known = new Set((await db.all(`SELECT member FROM sorted_sets WHERE key = ? AND member IN (${cand.map(() => '?').join(',')})`, LIB, ...cand.map(([m]) => m))).map(r => r.member));
+      const alive = (await Promise.all(cand.filter(([m]) => !known.has(m)).map(async ([m, u]) => {
+        try {
+          const r = await fetch(u, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000) });
+          await r.arrayBuffer();
+          const size = +(r.headers.get('content-range') || '').split('/')[1] || 0;
+          return (r.status === 206 || r.status === 200) && (r.headers.get('content-type') || '').startsWith('video/') && size <= 20 * 1048576 ? [m, u] : null;
+        } catch { return null; }
+      }))).filter(Boolean);
+      for (const [m, u] of alive) await libAdd(m, u);
+      if (alive.length) console.log(`video library +${alive.length} (had ${n})`);
+    };
+
+    on(/^\/videoslib$/, async m => {
+      const r = await db.one("SELECT (SELECT COUNT(*) FROM sorted_sets WHERE key = ?1) n, (SELECT COUNT(*) FROM hashes WHERE key = ?2 AND value LIKE '%\"f\":%') f", LIB, META);
+      await m.reply(`🎬 Video library: **${r.n}** videos (${r.f} with Telegram file_id = instant)\nTarget: ${LIB_TARGET}. The cron adds working pool links every minute.`);
+    }, ADMIN);
+
     on(/^\/videos$/, async m => {
       const state = await db.hgetall(vkey(m.uid));
       if (state.last_video_time) {
         const pending = cooldown - (nowS() - parseFloat(state.last_video_time));
         if (pending > 0) return m.reply(`⏳ Please wait ${pending.toFixed(1)} seconds before requesting another video.`);
       }
-      await setState(m.uid, { last_video_time: nowS() });
-      await getJ(`${pay}/api/telegram/register`, { telegram_id: m.uid, name: m.from.username || 'User' });
-      if (await hasAccess(m.uid, state)) return serveVideo(m.chatId, m.uid, m);
+      const [, access] = await Promise.all([
+        (async () => { // register with the payment worker once per user (was every /videos)
+          const reg = state.registered === '1' || !!(await getJ(`${pay}/api/telegram/register`, { telegram_id: m.uid, name: m.from.username || 'User' }));
+          await setState(m.uid, { last_video_time: nowS(), ...(reg ? { registered: 1 } : {}) });
+        })(),
+        hasAccess(m.uid, state),
+      ]);
+      if (access) return serveVideo(m.chatId, m.uid, m);
       if (!state.trial_start_time || int(parseFloat(state.trial_start_time)) === 0)
         return m.reply('🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to claim your <b>3-minute free trial</b> and start watching videos right now:', { html: true, buttons: [[Button.inline('🎁 Get Free 3-Min Trial', 'vid_trial')]] });
       await m.reply('⏰ <b>Your 3-minute free trial has expired!</b>\nPlease choose a plan below to continue watching.', { html: true });
@@ -1871,7 +1974,11 @@ Contact @buggybeats for premium.
 
       const status = await getJ(`${pay}/api/subscription/status/${uid}`);
       if (!status) return done('❌ Error fetching user data. Please try again.');
-      if (status.subscribed) return done('✅ You already have an active subscription!');
+      if (status.subscribed) {
+        const until = subUntil(status);
+        if (until > nowS()) await setState(uid, { sub_until: until, sub_checked: nowS() });
+        return done('✅ You already have an active subscription!');
+      }
       let token = status.user_token;
       if (!token) token = (await getJ(`${pay}/api/telegram/register`, { telegram_id: uid, name: e.from.username || 'User' }))?.user_token;
       if (!token) return done('❌ Error fetching user data. Please try again.');
@@ -1924,6 +2031,7 @@ Contact @buggybeats for premium.
       if (res == null) return api.send(chatId, '❌ Error checking payment status.\n\nPlease try again later or contact support.');
       if (res === 'success') {
         await db.delete(`vid_order:${e.uid}`);
+        await setState(e.uid, { sub_checked: 0 });
         await logx(`payment ok ${e.uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}`);
         for (const a of await getAllAdmins())
           await api.send(a, `💰 Payment received\nUser: ${escHtml(e.from.first_name || '-')} (@${escHtml(e.from.username || '-')})\nID: <code>${e.uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
@@ -1982,7 +2090,7 @@ Contact @buggybeats for premium.
   async function broadcastTick() {
     const BATCH = 40; // free plan: 50 subrequests per invocation
     const b = await db.one('SELECT * FROM broadcasts WHERE done = 0 AND send_at <= ? ORDER BY id LIMIT 1', Math.floor(nowS()));
-    if (!b) return;
+    if (!b) return false; // false = nothing sent this minute
     const users = await db.all("SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?", b.cursor, BATCH);
     let sent = 0, failed = 0;
     for (const { member } of users) {
@@ -1994,7 +2102,7 @@ Contact @buggybeats for premium.
     }
     const done = users.length < BATCH;
     await db.run('UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ?, done = ? WHERE id = ?', users.at(-1)?.member ?? b.cursor, sent, failed, done ? 1 : 0, b.id);
-    if (!done) return;
+    if (!done) return true;
     const S = b.sent + sent, F = b.failed + failed;
     if (b.kind === 'broadcast') {
       await db.incr('stats:broadcasts');
@@ -2002,6 +2110,7 @@ Contact @buggybeats for premium.
     } else if (b.kind === 'legacy') {
       await api.edit(b.status_chat, b.status_msg, `**Broadcast Complete**\n\nTotal users: **${b.total}**\nSent: **${S}**\nFailed: **${F}**`);
     } else await api.send(b.status_chat, `**Announcement sent!**\nSent: ${S}\nFailed: ${F}`, { replyTo: b.status_msg });
+    return true;
   }
 
   // referral.py referral_sweep_once — 3d / 1d / expired reminders
@@ -2033,7 +2142,12 @@ Contact @buggybeats for premium.
   }
 
   async function cron(minute) {
-    await broadcastTick();
+    const broadcasting = await broadcastTick();
+    // ponytail: pool checks share the free plan's 50-subrequest budget, so they skip minutes
+    // that already send a broadcast batch or the hourly reminders
+    if (poolTick && !broadcasting && minute !== 0) {
+      try { await poolTick(minute); } catch (e) { console.log('poolTick', e.message); }
+    }
     if (minute === 0) {
       await reminderSweep();
       await db.run('DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?', nowS());

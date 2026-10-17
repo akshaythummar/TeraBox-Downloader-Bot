@@ -117,6 +117,8 @@ Everything not listed here works the same way.
 | `/setplan` text was saved but `/plan` never showed it | `/plan` shows it | Bug fix |
 | Free users: 10 links/hour | Unlimited (`FREE_HOURLY_LIMIT` = 0). `/configset FREE_HOURLY_LIMIT 10` brings the cap back | Requested |
 | `/videos` plan buttons said "contact admin" | Plan button → `create-order` → 💳 Pay + ✅ I've Paid - Verify (`/api/payment-status`), admins get a "💰 Payment received" message | Same flow as the old `/purchase1-4` + `/verifynew` |
+| `/videos` sent a random pool link every time (most are expired; Telegram re-downloads the file on each send) | The cron checks pool links and keeps working ones in a library (`vid_lib`, target 400); once sent, a video's Telegram `file_id` is reused (instant). A dead link is skipped and the next one tried (max 3). Admins: `/videoslib` | Speed |
+| `/videos` asked the payment worker on every use (register + status) | Register once per user; a subscription's end date is remembered, "not subscribed" for 2 min; Verify resets it | Speed, fewer calls |
 | `/videos` needed a payment subscription or the trial | Bot premium (referral, gift code, `/pre`) and admins also get `/videos` | Requested |
 | Language-menu tap added a second Admin Panel button for admins | Only one | Bug fix |
 
