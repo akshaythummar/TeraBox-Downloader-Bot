@@ -1812,7 +1812,7 @@ Contact @buggybeats for premium.
       await db.run(`INSERT INTO hashes(key, field, value) VALUES ${e.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
         ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)]));
     };
-    const freeMode = () => cached('vfree', async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; });
+    const freeMode = () => cached('vfree', async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; }, 60);
     // A paid subscription's end time is remembered (sub_until), so the payment worker is only
     // asked again after it ends; a "not subscribed" answer is trusted for SUB_RECHECK seconds.
     const SUB_RECHECK = 120;
@@ -1821,10 +1821,10 @@ Contact @buggybeats for premium.
       return t > 0 ? t : +st.seconds_remaining > 0 ? nowS() + +st.seconds_remaining : 0;
     };
     // Bot premium (referral, gift code, /pre…) and admins also unlock /videos.
-    async function hasAccess(uid, state) {
+    async function hasAccess(uid, ctx) {
       if (await freeMode()) return true;
-      if ((await isAdmin(uid)) || (await isPremium(uid))) return true;
-      const now = nowS();
+      if (ctx.admin || ctx.premium) return true;
+      const state = ctx.state, now = nowS();
       if (+state.sub_until > now) return true;
       if (!(+state.sub_checked > now - SUB_RECHECK)) {
         const st = await getJ(`${pay}/api/subscription/status/${int(uid)}`);
@@ -1866,11 +1866,24 @@ Contact @buggybeats for premium.
     // their own 200 links exactly as before.
     const READY = 'vid_ready';
     const readyMarkup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
-    async function nextReady(state) {
-      const row = await db.one('SELECT member, score FROM sorted_sets WHERE key = ? AND score > ? ORDER BY score LIMIT 1', READY, parseFloat(state.vid_pos) || 0);
-      if (!row) return null;
-      const fid = fidOf(await db.hget(META, row.member));
-      return fid ? { md5: row.member, pos: row.score, fid } : null;
+    // Everything /videos needs in ONE D1 round trip (was ~6 sequential queries): the user's state,
+    // premium/admin, and their next pre-uploaded video with its file_id.
+    async function loadCtx(uid) {
+      const k = vkey(uid), u = String(uid);
+      const [st, pa, rd] = await db.d.batch([
+        db.q('SELECT field, value FROM hashes WHERE key = ?', k),
+        db.q('SELECT (SELECT value FROM hashes WHERE key = ? AND field = ?) exp, (SELECT 1 FROM sets WHERE key = ? AND member = ?) adm', PREMIUM_EXPIRY_KEY, u, DYNAMIC_ADMINS_KEY, u),
+        db.q(`SELECT s.member, s.score, h.value FROM sorted_sets s JOIN hashes h ON h.key = ? AND h.field = s.member
+              WHERE s.key = ? AND s.score > COALESCE((SELECT CAST(value AS REAL) FROM hashes WHERE key = ? AND field = 'vid_pos'), 0)
+              ORDER BY s.score LIMIT 1`, META, READY, k),
+      ]);
+      const p = pa.results[0] || {}, r = rd.results[0], fid = r ? fidOf(r.value) : null;
+      return {
+        state: Object.fromEntries(st.results.map(x => [x.field, x.value])),
+        admin: ADMINS.includes(int(uid)) || !!p.adm,
+        premium: p.exp != null && nowS() < int(p.exp),
+        ready: fid ? { md5: r.member, pos: r.score, fid } : null,
+      };
     }
     // ponytail: 45 sends + 1 pool fetch stays under the free plan's 50 subrequests per cron run.
     // Telegram caps how fast a bot may post into one channel: a 429 drops that channel until the
@@ -1920,23 +1933,23 @@ Contact @buggybeats for premium.
       await m.reply(`🎬 Instant videos ready: **${n}**\nUploaded today: ${today}/${PER_DAY}\nChannel(s): \`${CHANNELS.join(', ') || 'not set'}\` — up to ${PER_RUN} per minute.`);
     }, ADMIN);
 
-    async function serveVideo(chatId, uid, target) {
-      const [, state] = await Promise.all([
-        api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" right away
-        db.hgetall(vkey(uid)),
-      ]);
-      // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant
-      for (let tries = 0; tries < 2; tries++) {
-        const rv = await nextReady(state);
-        if (!rv) break;
-        state.vid_pos = rv.pos;
-        await setState(uid, { vid_pos: rv.pos });
-        const r = await api.call('sendVideo', { chat_id: chatId, video: rv.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
-        if (r.ok) return;
-        await db.run('DELETE FROM sorted_sets WHERE key = ? AND member = ?', READY, rv.md5); // unusable file_id
+    // save = state fields to write in the same statement as the new position (e.g. last_video_time)
+    async function serveVideo(chatId, uid, target, ctx = null, save = {}) {
+      ctx ||= await loadCtx(uid);
+      const state = ctx.state;
+      // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
+      if (ctx.ready) {
+        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
+        if (r.ok) return setState(uid, { ...save, vid_pos: ctx.ready.pos });
+        await db.run('DELETE FROM sorted_sets WHERE key = ? AND member = ?', READY, ctx.ready.md5); // unusable file_id
+        save = { ...save, vid_pos: ctx.ready.pos };
       }
+      if (Object.keys(save).length) await setState(uid, save);
       // 2) otherwise the user's own 200 links, as before
-      const c = await nextVideo(uid, state);
+      const [, c] = await Promise.all([
+        api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" while Telegram fetches the link
+        nextVideo(uid, state),
+      ]);
       if (!c) return target.reply('❌ No videos found, try again in a moment.');
       const markup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
       const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
@@ -1946,19 +1959,19 @@ Contact @buggybeats for premium.
     }
 
     on(/^\/videos$/, async m => {
-      const state = await db.hgetall(vkey(m.uid));
+      const ctx = await loadCtx(m.uid), state = ctx.state;
       if (state.last_video_time) {
         const pending = cooldown - (nowS() - parseFloat(state.last_video_time));
         if (pending > 0) return m.reply(`⏳ Please wait ${pending.toFixed(1)} seconds before requesting another video.`);
       }
-      const [, access] = await Promise.all([
-        (async () => { // register with the payment worker once per user (was every /videos)
-          const reg = state.registered === '1' || !!(await getJ(`${pay}/api/telegram/register`, { telegram_id: m.uid, name: m.from.username || 'User' }));
-          await setState(m.uid, { last_video_time: nowS(), ...(reg ? { registered: 1 } : {}) });
-        })(),
-        hasAccess(m.uid, state),
+      const [reg, access] = await Promise.all([
+        // register with the payment worker once per user (was every /videos)
+        state.registered === '1' || getJ(`${pay}/api/telegram/register`, { telegram_id: m.uid, name: m.from.username || 'User' }),
+        hasAccess(m.uid, ctx),
       ]);
-      if (access) return serveVideo(m.chatId, m.uid, m);
+      const save = { last_video_time: nowS(), ...(reg ? { registered: 1 } : {}) };
+      if (access) return serveVideo(m.chatId, m.uid, m, ctx, save);
+      await setState(m.uid, save);
       if (!state.trial_start_time || int(parseFloat(state.trial_start_time)) === 0)
         return m.reply('🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to claim your <b>3-minute free trial</b> and start watching videos right now:', { html: true, buttons: [[Button.inline('🎁 Get Free 3-Min Trial', 'vid_trial')]] });
       await m.reply('⏰ <b>Your 3-minute free trial has expired!</b>\nPlease choose a plan below to continue watching.', { html: true });

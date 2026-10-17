@@ -24,3 +24,6 @@ CREATE TABLE IF NOT EXISTS broadcasts (
   status_chat INTEGER,
   status_msg INTEGER
 );
+
+-- /videos: next ready video by position without scanning the whole list
+CREATE INDEX IF NOT EXISTS sorted_sets_score ON sorted_sets (key, score);

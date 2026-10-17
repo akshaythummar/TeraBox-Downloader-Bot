@@ -24,8 +24,8 @@ VIDEOS_CHANNEL = "-1002386227767"     # old storage channel; the cron pre-upload
 
 [[d1_databases]]
 binding = "DB"
-database_name = "terabox-bot"
-database_id = "5d71bfa5-cd8d-45f7-8ea9-d774cf04506f"   # from: npx wrangler d1 create terabox-bot
+database_name = "terabox-bot-eu"
+database_id = "59f6c78a-5f4c-433f-a793-5d8fc62db3d0"   # Western Europe, next to Telegram's servers (old APAC db: terabox-bot)
 
 [version_metadata]
 binding = "CF_VERSION"               # shown as "Build" on /restart
