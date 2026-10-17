@@ -146,7 +146,7 @@ export default {
       const u = await req.json();
       const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
       // ack Telegram immediately so it never retries; finish the work in the background
-      const work = u.message ? bot.onMessage(u.message) : u.callback_query ? bot.onCallback(u.callback_query) : null;
+      const work = u.message ? bot.onMessage(u.message) : u.callback_query ? bot.onCallback(u.callback_query) : u.my_chat_member ? bot.onChatMember(u.my_chat_member) : null;
       if (work) ctx.waitUntil(work.catch(e => console.log('update failed', e.stack)));
       return new Response('ok');
     }
@@ -155,7 +155,7 @@ export default {
     if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET) {
       const api = makeApi(env.BOT_TOKEN, env.TG_API);
       const hook = await api.call('setWebhook', {
-        url: `${url.origin}/webhook`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true,
+        url: `${url.origin}/webhook`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query', 'my_chat_member'], drop_pending_updates: false,
       });
       const cmds = await api.call('setMyCommands', { commands: COMMANDS });
       return Response.json({ hook, cmds });

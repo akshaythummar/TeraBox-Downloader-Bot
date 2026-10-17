@@ -1870,19 +1870,35 @@ Contact @buggybeats for premium.
     // premium/admin, and their next pre-uploaded video with its file_id.
     async function loadCtx(uid) {
       const k = vkey(uid), u = String(uid);
-      const [st, pa, rd] = await db.d.batch([
+      const readyAfter = (where, ...args) => db.q(`SELECT s.member, s.score, h.value FROM sorted_sets s JOIN hashes h ON h.key = ? AND h.field = s.member
+              WHERE s.key = ? AND s.score > ${where} ORDER BY s.score LIMIT 1`, META, READY, ...args);
+      const [st, pa, nxt, first] = await db.d.batch([
         db.q('SELECT field, value FROM hashes WHERE key = ?', k),
         db.q('SELECT (SELECT value FROM hashes WHERE key = ? AND field = ?) exp, (SELECT 1 FROM sets WHERE key = ? AND member = ?) adm', PREMIUM_EXPIRY_KEY, u, DYNAMIC_ADMINS_KEY, u),
-        db.q(`SELECT s.member, s.score, h.value FROM sorted_sets s JOIN hashes h ON h.key = ? AND h.field = s.member
-              WHERE s.key = ? AND s.score > COALESCE((SELECT CAST(value AS REAL) FROM hashes WHERE key = ? AND field = 'vid_pos'), 0)
-              ORDER BY s.score LIMIT 1`, META, READY, k),
+        readyAfter(`COALESCE((SELECT CAST(value AS REAL) FROM hashes WHERE key = ? AND field = 'vid_pos'), 0)`, k),
+        readyAfter('0'),
       ]);
-      const p = pa.results[0] || {}, r = rd.results[0], fid = r ? fidOf(r.value) : null;
+      const state = Object.fromEntries(st.results.map(x => [x.field, x.value]));
+      const p = pa.results[0] || {};
+      // Each user starts at a random video (vid_start), walks to the end, wraps to the beginning and
+      // stops just before vid_start — so users get different orders and nobody gets a repeat.
+      const pos = parseFloat(state.vid_pos) || 0, start = parseFloat(state.vid_start) || 0;
+      let row = null, newStart = null;
+      if (!pos) {
+        row = await db.one(`SELECT s.member, s.score, h.value FROM sorted_sets s JOIN hashes h ON h.key = ? AND h.field = s.member
+              WHERE s.key = ? ORDER BY s.score LIMIT 1 OFFSET ?`, META, READY, Math.floor(Math.random() * (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', READY)).n));
+        newStart = row?.score ?? null;
+      } else if (pos >= start) {
+        row = nxt.results[0] || (first.results[0]?.score < start ? first.results[0] : null);
+      } else {
+        row = nxt.results[0]?.score < start ? nxt.results[0] : null; // already wrapped: stop before the start
+      }
+      const fid = row ? fidOf(row.value) : null;
       return {
-        state: Object.fromEntries(st.results.map(x => [x.field, x.value])),
+        state,
         admin: ADMINS.includes(int(uid)) || !!p.adm,
         premium: p.exp != null && nowS() < int(p.exp),
-        ready: fid ? { md5: r.member, pos: r.score, fid } : null,
+        ready: fid ? { md5: row.member, pos: row.score, fid, ...(newStart != null ? { start: newStart } : {}) } : null,
       };
     }
     // ponytail: 45 sends + 1 pool fetch stays under the free plan's 50 subrequests per cron run.
@@ -1940,9 +1956,9 @@ Contact @buggybeats for premium.
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
         const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
-        if (r.ok) return setState(uid, { ...save, vid_pos: ctx.ready.pos });
+        if (r.ok) return setState(uid, { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) });
         await db.run('DELETE FROM sorted_sets WHERE key = ? AND member = ?', READY, ctx.ready.md5); // unusable file_id
-        save = { ...save, vid_pos: ctx.ready.pos };
+        save = { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
       }
       if (Object.keys(save).length) await setState(uid, save);
       // 2) otherwise the user's own 200 links, as before
@@ -2182,5 +2198,18 @@ Contact @buggybeats for premium.
     }
   }
 
-  return { onMessage, onCallback, cron, bootCard };
+  // Bot made admin of / removed from a channel → tell the owner the channel ID (for VIDEOS_CHANNEL)
+  async function onChatMember(u) {
+    if (u.chat?.type !== 'channel') return;
+    const st = u.new_chat_member?.status, id = u.chat.id, title = u.chat.title || '-';
+    if (st === 'administrator') {
+      await db.hset('bot_channels', String(id), title);
+      await api.send(OWNER_ID, `📢 Bot is now admin in channel **${escapeMarkdown(title)}**\nID: \`${id}\`${u.new_chat_member.can_post_messages ? '' : '\n⚠️ Give it "Post messages" permission.'}\n\nAdd it to VIDEOS_CHANNEL in wrangler.toml to upload /videos there.`);
+    } else if (st === 'left' || st === 'kicked' || st === 'member') {
+      await db.hdel('bot_channels', String(id));
+      await api.send(OWNER_ID, `📢 Bot is no longer admin in channel **${escapeMarkdown(title)}** (\`${id}\`).`);
+    }
+  }
+
+  return { onMessage, onCallback, onChatMember, cron, bootCard };
 }
