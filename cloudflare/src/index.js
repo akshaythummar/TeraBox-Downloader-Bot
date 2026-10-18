@@ -157,6 +157,8 @@ export default {
       const hook = await api.call('setWebhook', {
         url: `${url.origin}/webhook`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query', 'my_chat_member'], drop_pending_updates: false,
       });
+      // scoped lists (e.g. left by another bot host) override the default one — clear them first
+      for (const type of ['all_private_chats', 'all_group_chats', 'all_chat_administrators']) await api.call('deleteMyCommands', { scope: { type } });
       const cmds = await api.call('setMyCommands', { commands: COMMANDS });
       return Response.json({ hook, cmds });
     }
