@@ -26,7 +26,8 @@ const LOG_KEY = 'bot_log';
 const FREE_MODE_KEY = 'videos_free_mode';
 const PLANS_PHOTO = 'https://iili.io/nXUjApR.md.png';
 const GC_LIST_PER_PAGE = 10;
-const TIERS = [[5, 1], [10, 3], [25, 7]];
+const REF_DAYS = 1; // Premium days for every friend who joins
+const TIERS = [[10, 3], [25, 7], [50, 15]]; // extra bonus days at these referral counts
 
 const DURATION_MAP_GC = { '1d': 1, '2d': 2, '3d': 3, '5d': 5, '7d': 7, '1w': 7, '2w': 14, '1m': 30, '1mo': 30, unlimited: 0, perm: 0 };
 const DURATION_MAP = { '1d': 1, '2d': 2, '3d': 3, '5d': 5, '7d': 7, '1w': 7, '2w': 14, '1m': 30, '1mo': 30, unlimited: 0, 0: 0, perm: 0 };
@@ -64,10 +65,12 @@ const WELCOME_TEXT = `
 
 👋 Welcome **{name}**!
 
-Simply send me a **TeraBox link** and I'll download the video for you instantly.
+Send me any **TeraBox link** and watch it in **~2 seconds** ⚡
+No download, no waiting — it streams right here in Telegram.
 
-⚡ Free: Unlimited streaming links
-⭐ Premium: Unlimited + no limits
+🆓 Free: Unlimited streaming links
+⭐ Premium: multi-file links + /videos
+👥 Invite friends: **+1 day Premium** for each one → /ref
 
 Choose an option below 👇
 `;
@@ -223,6 +226,14 @@ export function createBot(env, api, db, origin) {
   const isBanned = uid => cached(`banned:${uid}`, () => db.sismember(BANNED_USERS_KEY, String(uid)));
   const getAllAdmins = async () => [...new Set([...ADMINS, ...(await db.smembers(DYNAMIC_ADMINS_KEY)).map(int)])];
 
+  // adds days on top of any Premium the user already has (grantPremium starts from now)
+  async function addPremiumDays(uid, days) {
+    const cur = int(await db.hget(PREMIUM_EXPIRY_KEY, String(uid)));
+    await db.hset(PREMIUM_EXPIRY_KEY, String(uid), Math.max(Math.floor(nowS()), cur) + days * 86400);
+    await db.sadd(PREMIUM_SET_KEY, String(uid));
+    await db.run("DELETE FROM kv WHERE key IN (?1, ?2, ?3)", `reminder_3d:${uid}`, `reminder_1d:${uid}`, `reminder_expired:${uid}`);
+    uncache(`premium:${uid}`);
+  }
   async function grantPremium(uid, days) {
     await db.hset(PREMIUM_EXPIRY_KEY, String(uid), Math.floor(nowS()) + days * 86400);
     await db.sadd(PREMIUM_SET_KEY, String(uid));
@@ -299,6 +310,9 @@ export function createBot(env, api, db, origin) {
       if (ok && link && Math.random() < 0.05) await db.ztrim(LINK_COUNTS_KEY, 500); // ponytail: prune 1 in 20, keeps ~top 500
     } catch (e) { console.log('recordDl', e.message); }
   }
+
+  // daily funnel counters (funnel:<date> hash) — see /funnel
+  const funnel = (field, n = 1) => db.hincrby(`funnel:${ymd()}`, field, n).catch(() => {});
 
   async function addHistory(uid, files) {
     if (!files.length) return;
@@ -381,7 +395,7 @@ export function createBot(env, api, db, origin) {
         db.q("SELECT 1 FROM sets WHERE key = 'all_known_users' AND member = ? LIMIT 1", String(uid)),
       ]);
       if (int(a.results[0].value) === 1) await db.expire(todayKey, 86400);
-      if (!b.results.length) { await db.sadd('all_known_users', String(uid)); await db.hincrby(STATS_KEY, 'total_users', 1); }
+      if (!b.results.length && (await db.sadd('all_known_users', String(uid)))) { await db.hincrby(STATS_KEY, 'total_users', 1); await funnel('new_users'); }
     } catch (e) { console.log('track_activity', e.message); }
   }
 
@@ -458,13 +472,14 @@ export function createBot(env, api, db, origin) {
 
   const mainMenuButtons = uid => {
     const rows = [
+      [Button.inline('👥 Invite Friends → Free Premium', 'menu_referral')],
       [Button.inline('📥 How to Use', 'menu_howto'), Button.inline('📋 My Info', 'menu_info')],
       [Button.inline('⭐ Premium', 'menu_premium'), Button.inline('🎁 Redeem Card', 'menu_redeem')],
     ];
     if (ADMINS.includes(int(uid))) rows.push([Button.inline('⚙️ Admin Panel', 'menu_admin')]);
     rows.push(
       [Button.inline('🛠 Tools', 'menu_tools'), Button.inline('🌐 Language', 'menu_lang')],
-      [Button.inline('👥 Referral', 'menu_referral'), Button.inline('📊 My Stats', 'menu_mystats')],
+      [Button.inline('📊 My Stats', 'menu_mystats')],
       [Button.url('📣 Channel', 'https://t.me/AT_BOTZ'), Button.url('💬 Group', 'https://t.me/AT_BOTZ')],
     );
     return rows;
@@ -664,9 +679,17 @@ export function createBot(env, api, db, origin) {
     const arg = m.text.split(/\s+/)[1];
     const ref = arg?.startsWith('ref_AT-') ? int(arg.split('ref_AT-')[1]) : 0;
     if (ref > 0 && (await recordReferral(ref, uid))) {
-      const [granted, days] = await checkAndGrantReward(ref);
-      if (granted) await logx(`Referral reward: ${ref} +${days}d`);
+      // instant reward for the referrer: +1 day per friend, plus a bonus at each milestone
+      await addPremiumDays(ref, REF_DAYS);
+      const [bonus, bd] = await checkAndGrantReward(ref);
+      const ok = int(await db.hget('ref:ok', String(ref)));
+      await funnel('referrals');
+      await logx(`Referral: ${ref} invited ${uid} → +${REF_DAYS}d${bonus ? ` +${bd}d bonus` : ''}`);
+      await api.send(ref, `🎉 **${escapeMarkdown(name)}** joined with your link!\n\n⭐ +${REF_DAYS} day Premium added${bonus ? `\n🏆 Milestone bonus: **+${bd} days**` : ''}\n👥 Total friends: **${ok}**\n\nKeep sharing: /ref`);
     }
+    // /start-only users get broadcasts too (previously only users who had sent a link)
+    if (await db.sadd('all_known_users', String(uid))) { await db.hincrby(STATS_KEY, 'total_users', 1); await funnel('new_users'); }
+    await funnel('starts');
     const admins = await getAllAdmins();
     if (!admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
@@ -1151,12 +1174,14 @@ Contact @buggybeats for premium.
       }
       console.log(`link ${shorturl} posted in ${Date.now() - T0}ms`);
       await Promise.all([
-        hm.edit('✅ Video sent successfully to your chat!', { buttons: [] }),
+        hm.edit(`✅ Ready in ${((Date.now() - T0) / 1000).toFixed(1)}s ⚡\n\n👥 Invite friends → +1 day Premium each: /ref`, { buttons: [] }),
+        funnel('links'),
         recordDl(m.uid, f.sizebytes, shorturl, true), libIndex([f]), addHistory(m.uid, [f]), ...after(),
       ]);
       return;
     }
     const [sent, failed] = await sendMany(m, todo, tag, quality, shorturl, g.thumb);
+    if (sent) await funnel('links');
     await Promise.all([hm.edit(`✅ Complete!\nSent: ${sent}/${todo.length} | Failed: ${failed}`, { buttons: [] }), ...after()]);
   }
 
@@ -1516,7 +1541,37 @@ Contact @buggybeats for premium.
       lines.push(`${i + 1}. ${name ? `${name} \`${uid}\`` : `\`${uid}\``} — ${r.n} downloads`);
     }
     if (links.length) { lines.push('', '**Popular Links:**'); links.forEach(([l, n], i) => lines.push(`${i + 1}. \`${l}\` — ${Math.floor(n)} downloads`)); }
+    lines.push('', '📈 Daily funnel (users → trials → payments): /funnel');
     await m.reply(lines.join('\n'));
+  }, ADMIN);
+  // /funnel [days] — the daily counters from funnel(): who arrives, uses the bot, tries, pays
+  on(/^\/funnel(?:\s+(\d+))?/, async (m, g) => {
+    const days = Math.min(Math.max(int(g[1] || 7), 1), 31);
+    const keys = Array.from({ length: days }, (_, i) => `funnel:${ymdHMS(nowS() - i * 86400).slice(0, 10)}`);
+    const rows = await db.all(`SELECT key, field, value FROM hashes WHERE key IN (${keys.map(() => '?').join(',')})`, ...keys);
+    const by = {};
+    for (const r of rows) (by[r.key] ??= {})[r.field] = int(r.value);
+    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue'];
+    const tot = Object.fromEntries(F.map(f => [f, keys.reduce((a, k) => a + (by[k]?.[f] || 0), 0)]));
+    const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
+    const lines = keys.map(k => {
+      const d = by[k] || {};
+      return `\`${k.slice(12)}\` 👤${d.new_users || 0} 🔗${d.links || 0} 👥${d.referrals || 0} 🎬${d.videos || 0} 🎁${d.trials || 0} 🛒${d.orders || 0} 💰${d.paid || 0} ₹${d.revenue || 0}`;
+    });
+    await m.reply(
+      `**📈 Funnel — last ${days} day(s)**\n\n` +
+      `👤 New users: **${tot.new_users}** (starts: ${tot.starts})\n` +
+      `🔗 Links streamed: **${tot.links}**\n` +
+      `👥 Referrals: **${tot.referrals}**\n` +
+      `🎬 /videos sent: **${tot.videos}**\n` +
+      `🎁 Trials started: **${tot.trials}** (${pct(tot.trials, tot.new_users)} of new users)\n` +
+      `📋 Plans shown: **${tot.plans_shown}**\n` +
+      `🛒 Orders created: **${tot.orders}** (${pct(tot.orders, tot.plans_shown)} of plan views)\n` +
+      `💰 Paid (verified): **${tot.paid}** (${pct(tot.paid, tot.orders)} of orders)\n` +
+      `₹ Revenue (verified): **₹${tot.revenue}**\n\n` +
+      `**Per day:**\n${lines.join('\n')}\n\n` +
+      '__Paid counts users who pressed Verify; payments activated without it show in the payment worker only.__'
+    );
   }, ADMIN);
   on(/^\/userstats(?:\s+(\d+))?/, async (m, g) => {
     const target = g[1] ? int(g[1]) : m.uid, h = await db.hgetall(`user_stats_${target}`), tag = await db.hget(CUSTOM_TAGS_KEY, String(target));
@@ -1728,21 +1783,22 @@ Contact @buggybeats for premium.
   }
   async function checkAndGrantReward(uid) {
     const ok = int(await db.hget('ref:ok', String(uid))), last = int(await db.hget('ref:last_reward', String(uid)));
-    for (const [t, days] of TIERS) if (ok >= t && t > last) { await grantPremium(int(uid), days); await db.hset('ref:last_reward', String(uid), t); return [true, days]; }
+    for (const [t, days] of TIERS) if (ok >= t && t > last) { await addPremiumDays(int(uid), days); await db.hset('ref:last_reward', String(uid), t); return [true, days]; }
     return [false, 0];
   }
   const tierText = ok => TIERS.map(([t, days], i) => {
     const prev = i ? TIERS[i - 1][0] : 0;
-    return `${ok >= t ? '✅' : '⬜'} \`${progressBar(Math.max(0, Math.min(ok, t) - prev), t - prev)}\` ${t} referrals → ${days}d Premium`;
+    return `${ok >= t ? '✅' : '⬜'} \`${progressBar(Math.max(0, Math.min(ok, t) - prev), t - prev)}\` ${t} friends → +${days}d bonus`;
   }).join('\n');
+  const refEarned = ok => ok * REF_DAYS + TIERS.reduce((a, [t, d]) => (ok >= t ? a + d : a), 0);
   const refLink = async uid => `https://t.me/${(await api.me()).username || 'YourBot'}?start=ref_AT-${int(uid)}`;
 
   on(/^\/(ref|refer|referral)$/, async m => {
     const link = await refLink(m.uid), [invited, ok, next, days] = await refStats(m.uid);
     let text = '┏━━━━━━━━━━━━━━━━━⍟\n┃  👥 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹 𝗦𝘆𝘀𝘁𝗲𝗺\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
       `📎 Your referral link:\n\`${link}\`\n\n👥 Invited: **${invited}**\n✅ Successful: **${ok}**\n\n${tierText(ok)}\n\n` +
-      `${next ? `Next tier: **${next - ok} more** referral(s) → ${days}d Premium` : '🏆 **All tiers unlocked!**'}\n\n` +
-      '💡 Share your link — when someone joins, you earn points!\n🎁 Hit a tier to unlock Premium rewards.';
+      `${next ? `Next bonus: **${next - ok} more** friend(s) → +${days}d` : '🏆 **All bonuses unlocked!**'}\n\n` +
+      `🎁 Every friend who joins = **+${REF_DAYS} day Premium**, added instantly.\n⭐ You've earned **${refEarned(ok)} days** so far.`;
     const [granted, gd] = await checkAndGrantReward(m.uid);
     if (granted) text += `\n\n🎉 **Congratulations!** You just earned **${gd} days Premium!**`;
     await m.reply(text, { buttons: [[Button.url('📤 Share Link', `https://t.me/share/url?url=${link}`)], [Button.inline('🏆 Claim Reward', 'ref_claim'), Button.inline('📊 Full Stats', 'ref_fullstats')], [Button.inline('◀️ Back', 'menu_main')]] });
@@ -1751,11 +1807,11 @@ Contact @buggybeats for premium.
     const [granted, days] = await checkAndGrantReward(e.uid);
     if (granted) return e.answer(`🎉 **Reward Claimed!**\n\nYou received **${days} days Premium!**\n\nEnjoy your benefits!`, true);
     const [, ok, next, nd] = await refStats(e.uid);
-    await e.answer(next ? `⏳ No reward to claim yet.\n\nYou need **${next - ok} more** referral(s) to reach the next tier (${nd}d Premium).` : "🏆 You've already claimed all available rewards!", true);
+    await e.answer(next ? `✅ Your +${REF_DAYS}d per friend is added automatically.\n\nNext bonus: ${next - ok} more friend(s) → +${nd}d.` : "🏆 You've unlocked every bonus!", true);
   });
   onCb(/^ref_fullstats$/, async e => {
     const [invited, ok] = await refStats(e.uid), last = int(await db.hget('ref:last_reward', String(e.uid)));
-    const earned = TIERS.reduce((a, [t, d]) => (ok >= t ? d : a), 0);
+    const earned = refEarned(ok);
     await e.edit('┏━━━━━━━━━━━━━━━━━⍟\n┃  📊 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹 𝗦𝘁𝗮𝘁𝘀\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
       `👥 Total invited: **${invited}**\n✅ Successful: **${ok}**\n🎁 Rewards earned: **${earned} days** Premium\n📌 Last tier claimed: **${last}** referrals\n\n${tierText(ok)}`,
       { buttons: back('menu_referral') });
@@ -1763,10 +1819,15 @@ Contact @buggybeats for premium.
   onCb(/^menu_referral$/, async e => {
     const link = await refLink(e.uid), [invited, ok, next, days] = await refStats(e.uid);
     await e.edit('┏━━━━━━━━━━━━━━━━━⍟\n┃  👥 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹𝘀\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
-      `\`${link}\`\n\n👥 Invited: **${invited}** | ✅ Successful: **${ok}**\n\n${tierText(ok)}\n\n${next ? `Next: **${next - ok} more** → ${days}d Premium` : '🏆 **All tiers unlocked!**'}`,
+      `🎁 Every friend = **+${REF_DAYS} day Premium**, added instantly.\n\n\`${link}\`\n\n👥 Invited: **${invited}** | ✅ Successful: **${ok}** | ⭐ Earned: **${refEarned(ok)}d**\n\n${tierText(ok)}\n\n${next ? `Next bonus: **${next - ok} more** → +${days}d` : '🏆 **All bonuses unlocked!**'}`,
       { buttons: [[Button.url('📤 Share', `https://t.me/share/url?url=${link}`)], [Button.inline('🏆 Claim', 'ref_claim'), Button.inline('📊 Stats', 'ref_fullstats')], [Button.inline('◀️ Back', 'menu_main')]] });
   });
-  onCb(/^renew_info$/, async e => { await e.answer('See plans below.'); await e.reply('⭐ Renew Premium\n\nUse /plan to check plans or contact an admin to renew.'); });
+  // reminder button: show the purchase plans right away (falls back to text when /videos isn't set up)
+  onCb(/^renew_info$/, async e => {
+    await e.answer('See plans below.');
+    if (showPlansHook) return showPlansHook(e.chatId);
+    await e.reply('⭐ Renew Premium\n\nUse /plan to check plans or contact an admin to renew.');
+  });
 
   // ==================== commands/ux.py ====================
   on(/^\/quick\s+(\S+)/, async (m, g) => {
@@ -1795,6 +1856,7 @@ Contact @buggybeats for premium.
 
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
+  let showPlansHook = null; // the /videos plans menu, used by the premium reminder's Renew button
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -1961,7 +2023,7 @@ Contact @buggybeats for premium.
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
         const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
-        if (r.ok) return setState(uid, { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) });
+        if (r.ok) return Promise.all([setState(uid, { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) }), funnel('videos')]);
         await db.run('DELETE FROM sorted_sets WHERE key = ? AND member = ?', READY, ctx.ready.md5); // unusable file_id
         save = { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
       }
@@ -1976,6 +2038,7 @@ Contact @buggybeats for premium.
       const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
       if (!r.ok) return target.reply('❌ Video error: server busy, please try again in a moment.');
       const fid = r.result?.video?.file_id;
+      await funnel('videos');
       if (fid && !c.fid && c.md5) await db.hset(META, c.md5, JSON.stringify({ u: c.url, f: fid }));
     }
 
@@ -2004,13 +2067,19 @@ Contact @buggybeats for premium.
       if (!res) return api.send(chatId, '⚠️ Error loading plans. Please try again later.');
       const plans = (res.plans || []).filter(p => p.status === 'active');
       if (!plans.length) return api.send(chatId, '⚠️ No plans available right now. Contact admin.');
-      const buttons = plans.map(p => [Button.inline(`${p.name} - ₹${p.price} (${p.validity_days} days)`, `vid_plan_${p.id}`)]);
+      // cheapest first (the easy first purchase); the lowest price per day is marked best value
+      plans.sort((a, b) => a.price - b.price);
+      const best = plans.reduce((a, p) => (p.price / p.validity_days < a.price / a.validity_days ? p : a), plans[0]);
+      const buttons = plans.map((p, i) => [Button.inline(`${i === 0 ? '⚡ ' : p === best ? '💎 ' : ''}${p.name} - ₹${p.price} (${p.validity_days} days)${p === best && i ? ' • Best value' : ''}`, `vid_plan_${p.id}`)]);
+      await funnel('plans_shown');
       const caption = '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
       const r = await api.call('sendPhoto', { chat_id: chatId, photo: PLANS_PHOTO, caption, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
       if (!r.ok) await api.send(chatId, caption, { html: true, buttons });
     }
+    showPlansHook = showPlans;
     onCb(/^vid_trial$/, async e => {
       await setState(e.uid, { trial_start_time: nowS() });
+      await funnel('trials');
       await e.answer('Trial activated!');
       await e.reply('🎉 <b>Your 3-minute free trial is now ACTIVE!</b>', { html: true });
       await serveVideo(e.chatId, e.uid, e);
@@ -2054,6 +2123,7 @@ Contact @buggybeats for premium.
       }
       if (!order?.status || !order.result?.payment_url) return done(`❌ Failed to create order: ${escHtml(order?.message || 'Unknown error')}`);
 
+      await funnel('orders');
       await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId }), { ex: 86400 });
       await done();
       await api.send(chatId,
@@ -2083,6 +2153,8 @@ Contact @buggybeats for premium.
         await db.delete(`vid_order:${e.uid}`);
         await setState(e.uid, { sub_checked: 0 });
         await logx(`payment ok ${e.uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}`);
+        await funnel('paid');
+        await funnel('revenue', int(o.amount));
         for (const a of await getAllAdmins())
           await api.send(a, `💰 Payment received\nUser: ${escHtml(e.from.first_name || '-')} (@${escHtml(e.from.username || '-')})\nID: <code>${e.uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
         return api.send(chatId,
