@@ -1930,7 +1930,7 @@ Contact @buggybeats for premium.
       for (const [m, u] of todo) {
         if (!live.length) break;
         const ch = live[k++ % live.length];
-        const r = await api.call('sendVideo', { chat_id: ch, video: u, supports_streaming: true, disable_notification: true });
+        const r = await api.call('sendVideo', { chat_id: ch, video: u, has_spoiler: true, supports_streaming: true, disable_notification: true });
         const fid = r.result?.video?.file_id;
         if (fid) done.push([m, u, fid]);
         else if (r.error_code === 429) live.splice(live.indexOf(ch), 1); // channel rate limit: stop it for this run
