@@ -1796,7 +1796,12 @@ Contact @buggybeats for premium.
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
-    const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, ''), pool = env.VIDEOS_POOL_WORKER.replace(/\/$/, '');
+    const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
+    // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
+    // one, spreading the load (and their request limits) across them
+    const pools = String(env.VIDEOS_POOL_WORKER).split(',').map(x => x.trim().replace(/\/$/, '')).filter(Boolean);
+    let poolTurn = Math.floor(Math.random() * pools.length);
+    const pool = () => pools[poolTurn++ % pools.length];
     const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), cooldown = parseFloat(env.VIDEOS_COOLDOWN_SECONDS || 1), promo = env.VIDEOS_PROMO_URL || '';
     const getJ = async (url, body) => {
       try {
@@ -1849,7 +1854,7 @@ Contact @buggybeats for premium.
     async function nextVideo(uid, state) {
       let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index);
       if (!links.length || idx >= links.length) {
-        links = (await getJ(`${pool}/?random=200`))?.links || [];
+        links = (await getJ(`${pool()}/?random=200`))?.links || [];
         if (!links.length) return null;
         idx = 0;
         await setState(uid, { video_links: JSON.stringify(links) });
@@ -1912,7 +1917,7 @@ Contact @buggybeats for premium.
       const dayKey = `vid_up:${new Date().toISOString().slice(0, 10)}`;
       const today = int(await db.get(dayKey));
       if (today >= PER_DAY) return;
-      const links = (await getJ(`${pool}/?random=200`))?.links || [];
+      const links = (await getJ(`${pool()}/?random=200`))?.links || [];
       const cand = [...new Map(links.map(u => [md5Of(u), u])).entries()].filter(([m]) => m);
       const have = new Set();
       for (let i = 0; i < cand.length; i += 90) { // D1: max 100 bound parameters per query
