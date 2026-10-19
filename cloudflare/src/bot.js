@@ -136,8 +136,8 @@ export async function teraboxCfg(env, db) {
 // resolver worker relayed. TeraBox answers "need verify_v2" (errno 400210) without a browser
 // session cookie (TB_COOKIE secret, or /setapi cookie). An expired jsToken is refreshed from the
 // share page (at most once per 5 min) and saved, so stream URLs use the new one too.
-// all serve the same API; some Cloudflare IPs get "need verify" (errno 400141) from one domain, so the
-// next is tried. A random first domain spreads the load.
+// all serve the same API; the session cookie is for 1024terabox.com, the others are fallbacks
+// (they often answer "need verify", errno 400141, from Cloudflare IPs).
 const TB_HOSTS = ['www.1024terabox.com', 'www.terabox.app', 'www.terabox.com', 'www.1024tera.com'];
 const TB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const tbHeaders = cfg => ({ 'User-Agent': TB_UA, Accept: 'application/json, text/plain, */*', 'Accept-Language': 'en-IN,en;q=0.9', ...(cfg.cookie ? { Cookie: cfg.cookie } : {}) });
@@ -146,21 +146,38 @@ const TB_DEAD = new Set([105, -9, 2, 115, -70, 9019, 400210]); // bad/expired/re
 const TB_VERIFY = new Set([400141]); // "need verify": this IP/domain is challenged, a new token won't help
 
 async function shareInfo(cfg, code) {
+  // The cookie belongs to 1024terabox.com, so that domain is asked first; if it hasn't answered with
+  // a verdict within 700ms, the other domains are asked in parallel. The first verdict wins (a
+  // working answer, or a dead-link errno); "need verify" answers are ignored while others are pending.
+  const ctrl = new AbortController();
+  const ask = host => fetch(`https://${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${cfg.jstoken}&shorturl=${encodeURIComponent(code)}&root=1`,
+    { headers: tbHeaders(cfg), signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(6000)]) })
+    .then(r => r.text()).then(t => { try { return JSON.parse(t); } catch { return { errno: 'bad-json', errmsg: t.slice(0, 120) }; } })
+    .catch(e => ({ errno: e.name, errmsg: e.message }));
+  const verdict = d => d.errno === 0 || TB_DEAD.has(d.errno);
   let last = null;
-  const k = Math.floor(Math.random() * TB_HOSTS.length), hosts = [...TB_HOSTS.slice(k), ...TB_HOSTS.slice(0, k)];
-  for (const host of hosts) {
-    try {
-      const r = await fetch(`https://${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${cfg.jstoken}&shorturl=${encodeURIComponent(code)}&root=1`,
-        { headers: tbHeaders(cfg), signal: AbortSignal.timeout(6000) });
-      const text = await r.text();
-      try { last = JSON.parse(text); } catch { last = { errno: `HTTP ${r.status}`, errmsg: text.slice(0, 120) }; continue; }
-      if (last.errno === 0 || TB_DEAD.has(last.errno)) return last; // TeraBox's verdict on the link itself
-      console.log(`resolver ${code} @${host}: errno=${last.errno} ${last.errmsg || last.show_msg || ''}`); // e.g. "need verify": next domain
-    } catch (e) {
-      last = { errno: e.name, errmsg: e.message };
-    }
-  }
-  return last;
+  const answers = [];
+  const settle = new Promise(res => {
+    let pending = 0, started = false;
+    const launch = host => {
+      pending++;
+      ask(host).then(d => {
+        pending--;
+        answers.push(`${host}:${d.errno}`);
+        if (verdict(d)) return res(d);
+        last = d;
+        if (!started) startRest();
+        if (!pending && started) res(last);
+      });
+    };
+    const startRest = () => { if (started) return; started = true; TB_HOSTS.slice(1).forEach(launch); };
+    launch(TB_HOSTS[0]);
+    setTimeout(startRest, 700);
+  });
+  const d = await settle;
+  ctrl.abort();
+  if (d?.errno !== 0) console.log(`resolver ${code}: ${answers.join(' ')}`);
+  return d;
 }
 
 // a fresh jsToken from the share page (the page embeds it as fn("…") in a script)
