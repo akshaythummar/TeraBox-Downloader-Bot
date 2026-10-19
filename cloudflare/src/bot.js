@@ -70,7 +70,7 @@ No download, no waiting — it streams right here in Telegram.
 
 🆓 Free: Unlimited streaming links
 ⭐ Premium: multi-file links + /videos
-👥 Invite friends: **+1 day Premium** for each one → /ref
+👥 Invite friends: **+1 day Premium** for each one who joins → /ref
 
 Choose an option below 👇
 `;
@@ -740,14 +740,15 @@ export function createBot(env, api, db, origin) {
     const uid = m.uid, name = m.from.first_name;
     const arg = m.text.split(/\s+/)[1];
     const ref = arg?.startsWith('ref_AT-') ? int(arg.split('ref_AT-')[1]) : 0;
+    let refPending = false;
     if (ref > 0 && (await recordReferral(ref, uid))) {
-      // instant reward for the referrer: +1 day per friend, plus a bonus at each milestone
-      await addPremiumDays(ref, REF_DAYS);
-      const [bonus, bd] = await checkAndGrantReward(ref);
-      const ok = int(await db.hget('ref:ok', String(ref)));
-      await funnel('referrals');
-      await logx(`Referral: ${ref} invited ${uid} → +${REF_DAYS}d${bonus ? ` +${bd}d bonus` : ''}`);
-      await api.send(ref, `🎉 **${escapeMarkdown(name)}** joined with your link!\n\n⭐ +${REF_DAYS} day Premium added${bonus ? `\n🏆 Milestone bonus: **+${bd} days**` : ''}\n👥 Total friends: **${ok}**\n\nKeep sharing: /ref`);
+      // the referrer is rewarded only once this user has joined the force channels
+      const missing = await missingChannels(uid);
+      if (!missing.length) await confirmReferral(uid, name);
+      else {
+        refPending = true;
+        await api.send(ref, `👋 **${escapeMarkdown(name)}** opened your link!\n\n⏳ Your +${REF_DAYS} day Premium is added as soon as they join ${missing.join(', ')}.`);
+      }
     }
     // /start-only users get broadcasts too (previously only users who had sent a link)
     if (await db.sadd('all_known_users', String(uid))) { await db.hincrby(STATS_KEY, 'total_users', 1); await funnel('new_users'); }
@@ -756,6 +757,7 @@ export function createBot(env, api, db, origin) {
     if (!admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
     await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
+    if (refPending) await sendJoinPrompt(m.chatId, await missingChannels(uid));
   });
 
   // ==================== menu callbacks ====================
@@ -1217,6 +1219,7 @@ Contact @buggybeats for premium.
       g.expired ? revokePremium(m.uid) : null,
     ]);
     if (joined) return hm.edit(`Please join ${joined} then send me the link again.`);
+    confirmReferral(m.uid, m.from.first_name).catch(() => {}); // no-op unless this user has a pending referral
 
     const files = await filesP;
     if (!files) return hm.edit(ERRORS.api_unavailable);
@@ -1831,17 +1834,49 @@ Contact @buggybeats for premium.
   });
 
   // ==================== commands/referral.py ====================
+  // A referral is recorded on /start but stays pending (ref:pending:<referrer>) until the new user
+  // has joined every force channel; confirmReferral then counts it and rewards the referrer, once.
   async function recordReferral(referrer, uid) {
     if (referrer === uid || (await db.get(`ref:by:${uid}`)) != null) return false;
     await db.set(`ref:by:${uid}`, referrer);
     await db.sadd(`ref:invited:${referrer}`, uid);
-    await db.hincrby('ref:ok', String(referrer), 1);
+    await db.sadd(`ref:pending:${referrer}`, uid);
     return true;
   }
+  async function missingChannels(uid) {
+    const rt = await runtime(), out = [];
+    for (const ch of [...rt.FORCE_CHANNELS, ...rt.FORCE_GROUPS]) if (!(await isUserOnChat(ch, uid))) out.push(ch);
+    return out;
+  }
+  async function confirmReferral(uid, name) {
+    const ref = int(await db.get(`ref:by:${uid}`));
+    if (!ref || !(await db.srem(`ref:pending:${ref}`, uid))) return false; // none, or already counted
+    const ok = await db.hincrby('ref:ok', String(ref), 1);
+    await addPremiumDays(ref, REF_DAYS);
+    const [bonus, bd] = await checkAndGrantReward(ref);
+    await funnel('referrals');
+    await logx(`Referral: ${ref} invited ${uid} → +${REF_DAYS}d${bonus ? ` +${bd}d bonus` : ''}`);
+    await api.send(ref, `🎉 **${escapeMarkdown(name || 'A friend')}** joined with your link!\n\n⭐ +${REF_DAYS} day Premium added${bonus ? `\n🏆 Milestone bonus: **+${bd} days**` : ''}\n👥 Total friends: **${ok}**\n\nKeep sharing: /ref`);
+    return true;
+  }
+  const chanUrl = ch => (String(ch).startsWith('@') ? `https://t.me/${String(ch).slice(1)}` : null);
+  async function sendJoinPrompt(chatId, missing) {
+    const buttons = missing.map(ch => chanUrl(ch)).filter(Boolean).map((u, i) => [Button.url(`📣 Join ${missing[i]}`, u)]);
+    buttons.push([Button.inline('✅ Joined', 'ref_joined')]);
+    await api.send(chatId, `📢 Join ${missing.join(', ')} to start using the bot, then tap **✅ Joined**.`, { buttons });
+  }
+  onCb(/^ref_joined$/, async e => {
+    const missing = await missingChannels(e.uid);
+    if (missing.length) return e.answer(`❌ You haven't joined ${missing.join(', ')} yet. Join, then tap ✅ Joined again.`, true);
+    await confirmReferral(e.uid, e.from.first_name);
+    await e.answer('✅ Thanks for joining! Send me any TeraBox link.');
+    await e.edit('✅ Joined! Now send me any TeraBox link and watch it in ~2 seconds ⚡', { buttons: [] });
+  });
   async function refStats(uid) {
-    const invited = await db.scard(`ref:invited:${uid}`), ok = int(await db.hget('ref:ok', String(uid)));
+    const [invited, pending] = await Promise.all([db.scard(`ref:invited:${uid}`), db.scard(`ref:pending:${uid}`)]);
+    const ok = int(await db.hget('ref:ok', String(uid)));
     const next = TIERS.find(([t]) => ok < t);
-    return [invited, ok, next?.[0] ?? null, next?.[1] ?? null];
+    return [invited, ok, next?.[0] ?? null, next?.[1] ?? null, pending];
   }
   async function checkAndGrantReward(uid) {
     const ok = int(await db.hget('ref:ok', String(uid))), last = int(await db.hget('ref:last_reward', String(uid)));
@@ -1856,11 +1891,11 @@ Contact @buggybeats for premium.
   const refLink = async uid => `https://t.me/${(await api.me()).username || 'YourBot'}?start=ref_AT-${int(uid)}`;
 
   on(/^\/(ref|refer|referral)$/, async m => {
-    const link = await refLink(m.uid), [invited, ok, next, days] = await refStats(m.uid);
+    const link = await refLink(m.uid), [invited, ok, next, days, pending] = await refStats(m.uid);
     let text = '┏━━━━━━━━━━━━━━━━━⍟\n┃  👥 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹 𝗦𝘆𝘀𝘁𝗲𝗺\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
-      `📎 Your referral link:\n\`${link}\`\n\n👥 Invited: **${invited}**\n✅ Successful: **${ok}**\n\n${tierText(ok)}\n\n` +
+      `📎 Your referral link:\n\`${link}\`\n\n👥 Invited: **${invited}**\n✅ Successful: **${ok}**${pending ? `\n⏳ Pending: **${pending}** (haven't joined the channel yet)` : ''}\n\n${tierText(ok)}\n\n` +
       `${next ? `Next bonus: **${next - ok} more** friend(s) → +${days}d` : '🏆 **All bonuses unlocked!**'}\n\n` +
-      `🎁 Every friend who joins = **+${REF_DAYS} day Premium**, added instantly.\n⭐ You've earned **${refEarned(ok)} days** so far.`;
+      `🎁 Every friend who joins the channel = **+${REF_DAYS} day Premium**.\n⭐ You've earned **${refEarned(ok)} days** so far.`;
     const [granted, gd] = await checkAndGrantReward(m.uid);
     if (granted) text += `\n\n🎉 **Congratulations!** You just earned **${gd} days Premium!**`;
     await m.reply(text, { buttons: [[Button.url('📤 Share Link', `https://t.me/share/url?url=${link}`)], [Button.inline('🏆 Claim Reward', 'ref_claim'), Button.inline('📊 Full Stats', 'ref_fullstats')], [Button.inline('◀️ Back', 'menu_main')]] });
@@ -1879,9 +1914,9 @@ Contact @buggybeats for premium.
       { buttons: back('menu_referral') });
   });
   onCb(/^menu_referral$/, async e => {
-    const link = await refLink(e.uid), [invited, ok, next, days] = await refStats(e.uid);
+    const link = await refLink(e.uid), [invited, ok, next, days, pending] = await refStats(e.uid);
     await e.edit('┏━━━━━━━━━━━━━━━━━⍟\n┃  👥 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹𝘀\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
-      `🎁 Every friend = **+${REF_DAYS} day Premium**, added instantly.\n\n\`${link}\`\n\n👥 Invited: **${invited}** | ✅ Successful: **${ok}** | ⭐ Earned: **${refEarned(ok)}d**\n\n${tierText(ok)}\n\n${next ? `Next bonus: **${next - ok} more** → +${days}d` : '🏆 **All bonuses unlocked!**'}`,
+      `🎁 Every friend who joins the channel = **+${REF_DAYS} day Premium**.\n\n\`${link}\`\n\n👥 Invited: **${invited}** | ✅ Successful: **${ok}** | ⭐ Earned: **${refEarned(ok)}d**${pending ? `\n⏳ Pending: **${pending}** (not in the channel yet)` : ''}\n\n${tierText(ok)}\n\n${next ? `Next bonus: **${next - ok} more** → +${days}d` : '🏆 **All bonuses unlocked!**'}`,
       { buttons: [[Button.url('📤 Share', `https://t.me/share/url?url=${link}`)], [Button.inline('🏆 Claim', 'ref_claim'), Button.inline('📊 Stats', 'ref_fullstats')], [Button.inline('◀️ Back', 'menu_main')]] });
   });
   // reminder button: show the purchase plans right away (falls back to text when /videos isn't set up)
