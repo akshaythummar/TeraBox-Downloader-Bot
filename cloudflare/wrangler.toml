@@ -19,7 +19,7 @@ VIDEOS_POOL_WORKER = "https://videosave.hoyakey802.workers.dev,https://videosave
 VIDEOS_TRIAL_SECONDS = "180"
 VIDEOS_COOLDOWN_SECONDS = "1"
 VIDEOS_PROMO_URL = "https://mangoflix.xyz"
-VIDEOS_CHANNEL = "-1002386227767,-1003677006021,-1004455675678"   # TeraBoxFastDown, TeraBoxFastDown1, TeraBoxFastDown2 — cron uploads /videos round-robin (bot must be admin)
+VIDEOS_CHANNEL = ""   # empty = no pre-uploads. Was TeraBoxFastDown/1/2 (closed). Comma-separated channel IDs; bot must be admin
 
 [[d1_databases]]
 binding = "DB"
