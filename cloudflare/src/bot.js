@@ -12,7 +12,6 @@ const BANNED_USERS_KEY = 'banned_users';
 const STATS_KEY = 'bot_stats';
 const AUDIT_LOG_KEY = 'audit_log';
 const MAINTENANCE_KEY = 'maintenance_mode';
-const COOLDOWN_KEY = 'download_cooldown';
 const DYNAMIC_ADMINS_KEY = 'dynamic_admins';
 const CUSTOM_TAGS_KEY = 'custom_tags';
 const GC_REDIS_KEY = 'gift_cards';
@@ -272,7 +271,7 @@ export function createBot(env, api, db, origin) {
     const o = await db.hgetall('config_overrides');
     return {
       MAX_FILES_PER_REQUEST: int(o.MAX_FILES_PER_REQUEST ?? 10),
-      DOWNLOAD_COOLDOWN_SECONDS: int(o.DOWNLOAD_COOLDOWN_SECONDS ?? 10),
+      VIDEOS_COOLDOWN_SECONDS: parseFloat(o.VIDEOS_COOLDOWN_SECONDS ?? env.VIDEOS_COOLDOWN_SECONDS ?? 1) || 0,
       FREE_HOURLY_LIMIT: int(o.FREE_HOURLY_LIMIT ?? 0),
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
@@ -341,13 +340,6 @@ export function createBot(env, api, db, origin) {
   }
   const getMaintenance = async () => [(await db.get(MAINTENANCE_KEY)) === '1', (await db.get(`${MAINTENANCE_KEY}:reason`)) || ''];
 
-  async function checkCooldown(uid) {
-    const last = await db.get(`${COOLDOWN_KEY}_${uid}`);
-    if (!last) return 0;
-    const cd = (await runtime()).DOWNLOAD_COOLDOWN_SECONDS, el = nowS() - parseFloat(last);
-    return el < cd ? Math.floor(cd - el) : 0;
-  }
-  const setCooldown = async uid => db.set(`${COOLDOWN_KEY}_${uid}`, nowS(), { ex: (await runtime()).DOWNLOAD_COOLDOWN_SECONDS + 5 });
 
   async function isUserOnChat(chat, uid) {
     const r = await api.call('getChatMember', { chat_id: chat, user_id: uid });
@@ -425,7 +417,7 @@ export function createBot(env, api, db, origin) {
   async function gate(uid) {
     const u = String(uid);
     const [kv, h, s] = await db.d.batch([
-      db.q('SELECT key, value, expires_at FROM kv WHERE key IN (?1, ?2, ?3)', MAINTENANCE_KEY, `${COOLDOWN_KEY}_${u}`, `check_${u}`),
+      db.q('SELECT key, value, expires_at FROM kv WHERE key IN (?1, ?2, ?3)', MAINTENANCE_KEY, `check_${u}`, `check_${u}`),
       db.q('SELECT key, value FROM hashes WHERE field = ?1 AND key IN (?2, ?3)', u, PREMIUM_EXPIRY_KEY, THUMB_KEY),
       db.q('SELECT key FROM sets WHERE member = ?1 AND key IN (?2, ?3)', u, BANNED_USERS_KEY, DYNAMIC_ADMINS_KEY),
     ]);
@@ -440,7 +432,6 @@ export function createBot(env, api, db, origin) {
       admin: ADMINS.includes(int(uid)) || sv.has(DYNAMIC_ADMINS_KEY),
       premium: exp != null && now < int(exp),
       expired: exp != null && now >= int(exp),
-      lastDl: k[`${COOLDOWN_KEY}_${u}`]?.value,
       count: k[`check_${u}`]?.value,
       countExp: k[`check_${u}`]?.expires_at,
       thumb: hv[THUMB_KEY] || null,
@@ -1082,7 +1073,7 @@ Use: \`/logs\` or \`/logs 50\`
   // commands/config_editor.py — only the keys that still mean something on Workers
   const SPECS = {
     MAX_FILES_PER_REQUEST: { section: 'Limits', kind: 'int', min: 1, max: 50 },
-    DOWNLOAD_COOLDOWN_SECONDS: { section: 'Limits', kind: 'int', min: 0, max: 300 },
+    VIDEOS_COOLDOWN_SECONDS: { section: 'Limits', kind: 'int', min: 0, max: 300 },
     FREE_HOURLY_LIMIT: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
@@ -1196,10 +1187,7 @@ Contact @buggybeats for premium.
     if (g.maintenance) return m.reply('🔧 Bot is currently under maintenance. Please try again later.');
     if (g.banned) return m.reply('🚫 You are banned from using this bot.');
     const free = !g.premium && !g.admin;
-    if (free && g.lastDl) {
-      const cd = Math.floor(rt.DOWNLOAD_COOLDOWN_SECONDS - (nowS() - parseFloat(g.lastDl)));
-      if (cd > 0) return m.reply(`⏳ Please wait **${cd} seconds** before downloading again.`);
-    }
+    // no cooldown on links — only /videos has one (VIDEOS_COOLDOWN_SECONDS)
     // 0 = unlimited links for everyone (default); /configset FREE_HOURLY_LIMIT 10 brings the old cap back
     if (free && rt.FREE_HOURLY_LIMIT && int(g.count) >= rt.FREE_HOURLY_LIMIT) {
       const ttl = g.countExp ? Math.floor(g.countExp - nowS()) : 0;
@@ -1227,7 +1215,7 @@ Contact @buggybeats for premium.
       return hm.edit(`⚠️ This link has **${files.length} files**.\nFree users can download max **${rt.MAX_FILES_PER_REQUEST}** files.\nUpgrade to **Premium** for unlimited.`);
 
     const todo = g.premium ? files : files.slice(0, 1);
-    const after = () => [free ? setCooldown(m.uid) : null, db.set(`check_${m.uid}`, int(g.count) + 1, { ex: g.countExp ? Math.max(Math.ceil(g.countExp - nowS()), 1) : 3600 })];
+    const after = () => [db.set(`check_${m.uid}`, int(g.count) + 1, { ex: g.countExp ? Math.max(Math.ceil(g.countExp - nowS()), 1) : 3600 })];
     if (todo.length === 1) {
       const f = todo[0], ext = extOf(f.file_name);
       if (!VIDEO_EXTENSIONS.has(ext))
@@ -1393,7 +1381,7 @@ Contact @buggybeats for premium.
 /maintenance [on/off] — Toggle maintenance mode
 /auditlog \`[count]\` — View admin action log
 /maxfiles \`<number>\` — Set max files per request
-/setcooldown \`<seconds>\` — Set download cooldown
+/setcooldown \`<seconds>\` — Set /videos cooldown (links have none)
 
 **── Admin Management (Owner) ──**
 /addadmin \`<user_id>\` — Add new admin
@@ -1503,9 +1491,10 @@ Contact @buggybeats for premium.
     await m.reply(`✅ Max files per request set to **${int(g[1])}**.`);
   }, OWNER);
   on(/^\/setcooldown\s+(\d+)/, async (m, g) => {
-    await setOverride('DOWNLOAD_COOLDOWN_SECONDS', int(g[1]));
-    await logAudit('SET_COOLDOWN', m.uid, `Set to ${int(g[1])}s`);
-    await m.reply(`✅ Download cooldown set to **${int(g[1])} seconds**.`);
+    await setOverride('VIDEOS_COOLDOWN_SECONDS', int(g[1]));
+    await logAudit('SET_COOLDOWN', m.uid, `/videos cooldown set to ${int(g[1])}s`);
+    await m.reply(`✅ /videos cooldown set to **${int(g[1])} seconds**.
+(Links have no cooldown.)`);
   }, OWNER);
 
   on(/^\/addadmin\s+(\d+)/, async (m, g) => {
@@ -1961,7 +1950,7 @@ Contact @buggybeats for premium.
     const pools = String(env.VIDEOS_POOL_WORKER).split(',').map(x => x.trim().replace(/\/$/, '')).filter(Boolean);
     let poolTurn = Math.floor(Math.random() * pools.length);
     const pool = () => pools[poolTurn++ % pools.length];
-    const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), cooldown = parseFloat(env.VIDEOS_COOLDOWN_SECONDS || 1), promo = env.VIDEOS_PROMO_URL || '';
+    const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), promo = env.VIDEOS_PROMO_URL || '';
     const getJ = async (url, body) => {
       try {
         const r = await fetch(url, { method: body ? 'POST' : 'GET', signal: AbortSignal.timeout(10000), ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) });
@@ -2142,7 +2131,7 @@ Contact @buggybeats for premium.
     on(/^\/videos$/, async m => {
       const ctx = await loadCtx(m.uid), state = ctx.state;
       if (state.last_video_time) {
-        const pending = cooldown - (nowS() - parseFloat(state.last_video_time));
+        const pending = (await runtime()).VIDEOS_COOLDOWN_SECONDS - (nowS() - parseFloat(state.last_video_time));
         if (pending > 0) return m.reply(`⏳ Please wait ${pending.toFixed(1)} seconds before requesting another video.`);
       }
       const [reg, access] = await Promise.all([
