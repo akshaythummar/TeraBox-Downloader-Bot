@@ -94,7 +94,13 @@ const convertSeconds = s => {
 const escapeMarkdown = t => (t == null ? '' : String(t).replace(/([*_`[\]])/g, '\\$1'));
 const captionName = n => String(n || 'file').replace(/`/g, "'").replace(/([*_[\]])/g, '\\$1');
 const sanitize = n => String(n || '').replace(/[\\/*?:"<>|]/g, '').trim() || 'file';
-export const shareCode = u => (String(u).match(/\/s\/([\w-]+)/) || String(u).match(/surl=([\w-]+)/) || [])[1] || null;
+// /s/<code> links carry the full code; ?surl=<x> links drop its leading "1", which TeraBox's API needs
+export const shareCode = u => {
+  const s = String(u).match(/\/s\/([\w-]+)/);
+  if (s) return s[1];
+  const q = String(u).match(/surl=([\w-]+)/);
+  return q ? (q[1].startsWith('1') && q[1].length > 22 ? q[1] : `1${q[1]}`) : null;
+};
 const getUrl = s => (String(s || '').match(/https?:\/\/\S+/g) || []).find(u => URL_RE.test(u)) || null;
 const extOf = n => { n = n.toLowerCase(); return n.includes('.') ? '.' + n.split('.').pop() : ''; };
 const pyList = a => `[${a.map(x => `'${x}'`).join(', ')}]`;
