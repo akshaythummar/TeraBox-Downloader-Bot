@@ -1,6 +1,6 @@
 // JS port of the Python bot (amazon-ktworker: main.py + commands/*). Same
 // commands, texts and DB keys. Difference: a TeraBox link is answered with a
-// stream link (resolver + HLS proxy workers) instead of download→upload→forward.
+// stream link (own TeraBox resolver + HLS proxy worker) instead of download→upload→forward.
 
 import { Button, md } from './tg.js';
 
@@ -125,33 +125,72 @@ const uncache = key => CACHE.delete(key);
 
 export async function teraboxCfg(env, db) {
   return cached('tbcfg', async () => {
-    const rows = await db.all("SELECT key, value FROM kv WHERE key IN ('terabox_cfg:jstoken', 'terabox_cfg:resolver', 'terabox_cfg:proxy')");
+    const rows = await db.all("SELECT key, value FROM kv WHERE key IN ('terabox_cfg:jstoken', 'terabox_cfg:cookie', 'terabox_cfg:proxy')");
     const o = Object.fromEntries(rows.map(r => [r.key.split(':')[1], r.value]));
-    return { jstoken: o.jstoken || env.JSTOKEN || '', resolver: (o.resolver || env.RESOLVER).replace(/\/$/, ''), proxy: (o.proxy || env.HLS_PROXY).replace(/\/$/, '') };
+    return { jstoken: o.jstoken || env.JSTOKEN || '', cookie: o.cookie || env.TB_COOKIE || '', proxy: (o.proxy || env.HLS_PROXY).replace(/\/$/, '') };
   });
 }
 
-// The resolver fails now and then for links that work a moment later, so a quick failure is
-// retried once (terabox.py's retry_request did 2 attempts too). No retry on a 4xx (dead link)
-// or a timeout: the resolver hangs on invalid codes, and retrying would double that wait.
-export async function resolveShare(cfg, code) {
-  for (let attempt = 1; attempt <= 2; attempt++) {
+// ---- own resolver: TeraBox's share API, no third-party worker ----
+// GET /api/shorturlinfo returns the same {errno, shareid, uk, sign, timestamp, list} the old
+// resolver worker relayed. TeraBox answers "need verify_v2" (errno 400210) without a browser
+// session cookie (TB_COOKIE secret, or /setapi cookie). An expired jsToken is refreshed from the
+// share page (at most once per 5 min) and saved, so stream URLs use the new one too.
+// all serve the same API; some Cloudflare IPs get "need verify" (errno 400141) from one domain, so the
+// next is tried. A random first domain spreads the load.
+const TB_HOSTS = ['www.1024terabox.com', 'www.terabox.app', 'www.terabox.com', 'www.1024tera.com'];
+const TB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const tbHeaders = cfg => ({ 'User-Agent': TB_UA, Accept: 'application/json, text/plain, */*', 'Accept-Language': 'en-IN,en;q=0.9', ...(cfg.cookie ? { Cookie: cfg.cookie } : {}) });
+let lastTokenRefresh = 0;
+const TB_DEAD = new Set([105, -9, 2, 115, -70, 9019, 400210]); // bad/expired/removed link, or no cookie (400210)
+const TB_VERIFY = new Set([400141]); // "need verify": this IP/domain is challenged, a new token won't help
+
+async function shareInfo(cfg, code) {
+  let last = null;
+  const k = Math.floor(Math.random() * TB_HOSTS.length), hosts = [...TB_HOSTS.slice(k), ...TB_HOSTS.slice(0, k)];
+  for (const host of hosts) {
     try {
-      const r = await fetch(`${cfg.resolver}/?q=${encodeURIComponent(code)}`, {
-        signal: AbortSignal.timeout(15000),
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36', Accept: 'application/json, text/plain, */*' },
-      });
+      const r = await fetch(`https://${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${cfg.jstoken}&shorturl=${encodeURIComponent(code)}&root=1`,
+        { headers: tbHeaders(cfg), signal: AbortSignal.timeout(6000) });
       const text = await r.text();
-      let d = null;
-      try { d = JSON.parse(text); } catch {}
-      if (r.ok && d?.errno === 0 && d.list?.length) return d;
-      console.log(`resolver ${code} attempt ${attempt}: HTTP ${r.status} errno=${d?.errno} ${d?.show_msg || d?.errmsg || ''} ${d ? '' : text.slice(0, 150)}`);
-      if (r.status >= 400 && r.status < 500 && r.status !== 429) return null;
+      try { last = JSON.parse(text); } catch { last = { errno: `HTTP ${r.status}`, errmsg: text.slice(0, 120) }; continue; }
+      if (last.errno === 0 || TB_DEAD.has(last.errno)) return last; // TeraBox's verdict on the link itself
+      console.log(`resolver ${code} @${host}: errno=${last.errno} ${last.errmsg || last.show_msg || ''}`); // e.g. "need verify": next domain
     } catch (e) {
-      console.log(`resolver ${code} attempt ${attempt}: ${e.name} ${e.message}`);
-      if (e.name === 'TimeoutError') return null;
+      last = { errno: e.name, errmsg: e.message };
     }
-    if (attempt === 1) await new Promise(res => setTimeout(res, 1000));
+  }
+  return last;
+}
+
+// a fresh jsToken from the share page (the page embeds it as fn("…") in a script)
+async function refreshJsToken(cfg, db, code) {
+  if (Date.now() - lastTokenRefresh < 300000) return null;
+  lastTokenRefresh = Date.now();
+  try {
+    const r = await fetch(`https://${TB_HOSTS[0]}/sharing/link?surl=${encodeURIComponent(code.replace(/^1/, ''))}`, { headers: tbHeaders(cfg), signal: AbortSignal.timeout(5000) });
+    const m = (await r.text()).match(/fn%28%22([0-9A-F]{64,})%22%29/);
+    if (!m || m[1] === cfg.jstoken) return null;
+    await db.set('terabox_cfg:jstoken', m[1]);
+    uncache('tbcfg');
+    console.log('jsToken refreshed from the share page');
+    return m[1];
+  } catch (e) {
+    console.log('jsToken refresh failed:', e.message);
+    return null;
+  }
+}
+
+export async function resolveShare(cfg, code, db) {
+  let d = await shareInfo(cfg, code);
+  if (d?.errno === 0 && d.list?.length) return d;
+  console.log(`resolver ${code}: errno=${d?.errno} ${d?.errmsg || d?.show_msg || ''}`);
+  // a dead/expired/removed link is final; any other error may be a stale token: retry once with a fresh one
+  const tok = db && d && typeof d.errno === 'number' && !TB_DEAD.has(d.errno) && !TB_VERIFY.has(d.errno) ? await refreshJsToken(cfg, db, code) : null;
+  if (tok) {
+    d = await shareInfo({ ...cfg, jstoken: tok }, code);
+    if (d?.errno === 0 && d.list?.length) return d;
+    console.log(`resolver ${code} (new jsToken): errno=${d?.errno} ${d?.errmsg || d?.show_msg || ''}`);
   }
   return null;
 }
@@ -166,7 +205,7 @@ export async function resolveCached(env, db, code, fresh = false) {
     const hit = await db.get(key);
     if (hit) return { ...JSON.parse(hit), cached: true };
   }
-  const d = await resolveShare(await teraboxCfg(env, db), code);
+  const d = await resolveShare(await teraboxCfg(env, db), code, db);
   if (d) {
     const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size })) };
     await db.set(key, JSON.stringify(slim), { ex: SHARE_TTL });
@@ -998,7 +1037,7 @@ Use: \`/logs\` or \`/logs 50\`
 
   async function apiHealth() {
     const cfg = await teraboxCfg(env, db), out = {};
-    for (const [name, url] of [['resolver_worker', cfg.resolver], ['hls_proxy', cfg.proxy]]) {
+    for (const [name, url] of [['terabox_api', `https://${TB_HOSTS[0]}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&shorturl=1x&root=1`], ['hls_proxy', cfg.proxy]]) {
       const t0 = Date.now();
       try {
         const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
@@ -1023,7 +1062,7 @@ Use: \`/logs\` or \`/logs 50\`
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
-  const BLOCKED = new Set(['BOT_TOKEN', 'API_ID', 'API_HASH', 'TURSO_DB_URL', 'TURSO_AUTH_TOKEN', 'PRIVATE_CHAT_ID', 'OWNER_ID', 'ADMINS', 'TERABOX_JSTOKEN', 'TERABOX_RESOLVER_WORKER', 'TERABOX_HLS_PROXY_WORKER']);
+  const BLOCKED = new Set(['BOT_TOKEN', 'API_ID', 'API_HASH', 'TURSO_DB_URL', 'TURSO_AUTH_TOKEN', 'PRIVATE_CHAT_ID', 'OWNER_ID', 'ADMINS', 'TERABOX_JSTOKEN', 'TB_COOKIE', 'TERABOX_HLS_PROXY_WORKER']);
   async function configViewText() {
     const rt = await runtime(), lines = ['**Runtime Config**', ''];
     for (const section of ['Limits', 'Force Join']) {
@@ -1290,7 +1329,7 @@ Contact @buggybeats for premium.
 /configview — View runtime config
 /configset \`<KEY>\` \`<VALUE>\` — Edit runtime config
 /configreset \`<KEY>\` — Reset key to default
-/setapi \`<jstoken|resolver|proxy>\` \`<value>\` — Rotate resolver config live
+/setapi \`<jstoken|cookie|proxy>\` \`<value>\` — Rotate TeraBox config live
 /reloadconfig — Reload resolver config
 /backup — Full Redis snapshot
 /restore — Restore (reply to backup file)
@@ -1607,20 +1646,20 @@ Contact @buggybeats for premium.
     await m.reply(text);
   }));
   const short = (t, n = 160) => { t = t == null ? '-' : String(t); return t.length <= n ? t : t.slice(0, n) + '...'; };
-  const reloadText = c => `Reloaded resolver config without restart.\njsToken: \`${short(c.jstoken ? c.jstoken.slice(0, 10) + '...' : '')}\`\nResolver worker: \`${short(c.resolver)}\`\nHLS proxy worker: \`${short(c.proxy)}\``;
-  on(/^\/setapi\s+(jstoken|resolver|proxy)\s+(\S.*)$/s, denyUnlessAdmin(async (m, g) => {
+  const reloadText = c => `Reloaded TeraBox config without restart.\njsToken: \`${short(c.jstoken ? c.jstoken.slice(0, 10) + '...' : '')}\`\nCookie: \`${c.cookie ? `set (${c.cookie.length} chars)` : 'NOT SET'}\`\nHLS proxy worker: \`${short(c.proxy)}\``;
+  on(/^\/setapi\s+(jstoken|cookie|proxy)\s+(\S.*)$/s, denyUnlessAdmin(async (m, g) => {
     const slot = g[1].toLowerCase(), value = g[2].trim();
-    if (slot !== 'jstoken' && !value.startsWith('http'))
-      return m.reply('Usage: `/setapi <jstoken|resolver|proxy> <value>`\n`resolver`/`proxy` must be a worker URL starting with http.');
-    await db.set(`terabox_cfg:${slot}`, slot === 'jstoken' ? value : value.replace(/\/$/, ''));
+    if (slot === 'proxy' && !value.startsWith('http'))
+      return m.reply('Usage: `/setapi <jstoken|cookie|proxy> <value>`\n`proxy` must be a worker URL starting with http; `cookie` is the TeraBox browser cookie string.');
+    await db.set(`terabox_cfg:${slot}`, slot === 'proxy' ? value.replace(/\/$/, '') : value);
     uncache('tbcfg');
-    await logAudit('SETAPI', m.uid, `${slot}=${value.slice(0, 120)}`);
+    await logAudit('SETAPI', m.uid, slot === 'cookie' ? 'cookie updated' : `${slot}=${value.slice(0, 120)}`);
     await m.reply(reloadText(await teraboxCfg(env, db)));
   }));
   on(/^\/reloadconfig$/, denyUnlessAdmin(async m => {
     uncache('tbcfg');
     const c = await teraboxCfg(env, db);
-    await logAudit('RELOADCONFIG', m.uid, JSON.stringify({ resolver: c.resolver, proxy: c.proxy }).slice(0, 200));
+    await logAudit('RELOADCONFIG', m.uid, JSON.stringify({ cookie: !!c.cookie, proxy: c.proxy }).slice(0, 200));
     await m.reply(reloadText(c));
   }));
 
