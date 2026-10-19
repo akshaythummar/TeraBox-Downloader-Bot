@@ -148,7 +148,7 @@ const TB_HOSTS = ['www.1024terabox.com', 'www.terabox.app', 'www.terabox.com', '
 const TB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const tbHeaders = cfg => ({ 'User-Agent': TB_UA, Accept: 'application/json, text/plain, */*', 'Accept-Language': 'en-IN,en;q=0.9', ...(cfg.cookie ? { Cookie: cfg.cookie } : {}) });
 let lastTokenRefresh = 0;
-const TB_DEAD = new Set([105, -9, 2, 115, -70, 9019, 400210]); // bad/expired/removed link, or no cookie (400210)
+const TB_DEAD = new Set([105, -3, -9, 2, 115, -70, 9019, 400210]); // bad/expired/removed link, or no cookie (400210)
 const TB_VERIFY = new Set([400141]); // "need verify": this IP/domain is challenged, a new token won't help
 
 async function shareInfo(cfg, code) {
