@@ -13,3 +13,6 @@ thumb.jpg
 *.thumb.jpg
 *.wm.mp4
 *.zip
+
+# exported bot user lists (personal data)
+bot_*_users.json
