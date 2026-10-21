@@ -1035,6 +1035,7 @@ Use: \`/logs\` or \`/logs 50\`
 **Commands:**
 \`/broadcast <message>\` — Send now (owner)
 \`/broadcast_legacy <message>\` — Via channel (admin)
+\`/stopbroadcast\` — Stop a running broadcast (owner)
 \`/announce <minutes> <msg>\` — Schedule delay
 `, { buttons: back('menu_admin') }));
 
@@ -1331,6 +1332,7 @@ Contact @buggybeats for premium.
 /remove \`<user_id>\` — Remove user rate limit
 /broadcast \`<message>\` — Broadcast (owner only)
 /broadcast_legacy \`<message>\` — Broadcast via channel
+/stopbroadcast — Stop a running broadcast
 /announce \`<minutes>\` \`<message>\` — Scheduled broadcast
 
 **── Bot Management ──**
@@ -1938,6 +1940,15 @@ Contact @buggybeats for premium.
     const mode = m.replyTo ? 'forward' : 'text';
     const status = await m.reply(`Broadcasting (${mode}) to ${total} users...`);
     await queueBroadcast({ kind: 'broadcast', mode, text, from_chat: m.chatId, msg_id: m.replyTo?.message_id ?? null, exclude: m.uid, total, status_chat: m.chatId, status_msg: status.id });
+  });
+  // stops every running/scheduled broadcast (and /announce) right away; the cron skips done rows
+  on(/^\/stopbroadcast$/, async m => {
+    if (m.uid !== OWNER_ID) return m.reply('Owner only.');
+    const rows = await db.all('SELECT id, kind, total, sent, failed FROM broadcasts WHERE done = 0 ORDER BY id');
+    if (!rows.length) return m.reply('ℹ️ No broadcast is running.');
+    await db.run('UPDATE broadcasts SET done = 1 WHERE done = 0');
+    await logAudit('BROADCAST_STOP', m.uid, rows.map(r => `#${r.id}`).join(','));
+    await m.reply(`🛑 **Broadcast stopped.**\n\n${rows.map(r => `#${r.id} (${r.kind}) — sent **${r.sent}** / ${r.total}, failed ${r.failed}`).join('\n')}`);
   });
 
   // ==================== commands/videos.py ====================
