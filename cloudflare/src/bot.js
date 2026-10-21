@@ -1991,12 +1991,13 @@ Contact @buggybeats for premium.
       } catch { return null; }
     };
     const vkey = uid => `video_state:${int(uid)}`;
-    // all fields in one statement (was one D1 query per field)
+    // all fields in one statement (was one D1 query per field). Never throws: if D1 refuses writes
+    // (e.g. free daily write limit hit) the video is still sent — only position/cooldown isn't saved.
     const setState = async (uid, fields) => {
       const e = Object.entries(fields);
       if (!e.length) return;
       await db.run(`INSERT INTO hashes(key, field, value) VALUES ${e.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
-        ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)]));
+        ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)])).catch(err => console.log('setState', err.message));
     };
     const freeMode = async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; };
     // A paid subscription's end time is remembered (sub_until), so the payment worker is only
@@ -2158,7 +2159,7 @@ Contact @buggybeats for premium.
       if (!r.ok) return target.reply('❌ Video error: server busy, please try again in a moment.');
       const fid = r.result?.video?.file_id;
       await funnel('videos');
-      if (fid && !c.fid && c.md5) await db.hset(META, c.md5, JSON.stringify({ u: c.url, f: fid }));
+      if (fid && !c.fid && c.md5) await db.hset(META, c.md5, JSON.stringify({ u: c.url, f: fid })).catch(() => {});
     }
 
     on(/^\/videos$/, async m => {
