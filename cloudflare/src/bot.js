@@ -1940,7 +1940,7 @@ Contact @buggybeats for premium.
     if (!m.replyTo && !text) return m.reply('**Usage:** `/broadcast <message>`\nOr reply to any message with `/broadcast`.');
     const total = Math.max((await db.scard('all_known_users')) - ((await db.sismember('all_known_users', m.uid)) ? 1 : 0), 0);
     const mode = m.replyTo ? 'forward' : 'text';
-    const status = await m.reply(`📢 Broadcast (${mode}) queued for **${total}** users.\nStarts within a minute — this message updates live.`);
+    const status = await m.reply(`📢 Broadcast (${mode === 'forward' ? 'copy of the replied message' : 'text'}) queued for **${total}** users.\nStarts within a minute — this message updates live.`);
     await queueBroadcast({ kind: 'broadcast', mode, text, from_chat: m.chatId, msg_id: m.replyTo?.message_id ?? null, exclude: m.uid, total, status_chat: m.chatId, status_msg: status.id });
   });
   onCb(/^bc_stop_\d+$/, async e => {
@@ -2377,7 +2377,7 @@ Contact @buggybeats for premium.
       } else {
         for (const member of users) {
           const r = b.mode === 'forward'
-            ? await api.call('forwardMessage', { chat_id: member, from_chat_id: b.from_chat, message_id: b.msg_id })
+            ? await api.call('copyMessage', { chat_id: member, from_chat_id: b.from_chat, message_id: b.msg_id })
             : await api.call('sendMessage', { chat_id: member, text: payload.text, parse_mode: 'HTML' });
           r.ok ? sent++ : failed++;
         }

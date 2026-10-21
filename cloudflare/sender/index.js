@@ -10,7 +10,8 @@ export default {
   async fetch(req) {
     if (req.method !== 'POST') return new Response('Not found', { status: 404 });
     const { token, api = 'https://api.telegram.org', users = [], mode, text, from_chat, msg_id } = await req.json();
-    const method = mode === 'forward' ? 'forwardMessage' : 'sendMessage';
+    // copyMessage: same content as the replied message, but no "Forwarded from" header
+    const method = mode === 'forward' ? 'copyMessage' : 'sendMessage';
     let sent = 0, failed = 0, calls = 0;
     for (const u of users) {
       const body = mode === 'forward' ? { chat_id: u, from_chat_id: from_chat, message_id: msg_id } : { chat_id: u, text, parse_mode: 'HTML' };
