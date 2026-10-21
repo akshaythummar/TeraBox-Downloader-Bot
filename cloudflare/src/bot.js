@@ -1998,7 +1998,7 @@ Contact @buggybeats for premium.
       await db.run(`INSERT INTO hashes(key, field, value) VALUES ${e.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
         ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)]));
     };
-    const freeMode = () => cached('vfree', async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; }, 60);
+    const freeMode = async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; };
     // A paid subscription's end time is remembered (sub_until), so the payment worker is only
     // asked again after it ends; a "not subscribed" answer is trusted for SUB_RECHECK seconds.
     const SUB_RECHECK = 120;
@@ -2008,8 +2008,7 @@ Contact @buggybeats for premium.
     };
     // Bot premium (referral, gift code, /pre…) and admins also unlock /videos.
     async function hasAccess(uid, ctx) {
-      if (await freeMode()) return true;
-      if (ctx.admin || ctx.premium) return true;
+      if (ctx.free || ctx.admin || ctx.premium) return true;
       const state = ctx.state, now = nowS();
       if (+state.sub_until > now) return true;
       if (!(+state.sub_checked > now - SUB_RECHECK)) {
@@ -2060,7 +2059,7 @@ Contact @buggybeats for premium.
               WHERE s.key = ? AND s.score > ${where} ORDER BY s.score LIMIT 1`, META, READY, ...args);
       const [st, pa, nxt, first] = await db.d.batch([
         db.q('SELECT field, value FROM hashes WHERE key = ?', k),
-        db.q('SELECT (SELECT value FROM hashes WHERE key = ? AND field = ?) exp, (SELECT 1 FROM sets WHERE key = ? AND member = ?) adm', PREMIUM_EXPIRY_KEY, u, DYNAMIC_ADMINS_KEY, u),
+        db.q('SELECT (SELECT value FROM hashes WHERE key = ? AND field = ?) exp, (SELECT 1 FROM sets WHERE key = ? AND member = ?) adm, (SELECT value FROM kv WHERE key = ?) vfree', PREMIUM_EXPIRY_KEY, u, DYNAMIC_ADMINS_KEY, u, FREE_MODE_KEY),
         readyAfter(`COALESCE((SELECT CAST(value AS REAL) FROM hashes WHERE key = ? AND field = 'vid_pos'), 0)`, k),
         readyAfter('0'),
       ]);
@@ -2083,6 +2082,7 @@ Contact @buggybeats for premium.
       return {
         state,
         admin: ADMINS.includes(int(uid)) || !!p.adm,
+        free: p.vfree == null ? String(env.VIDEOS_FREE_MODE) === 'true' : p.vfree === '1', // read fresh every time: panel toggle is instant
         premium: p.exp != null && nowS() < int(p.exp),
         ready: fid ? { md5: row.member, pos: row.score, fid, ...(newStart != null ? { start: newStart } : {}) } : null,
       };
@@ -2290,7 +2290,7 @@ Contact @buggybeats for premium.
       if (!(await isAdmin(m.uid))) return m.reply('Not authorized.');
       const arg = (g[1] || '').toLowerCase();
       if (!arg) return m.reply(`/videos free mode is **${(await freeMode()) ? 'ON' : 'OFF'}**`);
-      await db.set(FREE_MODE_KEY, arg === 'on' ? '1' : '0'); uncache('vfree');
+      await db.set(FREE_MODE_KEY, arg === 'on' ? '1' : '0');
       await m.reply(`/videos free mode set to **${arg.toUpperCase()}**`);
     });
   }

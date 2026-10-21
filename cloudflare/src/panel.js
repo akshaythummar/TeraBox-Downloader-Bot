@@ -129,7 +129,7 @@ export async function panelApi(req, env, db, path) {
 
     case 'videosfree': {
       await db.set('videos_free_mode', body.on ? '1' : '0');
-      return ok({ message: `/videos free mode ${body.on ? 'ON — everyone gets /videos free' : 'OFF — trial / plans / premium as usual'} (applies within a minute).` });
+      return ok({ message: `/videos free mode ${body.on ? 'ON — everyone gets /videos free' : 'OFF — trial / plans / premium as usual'} (applies immediately).` });
     }
 
     case 'broadcast': {
