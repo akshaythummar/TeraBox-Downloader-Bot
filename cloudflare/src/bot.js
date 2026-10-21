@@ -2328,7 +2328,11 @@ Contact @buggybeats for premium.
 
   // ---------------- cron: broadcasts, premium reminders ---------------- //
 
-  const BC_BATCH = 40; // per cron minute — free plan: 50 subrequests per invocation (40 sends + 1 progress edit)
+  // With the SENDER service binding (cloudflare/sender), each cron minute hands BC_WAVES batches of
+  // BC_CHUNK users to the sender worker, one every BC_GAP ms: 40 per 1.6s = 25 messages/second, under
+  // Telegram's ~30/s broadcast limit. Without it, the cron sends BC_CHUNK itself (40/minute).
+  const BC_CHUNK = 40, BC_WAVES = 30, BC_GAP = 1600; // 30 waves ≈ 54s, measured on Cloudflare (33 took 58s)
+  const BC_BATCH = env.SENDER ? BC_CHUNK * BC_WAVES : BC_CHUNK; // users per cron minute
   const bcStopBtn = id => [[Button.inline('🛑 Stop broadcast', `bc_stop_${id}`)]];
   function bcProgress(b, S = b.sent, F = b.failed, state = 'running') {
     const doneN = S + F, total = Math.max(b.total, doneN, 1), pct = Math.min(100, Math.floor((doneN / total) * 100));
@@ -2340,20 +2344,54 @@ Contact @buggybeats for premium.
   }
 
   async function broadcastTick() {
-    const BATCH = BC_BATCH;
     const b = await db.one('SELECT * FROM broadcasts WHERE done = 0 AND send_at <= ? ORDER BY id LIMIT 1', Math.floor(nowS()));
     if (!b) return false; // false = nothing sent this minute
-    const users = await db.all("SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?", b.cursor, BATCH);
-    let sent = 0, failed = 0;
-    for (const { member } of users) {
-      if (b.exclude && member === String(b.exclude)) continue;
-      const r = b.mode === 'forward'
-        ? await api.call('forwardMessage', { chat_id: member, from_chat_id: b.from_chat, message_id: b.msg_id })
-        : await api.call('sendMessage', { chat_id: member, text: md(b.text), parse_mode: 'HTML' });
-      r.ok ? sent++ : failed++;
+    // one cron at a time: a minute's run can take ~55s, the lock keeps the next one from overlapping
+    if (!(await db.set('bc_lock', b.id, { ex: 75, nx: true }))) return true;
+    try {
+      const users = (await db.all("SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?", b.cursor, BC_BATCH))
+        .map(r => r.member).filter(u => !(b.exclude && u === String(b.exclude)));
+      const lastMember = (await db.one("SELECT MAX(member) m FROM (SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?)", b.cursor, BC_BATCH))?.m;
+      const done = !lastMember || (await db.one("SELECT COUNT(*) n FROM (SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?)", b.cursor, BC_BATCH)).n < BC_BATCH;
+      // reserve this range first, so nobody gets the message twice even if a run is cut short
+      await db.run('UPDATE broadcasts SET cursor = ? WHERE id = ?', lastMember ?? b.cursor, b.id);
+      const payload = { mode: b.mode, text: b.mode === 'forward' ? null : md(b.text), from_chat: b.from_chat, msg_id: b.msg_id };
+      let sent = 0, failed = 0;
+      if (env.SENDER) {
+        const chunks = [];
+        for (let i = 0; i < users.length; i += BC_CHUNK) chunks.push(users.slice(i, i + BC_CHUNK));
+        const t0 = Date.now();
+        const results = await Promise.all(chunks.map(async (chunk, i) => {
+          await new Promise(r => setTimeout(r, Math.max(0, t0 + i * BC_GAP - Date.now())));
+          // a stop pressed mid-run halts the remaining waves
+          if (i && i % 5 === 0 && (await db.one('SELECT done FROM broadcasts WHERE id = ?', b.id))?.done) return { sent: 0, failed: 0, skipped: chunk.length };
+          try {
+            const r = await env.SENDER.fetch('https://sender/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, token: env.BOT_TOKEN, api: env.TG_API, users: chunk }) });
+            return r.ok ? await r.json() : { sent: 0, failed: chunk.length };
+          } catch (e) {
+            console.log('sender failed:', e.message);
+            return { sent: 0, failed: chunk.length };
+          }
+        }));
+        for (const r of results) { sent += r.sent || 0; failed += r.failed || 0; }
+      } else {
+        for (const member of users) {
+          const r = b.mode === 'forward'
+            ? await api.call('forwardMessage', { chat_id: member, from_chat_id: b.from_chat, message_id: b.msg_id })
+            : await api.call('sendMessage', { chat_id: member, text: payload.text, parse_mode: 'HTML' });
+          r.ok ? sent++ : failed++;
+        }
+      }
+      const stopped = (await db.one('SELECT done FROM broadcasts WHERE id = ?', b.id))?.done;
+      await db.run('UPDATE broadcasts SET sent = sent + ?, failed = failed + ?, done = ? WHERE id = ?', sent, failed, done || stopped ? 1 : 0, b.id);
+      if (stopped) return true; // the Stop button already showed the final state
+      return await finishTick(b, sent, failed, done);
+    } finally {
+      await db.delete('bc_lock');
     }
-    const done = users.length < BATCH;
-    await db.run('UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ?, done = ? WHERE id = ?', users.at(-1)?.member ?? b.cursor, sent, failed, done ? 1 : 0, b.id);
+  }
+
+  async function finishTick(b, sent, failed, done) {
     const S = b.sent + sent, F = b.failed + failed;
     // the status message is the bot's own reply for /broadcast and /broadcast_legacy; for /announce it is the
     // owner's command message, which the bot can't edit — announcements report only at the end

@@ -26,6 +26,11 @@ binding = "DB"
 database_name = "terabox-bot-eu"
 database_id = "59f6c78a-5f4c-433f-a793-5d8fc62db3d0"   # Western Europe, next to Telegram's servers (old APAC db: terabox-bot)
 
+# broadcast sender worker (cloudflare/sender): lets broadcasts go out at ~25 messages/second
+[[services]]
+binding = "SENDER"
+service = "terabox-broadcast-sender"
+
 [version_metadata]
 binding = "CF_VERSION"               # shown as "Build" on /restart
 
