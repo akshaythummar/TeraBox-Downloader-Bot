@@ -59,6 +59,19 @@ export async function panelApi(req, env, db, path) {
       const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); // IST date, like the bot's funnel
       const funnel = Object.fromEntries((await db.all('SELECT field, value FROM hashes WHERE key = ?', `funnel:${today}`)).map(r => [r.field, +r.value]));
       const cfg = Object.fromEntries(cfgRows.map(r => [r.key.split(':')[1], r.value]));
+      // last 24 hours, oldest first (IST hour keys, same as index.js trackActivity)
+      const hours = Array.from({ length: 24 }, (_, i) => new Date(Date.now() + 5.5 * 3600e3 - (23 - i) * 3600e3).toISOString().replace(/\D/g, '').slice(0, 10));
+      const ph = hours.map(() => '?').join(',');
+      const days = [...new Set(hours.map(h => h.slice(0, 8)))];
+      const [perHour, distinct, msgRows] = await Promise.all([
+        db.all(`SELECT key, COUNT(*) n FROM sets WHERE key IN (${ph}) GROUP BY key`, ...hours.map(h => `act:${h}`)),
+        db.one(`SELECT COUNT(DISTINCT member) n FROM sets WHERE key IN (${ph})`, ...hours.map(h => `act:${h}`)),
+        db.all(`SELECT key, field, value FROM hashes WHERE key IN (${days.map(() => '?').join(',')})`, ...days.map(d => `msgs:${d}`)),
+      ]);
+      const users = Object.fromEntries(perHour.map(r => [r.key.slice(4), r.n]));
+      const msgs = Object.fromEntries(msgRows.map(r => [r.key.slice(5) + r.field, +r.value]));
+      const activity = hours.map(h => ({ hour: +h.slice(8), date: h.slice(0, 8), users: users[h] || 0, messages: msgs[h] || 0 }));
+      const vfree = await db.get('videos_free_mode');
       const w = wh.result || {};
       return ok({
         bot: me.ok ? { id: me.result.id, username: me.result.username, name: me.result.first_name } : null,
@@ -71,6 +84,8 @@ export async function panelApi(req, env, db, path) {
         broadcast: bc ? { id: bc.id, kind: bc.kind, total: bc.total, sent: bc.sent, failed: bc.failed, done: !!bc.done } : null,
         terabox: { cookie: !!(cfg.cookie || env.TB_COOKIE), cookieFrom: cfg.cookie ? 'panel' : env.TB_COOKIE ? 'secret' : 'none', jstoken: (cfg.jstoken || env.JSTOKEN || '').slice(0, 10) },
         logs: logs.map(r => r.value),
+        activity, activeUsers24h: distinct?.n || 0,
+        videosFree: vfree == null ? String(env.VIDEOS_FREE_MODE) === 'true' : vfree === '1',
       });
     }
 
@@ -110,6 +125,11 @@ export async function panelApi(req, env, db, path) {
       if (body.on) await db.set('maintenance_mode', '1');
       else await db.run("DELETE FROM kv WHERE key IN ('maintenance_mode', 'maintenance_mode:reason')");
       return ok({ message: `Maintenance ${body.on ? 'ON' : 'OFF'} (applies within a few seconds).` });
+    }
+
+    case 'videosfree': {
+      await db.set('videos_free_mode', body.on ? '1' : '0');
+      return ok({ message: `/videos free mode ${body.on ? 'ON — everyone gets /videos free' : 'OFF — trial / plans / premium as usual'} (applies within a minute).` });
     }
 
     case 'broadcast': {

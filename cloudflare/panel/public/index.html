@@ -39,6 +39,18 @@ pre{background:#0f1115;border:1px solid var(--line);border-radius:10px;padding:1
 .switch input:checked+span{background:var(--accent)}
 .switch input:checked+span:before{transform:translateX(20px)}
 #login{max-width:360px;margin:15vh auto}
+.hero{background:linear-gradient(135deg,#221d3d,#16181d 60%)}
+.hero .big{font-size:44px;font-weight:700;line-height:1.1;margin:4px 0}
+.chart{position:relative}
+.chart svg{display:block;width:100%;height:220px;overflow:visible}
+.chart .grid line{stroke:#262932}
+.chart text{fill:var(--muted);font:11px system-ui}
+.tip{position:absolute;pointer-events:none;background:#0f1115;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;white-space:nowrap;display:none;transform:translate(-50%,-110%)}
+.tip b{display:block;font-size:14px}
+details summary{cursor:pointer;color:var(--muted);margin-top:8px}
+table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
+td,th{border-bottom:1px solid var(--line);padding:4px 6px;text-align:right}
+td:first-child,th:first-child{text-align:left}
 </style>
 </head>
 <body>
@@ -58,6 +70,19 @@ pre{background:#0f1115;border:1px solid var(--line);border-radius:10px;padding:1
     <button id="startBtn">▶ Start</button>
     <button id="stopBtn" class="danger">■ Stop</button>
     <button id="logout" class="ghost">Logout</button>
+  </div>
+
+  <div class="card hero">
+    <div class="row">
+      <div class="grow">
+        <h2>Active users · 24 h</h2>
+        <div class="big" id="aTotal">–</div>
+        <div class="muted"><span class="dot" style="background:var(--ok)"></span><span id="aPeak">–</span></div>
+      </div>
+      <div class="muted" style="text-align:right">Messages · 24 h<div style="font-size:22px;color:var(--text);font-weight:700" id="aMsgs">–</div></div>
+    </div>
+    <div class="chart" id="chart" role="img" aria-label="Active users per hour, last 24 hours"><svg id="svg"></svg><div class="tip" id="tip"></div></div>
+    <details><summary>Show as table</summary><table id="atable"></table></details>
   </div>
 
   <div class="grid" style="margin-bottom:14px">
@@ -85,6 +110,7 @@ pre{background:#0f1115;border:1px solid var(--line);border-radius:10px;padding:1
     <div class="card">
       <h2>Controls</h2>
       <div class="row" style="margin-bottom:14px"><div class="grow">🔧 Maintenance mode<div class="muted">Users get "under maintenance"; admins keep access</div></div><label class="switch"><input type="checkbox" id="maint"><span></span></label></div>
+      <div class="row" style="margin-bottom:14px"><div class="grow">🎬 /videos free for everyone<div class="muted">ON = no trial / plans needed. OFF = trial, plans and premium as usual</div></div><label class="switch"><input type="checkbox" id="vfree"><span></span></label></div>
       <h2 style="margin-top:6px">Update bot token</h2>
       <div class="row"><input id="tok" class="grow" placeholder="123456:ABC… from @BotFather"><button id="tokBtn">Update</button></div>
       <div class="muted" id="tokInfo" style="margin-top:6px"></div>
@@ -117,6 +143,48 @@ function show(loggedIn) { $('login').hidden = loggedIn; $('app').hidden = !logge
 const fmtTime = s => s ? new Date(s * 1000).toLocaleString() : '';
 const esc = t => String(t ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
 
+const hourLabel = h => (h % 12 || 12) + (h < 12 ? ' am' : ' pm');
+let actData = [];
+function drawChart(data) {
+  actData = data;
+  const svg = $('svg'), W = svg.clientWidth || 900, H = 220, L = 30, R = 8, T = 10, B = 24;
+  const max = Math.max(4, ...data.map(d => d.users));
+  const step = Math.ceil(max / 4), top = step * 4;
+  const x = i => L + (i / (data.length - 1)) * (W - L - R), y = v => T + (1 - v / top) * (H - T - B);
+  // smooth line (monotone-ish cardinal), area to the baseline
+  const pts = data.map((d, i) => [x(i), y(d.users)]);
+  let path = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], mx = (x0 + x1) / 2;
+    path += ` C${mx},${y0} ${mx},${y1} ${x1},${y1}`;
+  }
+  const area = `${path} L${x(data.length - 1)},${y(0)} L${x(0)},${y(0)} Z`;
+  let g = '<g class="grid">';
+  for (let k = 0; k <= 4; k++) g += `<line x1="${L}" x2="${W - R}" y1="${y(k * step)}" y2="${y(k * step)}"/><text x="${L - 6}" y="${y(k * step) + 4}" text-anchor="end">${k * step}</text>`;
+  g += '</g>';
+  let xl = '';
+  data.forEach((d, i) => { if (i % 3 === 0 || i === data.length - 1) xl += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${hourLabel(d.hour)}</text>`; });
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = `<defs><linearGradient id="fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#7c5cff" stop-opacity=".45"/><stop offset="1" stop-color="#7c5cff" stop-opacity="0"/></linearGradient></defs>${g}${xl}
+    <path d="${area}" fill="url(#fill)"/><path d="${path}" fill="none" stroke="#7c5cff" stroke-width="2"/>
+    <line id="cross" y1="${T}" y2="${y(0)}" stroke="#8c90a0" stroke-width="1" visibility="hidden"/>
+    <circle id="dotH" r="5" fill="#7c5cff" stroke="#16181d" stroke-width="2" visibility="hidden"/>
+    <rect x="${L}" y="0" width="${W - L - R}" height="${H}" fill="transparent" id="hit"/>`;
+  const hit = $('hit'), tip = $('tip');
+  const move = e => {
+    const r = svg.getBoundingClientRect(), px = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    const i = Math.max(0, Math.min(data.length - 1, Math.round(((px * W / r.width) - L) / (W - L - R) * (data.length - 1)))), d = data[i];
+    $('cross').setAttribute('x1', x(i)); $('cross').setAttribute('x2', x(i)); $('cross').setAttribute('visibility', 'visible');
+    $('dotH').setAttribute('cx', x(i)); $('dotH').setAttribute('cy', y(d.users)); $('dotH').setAttribute('visibility', 'visible');
+    tip.innerHTML = `${hourLabel(d.hour)}<b>${d.users} users</b>${d.messages} messages`;
+    tip.style.left = (x(i) * r.width / W) + 'px'; tip.style.top = (y(d.users) * r.height / H) + 'px'; tip.style.display = 'block';
+  };
+  const leave = () => { tip.style.display = 'none'; $('cross').setAttribute('visibility', 'hidden'); $('dotH').setAttribute('visibility', 'hidden'); };
+  hit.onmousemove = move; hit.ontouchmove = move; hit.onmouseleave = leave; hit.ontouchend = leave;
+  $('atable').innerHTML = '<tr><th>Hour</th><th>Users</th><th>Messages</th></tr>' + data.map(d => `<tr><td>${hourLabel(d.hour)}</td><td>${d.users}</td><td>${d.messages}</td></tr>`).join('');
+}
+addEventListener("resize", () => actData.length && drawChart(actData));
+
 let timer;
 async function refresh() {
   let s;
@@ -135,6 +203,12 @@ async function refresh() {
   $('whInfo').innerHTML = (w.url ? (w.ours ? '✅ Points to this Cloudflare bot' : '<span class="warn">⚠️ Points somewhere else (e.g. Telebot Creator) — press Start to take it back</span>') + '<br><span class="muted">' + esc(w.url) + '</span>' : '<span class="warn">No webhook — the bot is stopped.</span>')
     + '<br>Pending updates: ' + w.pending + (w.lastError ? '<br><span class="warn">Last Telegram error: ' + esc(w.lastError) + ' (' + fmtTime(w.lastErrorAt) + ')</span>' : '');
   $('maint').checked = s.maintenance;
+  $('vfree').checked = s.videosFree;
+  const a = s.activity || [], peak = a.reduce((m, d) => (d.users > m.users ? d : m), { users: 0, hour: 0 });
+  $('aTotal').textContent = (s.activeUsers24h || 0).toLocaleString();
+  $('aPeak').textContent = peak.users ? `${peak.users} at the busiest hour (${hourLabel(peak.hour)})` : 'No activity yet';
+  $('aMsgs').textContent = a.reduce((n, d) => n + d.messages, 0).toLocaleString();
+  if (a.length) drawChart(a);
   $('tokInfo').textContent = 'Token in use: ' + (s.tokenSource === 'panel' ? 'set from this panel' : 'the BOT_TOKEN secret');
   $('tbInfo').textContent = 'Cookie: ' + (s.terabox.cookie ? 'set (' + s.terabox.cookieFrom + ')' : 'NOT SET') + ' · jsToken: ' + (s.terabox.jstoken ? s.terabox.jstoken + '…' : 'not set');
   const b = s.broadcast;
@@ -161,6 +235,7 @@ $('logout').onclick = async () => { await fetch('/api/logout'); show(false); };
 $('startBtn').onclick = () => act('start', {});
 $('stopBtn').onclick = () => act('stop', {}, 'Stop the bot? Users will get no replies until you press Start.');
 $('maint').onchange = e => act('maintenance', { on: e.target.checked });
+$('vfree').onchange = e => act('videosfree', { on: e.target.checked }, e.target.checked ? 'Make /videos FREE for everyone?' : 'Turn off free /videos (trial / plans / premium again)?');
 $('tokBtn').onclick = () => { const t = $('tok').value.trim(); if (t) act('token', { token: t }, 'Switch the bot to this token? If it is a different bot, the old one stops and saved video file_ids are cleared.').then(() => $('tok').value = ''); };
 $('bcSend').onclick = () => { const t = $('bcText').value.trim(); if (t) act('broadcast', { text: t }, 'Send this message to ALL users?').then(() => $('bcText').value = ''); };
 $('bcStop').onclick = () => act('stopbroadcast', {}, 'Stop the running broadcast?');

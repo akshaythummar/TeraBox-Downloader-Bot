@@ -131,6 +131,17 @@ v.play().catch(() => {});
   );
 }
 
+// hourly activity for the panel graph: users seen per hour (set act:<YYYYMMDDHH>, IST) and messages
+// per hour (hash msgs:<YYYYMMDD>, field = hour). An already-seen user writes no row.
+function trackActivity(db, uid) {
+  if (!uid) return Promise.resolve();
+  const h = new Date(Date.now() + 5.5 * 3600e3).toISOString().replace(/\D/g, '').slice(0, 10);
+  return db.d.batch([
+    db.q('INSERT INTO sets(key, member) VALUES (?, ?) ON CONFLICT DO NOTHING', `act:${h}`, String(uid)),
+    db.q("INSERT INTO hashes(key, field, value) VALUES (?, ?, '1') ON CONFLICT(key, field) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)", `msgs:${h.slice(0, 8)}`, h.slice(8)),
+  ]).catch(e => console.log('trackActivity', e.message));
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -142,6 +153,7 @@ export default {
       const u = await req.json();
       const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
       // ack Telegram immediately so it never retries; finish the work in the background
+      ctx.waitUntil(trackActivity(db, (u.message || u.callback_query)?.from?.id));
       const work = u.message ? bot.onMessage(u.message) : u.callback_query ? bot.onCallback(u.callback_query) : u.my_chat_member ? bot.onChatMember(u.my_chat_member) : null;
       if (work) ctx.waitUntil(work.catch(e => console.log('update failed', e.stack)));
       return new Response('ok');

@@ -2445,6 +2445,10 @@ Contact @buggybeats for premium.
     if (minute === 0) {
       await reminderSweep();
       await db.run('DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?', nowS());
+      // activity graph data (index.js trackActivity): keep 48h of hourly sets, 3 days of message counts
+      const cut = ymdHMS(nowS() - 48 * 3600).replace(/\D/g, '').slice(0, 10);
+      await db.run("DELETE FROM sets WHERE key LIKE 'act:%' AND key < ?", `act:${cut}`);
+      await db.run("DELETE FROM hashes WHERE key LIKE 'msgs:%' AND key < ?", `msgs:${cut.slice(0, 8)}`);
     }
   }
 
