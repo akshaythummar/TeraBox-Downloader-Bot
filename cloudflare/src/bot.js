@@ -1997,7 +1997,7 @@ Contact @buggybeats for premium.
       const e = Object.entries(fields);
       if (!e.length) return;
       await db.run(`INSERT INTO hashes(key, field, value) VALUES ${e.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
-        ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)])).catch(err => console.log('setState', err.message));
+        ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)])).then(() => true, err => (console.log('setState', err.message), false));
     };
     const freeMode = async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; };
     // A paid subscription's end time is remembered (sub_until), so the payment worker is only
@@ -2040,7 +2040,8 @@ Contact @buggybeats for premium.
         idx = 0;
         await setState(uid, { video_links: JSON.stringify(links) });
       }
-      await setState(uid, { video_index: idx + 1 });
+      // write refused (D1 daily limit) → the position can't advance, so pick a random one of the 200
+      if (!(await setState(uid, { video_index: idx + 1 }))) idx = Math.floor(Math.random() * links.length);
       const url = links[idx], md5 = md5Of(url);
       const fid = md5 ? fidOf(await db.hget(META, md5)) : null;
       return { url, md5, fid };
