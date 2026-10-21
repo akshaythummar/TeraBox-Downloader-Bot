@@ -1035,6 +1035,7 @@ Use: \`/logs\` or \`/logs 50\`
 **Commands:**
 \`/broadcast <message>\` — Send now (owner)
 \`/broadcast_legacy <message>\` — Via channel (admin)
+\`/broadcaststatus\` — Live progress of a broadcast (owner)
 \`/stopbroadcast\` — Stop a running broadcast (owner)
 \`/announce <minutes> <msg>\` — Schedule delay
 `, { buttons: back('menu_admin') }));
@@ -1332,6 +1333,7 @@ Contact @buggybeats for premium.
 /remove \`<user_id>\` — Remove user rate limit
 /broadcast \`<message>\` — Broadcast (owner only)
 /broadcast_legacy \`<message>\` — Broadcast via channel
+/broadcaststatus — Live progress of a broadcast
 /stopbroadcast — Stop a running broadcast
 /announce \`<minutes>\` \`<message>\` — Scheduled broadcast
 
@@ -1938,16 +1940,36 @@ Contact @buggybeats for premium.
     if (!m.replyTo && !text) return m.reply('**Usage:** `/broadcast <message>`\nOr reply to any message with `/broadcast`.');
     const total = Math.max((await db.scard('all_known_users')) - ((await db.sismember('all_known_users', m.uid)) ? 1 : 0), 0);
     const mode = m.replyTo ? 'forward' : 'text';
-    const status = await m.reply(`Broadcasting (${mode}) to ${total} users...`);
+    const status = await m.reply(`📢 Broadcast (${mode}) queued for **${total}** users.\nStarts within a minute — this message updates live.`);
     await queueBroadcast({ kind: 'broadcast', mode, text, from_chat: m.chatId, msg_id: m.replyTo?.message_id ?? null, exclude: m.uid, total, status_chat: m.chatId, status_msg: status.id });
+  });
+  onCb(/^bc_stop_\d+$/, async e => {
+    if (e.uid !== OWNER_ID) return e.answer('Owner only.', true);
+    const b = await db.one('SELECT * FROM broadcasts WHERE id = ?', int(e.data.slice(8)));
+    if (!b) return e.answer('Broadcast not found.', true);
+    if (b.done) { await e.answer('Already finished.'); return e.edit(bcProgress(b, b.sent, b.failed, 'complete'), { buttons: [] }); }
+    await db.run('UPDATE broadcasts SET done = 1 WHERE id = ?', b.id);
+    await logAudit('BROADCAST_STOP', e.uid, `#${b.id} (button)`);
+    await e.answer('🛑 Broadcast stopped.');
+    await e.edit(bcProgress(b, b.sent, b.failed, 'stopped'), { buttons: [] });
+  });
+  on(/^\/broadcaststatus$/, async m => {
+    if (m.uid !== OWNER_ID) return m.reply('Owner only.');
+    const rows = await db.all('SELECT * FROM broadcasts WHERE done = 0 ORDER BY id');
+    if (!rows.length) {
+      const last = await db.one('SELECT * FROM broadcasts ORDER BY id DESC LIMIT 1');
+      return m.reply(last ? `ℹ️ No broadcast is running. Last one:\n\n${bcProgress(last, last.sent, last.failed, 'complete')}` : 'ℹ️ No broadcasts yet.');
+    }
+    for (const r of rows) await m.reply(bcProgress(r), { buttons: bcStopBtn(r.id) });
   });
   // stops every running/scheduled broadcast (and /announce) right away; the cron skips done rows
   on(/^\/stopbroadcast$/, async m => {
     if (m.uid !== OWNER_ID) return m.reply('Owner only.');
-    const rows = await db.all('SELECT id, kind, total, sent, failed FROM broadcasts WHERE done = 0 ORDER BY id');
+    const rows = await db.all('SELECT * FROM broadcasts WHERE done = 0 ORDER BY id');
     if (!rows.length) return m.reply('ℹ️ No broadcast is running.');
     await db.run('UPDATE broadcasts SET done = 1 WHERE done = 0');
     await logAudit('BROADCAST_STOP', m.uid, rows.map(r => `#${r.id}`).join(','));
+    for (const r of rows) if (r.kind !== 'announce') await api.edit(r.status_chat, r.status_msg, bcProgress(r, r.sent, r.failed, 'stopped'), { buttons: [] });
     await m.reply(`🛑 **Broadcast stopped.**\n\n${rows.map(r => `#${r.id} (${r.kind}) — sent **${r.sent}** / ${r.total}, failed ${r.failed}`).join('\n')}`);
   });
 
@@ -2306,8 +2328,19 @@ Contact @buggybeats for premium.
 
   // ---------------- cron: broadcasts, premium reminders ---------------- //
 
+  const BC_BATCH = 40; // per cron minute — free plan: 50 subrequests per invocation (40 sends + 1 progress edit)
+  const bcStopBtn = id => [[Button.inline('🛑 Stop broadcast', `bc_stop_${id}`)]];
+  function bcProgress(b, S = b.sent, F = b.failed, state = 'running') {
+    const doneN = S + F, total = Math.max(b.total, doneN, 1), pct = Math.min(100, Math.floor((doneN / total) * 100));
+    const left = Math.max(total - doneN, 0), mins = Math.ceil(left / BC_BATCH);
+    const head = state === 'running' ? `📢 **Broadcast #${b.id} — running**` : state === 'stopped' ? `🛑 **Broadcast #${b.id} — stopped**` : `✅ **Broadcast #${b.id} — complete**`;
+    return `${head}\n\n\`${progressBar(doneN, total, 12)}\` **${pct}%**\n\n` +
+      `✅ Sent: **${S}**\n❌ Failed: **${F}**${F ? ' (blocked/deleted accounts)' : ''}\n👥 Done: **${doneN}** / ${total}` +
+      (state === 'running' ? `\n⏱ About **${mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins} min`}** left (${BC_BATCH} users/minute)` : '');
+  }
+
   async function broadcastTick() {
-    const BATCH = 40; // free plan: 50 subrequests per invocation
+    const BATCH = BC_BATCH;
     const b = await db.one('SELECT * FROM broadcasts WHERE done = 0 AND send_at <= ? ORDER BY id LIMIT 1', Math.floor(nowS()));
     if (!b) return false; // false = nothing sent this minute
     const users = await db.all("SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?", b.cursor, BATCH);
@@ -2321,13 +2354,18 @@ Contact @buggybeats for premium.
     }
     const done = users.length < BATCH;
     await db.run('UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ?, done = ? WHERE id = ?', users.at(-1)?.member ?? b.cursor, sent, failed, done ? 1 : 0, b.id);
-    if (!done) return true;
     const S = b.sent + sent, F = b.failed + failed;
+    // the status message is the bot's own reply for /broadcast and /broadcast_legacy; for /announce it is the
+    // owner's command message, which the bot can't edit — announcements report only at the end
+    if (!done) {
+      if (b.kind !== 'announce') await api.edit(b.status_chat, b.status_msg, bcProgress(b, S, F), { buttons: bcStopBtn(b.id) });
+      return true;
+    }
     if (b.kind === 'broadcast') {
       await db.incr('stats:broadcasts');
-      await api.edit(b.status_chat, b.status_msg, `**Broadcast Complete**\nTotal: **${b.total}**\nSent: **${S}**\nFailed: **${F}**${F ? '\nFailed = blocked/deleted accounts.' : ''}`);
+      await api.edit(b.status_chat, b.status_msg, bcProgress(b, S, F, 'complete'), { buttons: [] });
     } else if (b.kind === 'legacy') {
-      await api.edit(b.status_chat, b.status_msg, `**Broadcast Complete**\n\nTotal users: **${b.total}**\nSent: **${S}**\nFailed: **${F}**`);
+      await api.edit(b.status_chat, b.status_msg, bcProgress(b, S, F, 'complete'), { buttons: [] });
     } else await api.send(b.status_chat, `**Announcement sent!**\nSent: ${S}\nFailed: ${F}`, { replyTo: b.status_msg });
     return true;
   }
