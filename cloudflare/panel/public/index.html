@@ -2,131 +2,213 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a0b10">
 <title>TeraBox Bot Panel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☁️</text></svg>">
 <style>
-:root{--bg:#0c0d10;--card:#16181d;--line:#262932;--text:#e8e9ee;--muted:#8c90a0;--accent:#7c5cff;--ok:#2fbf71;--bad:#ef4d4d;--warn:#f0a43a}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-.wrap{max-width:980px;margin:0 auto;padding:20px 16px 60px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
-h1{font-size:18px;margin:0}
-h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+:root{--bg:#0a0b10;--card:rgba(22,24,32,.78);--card2:#12141b;--line:#252836;--text:#eceef5;--muted:#8d92a6;--accent:#7c5cff;--accent2:#22c3ee;--ok:#2fbf71;--bad:#ef4d4d;--warn:#f0a43a;--r:18px}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;min-height:100vh;color:var(--text);font:15px/1.5 Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  background:radial-gradient(900px 500px at 10% -10%,rgba(124,92,255,.22),transparent 60%),radial-gradient(700px 400px at 100% 0,rgba(34,195,238,.12),transparent 60%),var(--bg);background-attachment:fixed}
+.wrap{max-width:1180px;margin:0 auto;padding:16px 16px calc(40px + env(safe-area-inset-bottom))}
+.card{background:var(--card);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+h1{font-size:19px;margin:0;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;display:flex;align-items:center;gap:8px}
+h2 .ic{font-size:15px;letter-spacing:0}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .grow{flex:1;min-width:0}
 .muted{color:var(--muted)}
+.small{font-size:13px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
-.stat b{display:block;font-size:24px;margin-top:2px}
-button{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:10px 16px;font:600 14px system-ui;cursor:pointer}
-button.ghost{background:#2a2d36}
-button.danger{background:var(--bad)}
-button:disabled{opacity:.5;cursor:default}
-input,textarea,select{width:100%;background:#0f1115;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:14px system-ui}
-textarea{min-height:90px;resize:vertical}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-@media (max-width:720px){.two{grid-template-columns:1fr}}
-.bar{height:10px;background:#0f1115;border-radius:6px;overflow:hidden;margin:8px 0}
-.bar i{display:block;height:100%;background:var(--accent)}
-pre{background:#0f1115;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:260px;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;margin:0;white-space:pre-wrap;word-break:break-all}
-.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#2a2d36;padding:10px 16px;border-radius:10px;max-width:90vw;display:none}
 .warn{color:var(--warn)}
-.switch{position:relative;width:46px;height:26px;flex:none}
-.switch input{display:none}
-.switch span{position:absolute;inset:0;background:#2a2d36;border-radius:20px;cursor:pointer;transition:.2s}
-.switch span:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
-.switch input:checked+span{background:var(--accent)}
-.switch input:checked+span:before{transform:translateX(20px)}
-#login{max-width:360px;margin:15vh auto}
-.hero{background:linear-gradient(135deg,#221d3d,#16181d 60%)}
-.hero .big{font-size:44px;font-weight:700;line-height:1.1;margin:4px 0}
-.chart{position:relative}
-.chart svg{display:block;width:100%;height:220px;overflow:visible}
-.chart .grid line{stroke:#262932}
-.chart text{fill:var(--muted);font:11px system-ui}
-.tip{position:absolute;pointer-events:none;background:#0f1115;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;white-space:nowrap;display:none;transform:translate(-50%,-110%)}
+a{color:var(--accent2)}
+
+/* top bar */
+.top{position:sticky;top:0;z-index:5;margin:-16px -16px 16px;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));background:rgba(10,11,16,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.top .in{max-width:1180px;margin:0 auto;display:flex;align-items:center;gap:12px}
+.logo{width:44px;height:44px;flex:none;border-radius:14px;display:grid;place-items:center;font-size:24px;background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 6px 20px rgba(124,92,255,.4)}
+.sub{font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600}
+.pill.on{background:rgba(47,191,113,.14);color:#5fe39b}
+.pill.off{background:rgba(239,77,77,.14);color:#ff8a8a}
+.pill.on .dot{background:var(--ok);margin:0;box-shadow:0 0 0 0 rgba(47,191,113,.6);animation:pulse 2s infinite}
+.pill.off .dot{background:var(--bad);margin:0}
+@keyframes pulse{70%{box-shadow:0 0 0 7px rgba(47,191,113,0)}100%{box-shadow:0 0 0 0 rgba(47,191,113,0)}}
+.acts{display:flex;gap:8px}
+
+/* buttons & inputs */
+button{background:linear-gradient(135deg,#8a6bff,#6a4cf0);color:#fff;border:0;border-radius:12px;padding:11px 18px;min-height:44px;font:600 14px Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap;transition:transform .1s,filter .2s,opacity .2s}
+button:hover:not(:disabled){filter:brightness(1.12)}
+button:active:not(:disabled){transform:scale(.97)}
+button.ok{background:linear-gradient(135deg,#34c97a,#239a5b)}
+button.ghost{background:#232633}
+button.danger{background:linear-gradient(135deg,#f25c5c,#d43a3a)}
+button:disabled{opacity:.38;cursor:default}
+input,textarea,select{width:100%;background:var(--card2);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:11px 13px;min-height:44px;font:16px Inter,system-ui,sans-serif;outline:none;transition:border-color .2s,box-shadow .2s}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,92,255,.22)}
+textarea{min-height:110px;resize:vertical}
+
+/* layout */
+.layout{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.layout .full{grid-column:1/-1}
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:16px}
+.stat{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 14px 12px}
+.stat .ic{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-size:17px;margin-bottom:10px;background:var(--tint)}
+.stat .lb{font-size:12.5px;color:var(--muted)}
+.stat b{display:block;font-size:24px;line-height:1.2;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stat:after{content:"";position:absolute;right:-30px;top:-30px;width:90px;height:90px;border-radius:50%;background:var(--tint);filter:blur(20px);opacity:.7}
+
+/* hero / chart */
+.hero{background:linear-gradient(140deg,rgba(124,92,255,.22),rgba(22,24,32,.8) 55%),var(--card)}
+.hero .big{font-size:48px;font-weight:800;line-height:1.05;margin:2px 0 6px;letter-spacing:-.02em;background:linear-gradient(90deg,#fff,#c9bdff);-webkit-background-clip:text;background-clip:text;color:transparent;font-variant-numeric:tabular-nums}
+.msgs{text-align:right}
+.msgs b{display:block;font-size:24px;color:var(--text);font-variant-numeric:tabular-nums}
+.chart{position:relative;margin-top:10px}
+.chart svg{display:block;width:100%;height:220px;overflow:visible;touch-action:pan-y}
+.chart .grid line{stroke:#262a38;stroke-dasharray:3 4}
+.chart text{fill:var(--muted);font:11px Inter,system-ui,sans-serif}
+.tip{position:absolute;pointer-events:none;background:rgba(15,17,23,.95);border:1px solid var(--line);border-radius:10px;padding:7px 11px;font-size:12px;white-space:nowrap;display:none;transform:translate(-50%,-115%);box-shadow:0 8px 24px rgba(0,0,0,.4)}
 .tip b{display:block;font-size:14px}
-details summary{cursor:pointer;color:var(--muted);margin-top:8px}
-table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
-td,th{border-bottom:1px solid var(--line);padding:4px 6px;text-align:right}
+details summary{cursor:pointer;color:var(--muted);margin-top:10px;font-size:13px}
+.tw{max-height:300px;overflow:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px;font-variant-numeric:tabular-nums}
+td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right}
 td:first-child,th:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card2)}
+
+/* controls */
+.opt{display:flex;gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}
+.opt:first-of-type{padding-top:0}
+.opt .t{font-weight:600}
+.opt .muted{font-size:13px}
+.switch{position:relative;width:52px;height:30px;flex:none}
+.switch input{position:absolute;opacity:0;width:0;height:0;min-height:0}
+.switch span{position:absolute;inset:0;background:#2a2d3a;border-radius:30px;cursor:pointer;transition:.25s}
+.switch span:before{content:"";position:absolute;width:24px;height:24px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.25s;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.switch input:checked+span{background:linear-gradient(135deg,#8a6bff,#22c3ee)}
+.switch input:checked+span:before{transform:translateX(22px)}
+.switch input:focus-visible+span{box-shadow:0 0 0 3px rgba(124,92,255,.4)}
+.field{display:flex;gap:10px}
+.bar{height:10px;background:var(--card2);border-radius:6px;overflow:hidden;margin:10px 0 8px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .6s}
+.info{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;font-size:13.5px;word-break:break-word}
+pre{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;max-height:280px;overflow:auto;font:12px/1.55 ui-monospace,Consolas,monospace;margin:0;white-space:pre-wrap;word-break:break-all}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#232633;border:1px solid var(--line);padding:12px 18px;border-radius:14px;max-width:min(92vw,480px);display:none;z-index:9;box-shadow:0 12px 30px rgba(0,0,0,.5);font-size:14px}
+.foot{text-align:center;color:var(--muted);font-size:12px;margin-top:8px}
+
+/* login */
+#login{max-width:380px;margin:16vh auto 0;padding:28px 24px;text-align:center}
+#login .logo{width:64px;height:64px;font-size:34px;border-radius:20px;margin:0 auto 14px}
+#login h1{font-size:22px;white-space:normal}
+
+/* tablet */
+@media (max-width:1000px){.stats{grid-template-columns:repeat(3,1fr)}}
+/* phone */
+@media (max-width:720px){
+  .layout{grid-template-columns:1fr}
+  .wrap{padding:12px 12px calc(30px + env(safe-area-inset-bottom))}
+  .top{margin:-12px -12px 14px;padding-left:12px;padding-right:12px}
+  .top .in{flex-wrap:wrap}
+  .acts{width:100%}
+  .acts button{flex:1;padding:10px 8px}
+  .card{padding:16px;border-radius:16px;margin-bottom:14px}
+  .stats{grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
+  .stat b{font-size:21px}
+  .hero .big{font-size:40px}
+  .msgs b{font-size:20px}
+  .chart svg{height:190px}
+  .field.wrapm{flex-wrap:wrap}
+  .field.wrapm select{width:100%!important}
+  .field.wrapm input{flex:1 1 100%}
+  .field.wrapm button,#bcBtns button{flex:1}
+}
+@media (max-width:360px){.stats{grid-template-columns:1fr 1fr}.stat .ic{display:none}.hero .big{font-size:34px}}
 </style>
 </head>
 <body>
 <div id="login" class="card" hidden>
-  <h1 style="margin-bottom:12px">🔐 Bot Panel</h1>
-  <form id="lf"><input id="pw" type="password" placeholder="Password" autocomplete="current-password" required><div style="height:10px"></div><button style="width:100%">Login</button></form>
-  <p id="lerr" class="warn"></p>
+  <div class="logo">☁️</div>
+  <h1>Bot Panel</h1>
+  <p class="muted small" style="margin:6px 0 18px">Sign in to manage your TeraBox bot</p>
+  <form id="lf"><input id="pw" type="password" placeholder="Password" autocomplete="current-password" required><div style="height:12px"></div><button style="width:100%">Login →</button></form>
+  <p id="lerr" class="warn" style="margin-bottom:0"></p>
 </div>
 
 <div id="app" class="wrap" hidden>
-  <div class="card row">
-    <div style="font-size:34px">☁️</div>
-    <div class="grow">
-      <h1 id="bname">Loading…</h1>
-      <div class="muted"><span id="buser"></span> · <span id="bid"></span> · <span id="bstate"></span></div>
+  <header class="top">
+    <div class="in">
+      <div class="logo">☁️</div>
+      <div class="grow">
+        <h1 id="bname">Loading…</h1>
+        <div class="sub"><span id="bstate"></span><span id="buser"></span><span id="bid"></span></div>
+      </div>
+      <div class="acts">
+        <button id="startBtn" class="ok">▶ Start</button>
+        <button id="stopBtn" class="danger">■ Stop</button>
+        <button id="logout" class="ghost" title="Logout">⎋ Logout</button>
+      </div>
     </div>
-    <button id="startBtn">▶ Start</button>
-    <button id="stopBtn" class="danger">■ Stop</button>
-    <button id="logout" class="ghost">Logout</button>
-  </div>
+  </header>
 
   <div class="card hero">
-    <div class="row">
+    <div class="row" style="align-items:flex-start">
       <div class="grow">
-        <h2>Active users · 24 h</h2>
+        <h2><span class="ic">📈</span>Active users · 24 h</h2>
         <div class="big" id="aTotal">–</div>
-        <div class="muted"><span class="dot" style="background:var(--ok)"></span><span id="aPeak">–</span></div>
+        <div class="muted small"><span class="dot" style="background:var(--ok)"></span><span id="aPeak">–</span></div>
       </div>
-      <div class="muted" style="text-align:right">Messages · 24 h<div style="font-size:22px;color:var(--text);font-weight:700" id="aMsgs">–</div></div>
+      <div class="msgs muted small">Messages · 24 h<b id="aMsgs">–</b></div>
     </div>
     <div class="chart" id="chart" role="img" aria-label="Active users per hour, last 24 hours"><svg id="svg"></svg><div class="tip" id="tip"></div></div>
-    <details><summary>Show as table</summary><table id="atable"></table></details>
+    <details><summary>Show as table</summary><div class="tw"><table id="atable"></table></div></details>
   </div>
 
-  <div class="grid" style="margin-bottom:14px">
-    <div class="stat"><span class="muted">Users</span><b id="sUsers">–</b></div>
-    <div class="stat"><span class="muted">Premium</span><b id="sPrem">–</b></div>
-    <div class="stat"><span class="muted">New users today</span><b id="sNew">–</b></div>
-    <div class="stat"><span class="muted">Links today</span><b id="sLinks">–</b></div>
-    <div class="stat"><span class="muted">/videos today</span><b id="sVideos">–</b></div>
-    <div class="stat"><span class="muted">Paid today</span><b id="sPaid">–</b></div>
+  <div class="stats">
+    <div class="stat" style="--tint:rgba(124,92,255,.18)"><div class="ic">👥</div><div class="lb">Total users</div><b id="sUsers">–</b></div>
+    <div class="stat" style="--tint:rgba(240,164,58,.18)"><div class="ic">💎</div><div class="lb">Premium</div><b id="sPrem">–</b></div>
+    <div class="stat" style="--tint:rgba(47,191,113,.18)"><div class="ic">✨</div><div class="lb">New today</div><b id="sNew">–</b></div>
+    <div class="stat" style="--tint:rgba(34,195,238,.18)"><div class="ic">🔗</div><div class="lb">Links today</div><b id="sLinks">–</b></div>
+    <div class="stat" style="--tint:rgba(236,72,153,.18)"><div class="ic">🎬</div><div class="lb">/videos today</div><b id="sVideos">–</b></div>
+    <div class="stat" style="--tint:rgba(250,204,21,.16)"><div class="ic">💰</div><div class="lb">Paid today</div><b id="sPaid">–</b></div>
   </div>
 
-  <div class="card">
-    <h2>Webhook</h2>
-    <div id="whInfo" class="muted">–</div>
-  </div>
-
-  <div class="two">
+  <div class="layout">
     <div class="card">
-      <h2>Broadcast</h2>
-      <div id="bcState" class="muted" style="margin-bottom:10px">–</div>
+      <h2><span class="ic">🎛️</span>Controls</h2>
+      <div class="opt"><div class="grow"><div class="t">🔧 Maintenance mode</div><div class="muted">Users see "under maintenance"; admins keep access</div></div><label class="switch"><input type="checkbox" id="maint" aria-label="Maintenance mode"><span></span></label></div>
+      <div class="opt"><div class="grow"><div class="t">🎬 /videos free for everyone</div><div class="muted">ON = no trial / plans needed. OFF = trial, plans and premium as usual</div></div><label class="switch"><input type="checkbox" id="vfree" aria-label="/videos free mode"><span></span></label></div>
+      <h2 style="margin-top:16px"><span class="ic">🔑</span>Update bot token</h2>
+      <div class="field"><input id="tok" class="grow" placeholder="123456:ABC… from @BotFather" autocomplete="off"><button id="tokBtn">Update</button></div>
+      <div class="muted small" id="tokInfo" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="ic">📢</span>Broadcast</h2>
+      <div id="bcState" class="info muted" style="margin-bottom:12px">–</div>
       <textarea id="bcText" placeholder="Message to all users (supports **bold**, `code`, [link](https://…))"></textarea>
-      <div style="height:10px"></div>
-      <div class="row"><button id="bcSend">📢 Send to all users</button><button id="bcStop" class="danger">🛑 Stop</button></div>
+      <div style="height:12px"></div>
+      <div class="row" id="bcBtns"><button id="bcSend">📢 Send to all</button><button id="bcStop" class="danger">🛑 Stop</button></div>
     </div>
+
     <div class="card">
-      <h2>Controls</h2>
-      <div class="row" style="margin-bottom:14px"><div class="grow">🔧 Maintenance mode<div class="muted">Users get "under maintenance"; admins keep access</div></div><label class="switch"><input type="checkbox" id="maint"><span></span></label></div>
-      <div class="row" style="margin-bottom:14px"><div class="grow">🎬 /videos free for everyone<div class="muted">ON = no trial / plans needed. OFF = trial, plans and premium as usual</div></div><label class="switch"><input type="checkbox" id="vfree"><span></span></label></div>
-      <h2 style="margin-top:6px">Update bot token</h2>
-      <div class="row"><input id="tok" class="grow" placeholder="123456:ABC… from @BotFather"><button id="tokBtn">Update</button></div>
-      <div class="muted" id="tokInfo" style="margin-top:6px"></div>
+      <h2><span class="ic">🪝</span>Webhook</h2>
+      <div id="whInfo" class="info muted">–</div>
+    </div>
+
+    <div class="card">
+      <h2><span class="ic">📦</span>TeraBox</h2>
+      <div id="tbInfo" class="muted small" style="margin-bottom:12px">–</div>
+      <div class="field wrapm"><select id="tbSlot" style="width:130px;flex:none"><option value="cookie">Cookie</option><option value="jstoken">jsToken</option></select><input id="tbVal" class="grow" placeholder="Paste the full cookie string or jsToken" autocomplete="off"><button id="tbBtn">Save</button></div>
+    </div>
+
+    <div class="card full">
+      <h2><span class="ic">🧯</span>Recent errors</h2>
+      <pre id="logs">–</pre>
     </div>
   </div>
-
-  <div class="card">
-    <h2>TeraBox</h2>
-    <div id="tbInfo" class="muted" style="margin-bottom:10px">–</div>
-    <div class="row"><select id="tbSlot" style="width:140px"><option value="cookie">Cookie</option><option value="jstoken">jsToken</option></select><input id="tbVal" class="grow" placeholder="Paste the full cookie string or jsToken"><button id="tbBtn">Save</button></div>
-  </div>
-
-  <div class="card">
-    <h2>Recent errors</h2>
-    <pre id="logs">–</pre>
-  </div>
+  <div class="foot">Auto-refreshes every 30 s (5 s while a broadcast runs)</div>
 </div>
 <div id="toast" class="toast"></div>
 
@@ -163,10 +245,11 @@ function drawChart(data) {
   for (let k = 0; k <= 4; k++) g += `<line x1="${L}" x2="${W - R}" y1="${y(k * step)}" y2="${y(k * step)}"/><text x="${L - 6}" y="${y(k * step) + 4}" text-anchor="end">${k * step}</text>`;
   g += '</g>';
   let xl = '';
-  data.forEach((d, i) => { if (i % 3 === 0 || i === data.length - 1) xl += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${hourLabel(d.hour)}</text>`; });
+  const every = W < 520 ? 6 : 3; // fewer hour labels on phones
+  data.forEach((d, i) => { if (i % every === 0 || i === data.length - 1) xl += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${hourLabel(d.hour)}</text>`; });
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.innerHTML = `<defs><linearGradient id="fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#7c5cff" stop-opacity=".45"/><stop offset="1" stop-color="#7c5cff" stop-opacity="0"/></linearGradient></defs>${g}${xl}
-    <path d="${area}" fill="url(#fill)"/><path d="${path}" fill="none" stroke="#7c5cff" stroke-width="2"/>
+  svg.innerHTML = `<defs><linearGradient id="fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#7c5cff" stop-opacity=".45"/><stop offset="1" stop-color="#7c5cff" stop-opacity="0"/></linearGradient><linearGradient id="ln" x1="0" x2="1"><stop offset="0" stop-color="#8a6bff"/><stop offset="1" stop-color="#22c3ee"/></linearGradient></defs>${g}${xl}
+    <path d="${area}" fill="url(#fill)"/><path d="${path}" fill="none" stroke="url(#ln)" stroke-width="2.5" stroke-linecap="round"/>
     <line id="cross" y1="${T}" y2="${y(0)}" stroke="#8c90a0" stroke-width="1" visibility="hidden"/>
     <circle id="dotH" r="5" fill="#7c5cff" stroke="#16181d" stroke-width="2" visibility="hidden"/>
     <rect x="${L}" y="0" width="${W - L - R}" height="${H}" fill="transparent" id="hit"/>`;
@@ -194,7 +277,7 @@ async function refresh() {
   $('bname').textContent = s.bot ? s.bot.name : 'Token not working';
   $('buser').textContent = s.bot ? '@' + s.bot.username : (s.tokenError || '');
   $('bid').textContent = s.bot ? s.bot.id : '';
-  $('bstate').innerHTML = s.running ? '<span class="dot" style="background:var(--ok)"></span>Running' : '<span class="dot" style="background:var(--bad)"></span>Stopped';
+  $('bstate').innerHTML = s.running ? '<span class="pill on"><span class="dot"></span>Running</span>' : '<span class="pill off"><span class="dot"></span>Stopped</span>';
   $('startBtn').disabled = s.running; $('stopBtn').disabled = !s.running;
   const t = s.stats.today || {};
   $('sUsers').textContent = s.stats.users.toLocaleString(); $('sPrem').textContent = s.stats.premium;
