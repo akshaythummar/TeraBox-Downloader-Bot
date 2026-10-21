@@ -6,6 +6,7 @@ compatibility_flags = ["global_fetch_strictly_public"]
 
 # Same values as config.py on the amazon-ktworker branch
 [vars]
+PUBLIC_URL = "https://terabox-stream-bot.stockish.workers.dev"   # this worker's URL (the panel sets the webhook to <PUBLIC_URL>/webhook)
 HLS_PROXY = "https://amzon.ktnetwork002.workers.dev"   # TERABOX_HLS_PROXY_WORKER
 OWNER_ID = "618879443"
 ADMINS = "618879443"              # comma-separated

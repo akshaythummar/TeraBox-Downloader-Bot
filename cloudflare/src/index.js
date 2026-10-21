@@ -1,9 +1,10 @@
 // TeraBox bot on one free Cloudflare Worker: Telegram webhook + HLS player + cron.
-// Bindings: DB (D1). Secrets: BOT_TOKEN, WEBHOOK_SECRET, JSTOKEN. Vars: wrangler.toml.
+// Bindings: DB (D1), SENDER. Secrets: BOT_TOKEN, WEBHOOK_SECRET, JSTOKEN, TB_COOKIE, PANEL_PASSWORD. Vars: wrangler.toml.
 
 import { DB } from './db.js';
 import { makeApi } from './tg.js';
 import { createBot, sign, teraboxCfg, resolveCached, streamUrl } from './bot.js';
+import { panelApi, botToken, setupWebhook } from './panel.js';
 
 function params(url) {
   const g = k => url.searchParams.get(k) || '';
@@ -130,17 +131,12 @@ v.play().catch(() => {});
   );
 }
 
-const COMMANDS = [
-  ['start', 'Start the bot'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Premium plans'],
-  ['redeem', 'Redeem a gift card'], ['ref', 'Invite friends, earn Premium'], ['mystats', 'Your statistics'],
-  ['mystatus', 'Premium / tag / stats'], ['history', 'Your history'], ['search', 'Search the library'],
-  ['videos', 'Videos'], ['lang', 'Language'],
-].map(([command, description]) => ({ command, description }));
-
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const db = new DB(env.DB);
+    // a bot token set from the panel overrides the BOT_TOKEN secret
+    env = { ...env, BOT_TOKEN: await botToken(env, db) };
     if (url.pathname === '/webhook' && req.method === 'POST') {
       if (req.headers.get('x-telegram-bot-api-secret-token') !== env.WEBHOOK_SECRET) return new Response('forbidden', { status: 403 });
       const u = await req.json();
@@ -152,20 +148,15 @@ export default {
     }
     if (url.pathname === '/watch') return watch(url);
     if (url.pathname === '/m3u8') return m3u8(env, db, url);
-    if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET) {
-      const api = makeApi(env.BOT_TOKEN, env.TG_API);
-      const hook = await api.call('setWebhook', {
-        url: `${url.origin}/webhook`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query', 'my_chat_member'], drop_pending_updates: false,
-      });
-      // scoped lists (e.g. left by another bot host) override the default one — clear them first
-      for (const type of ['all_private_chats', 'all_group_chats', 'all_chat_administrators']) await api.call('deleteMyCommands', { scope: { type } });
-      const cmds = await api.call('setMyCommands', { commands: COMMANDS });
-      return Response.json({ hook, cmds });
-    }
+    if (url.pathname.startsWith('/panel-api/')) return panelApi(req, env, db, url.pathname.slice(11));
+    if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET)
+      return Response.json(await setupWebhook(env, env.BOT_TOKEN, url.origin));
     return new Response('Not found', { status: 404 });
   },
   async scheduled(event, env) {
-    const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), new DB(env.DB), '');
-await bot.cron(new Date(event.scheduledTime).getUTCMinutes());
+    const db = new DB(env.DB);
+    env = { ...env, BOT_TOKEN: await botToken(env, db) };
+    const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, '');
+    await bot.cron(new Date(event.scheduledTime).getUTCMinutes());
   },
 };
