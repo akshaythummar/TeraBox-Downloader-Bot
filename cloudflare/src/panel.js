@@ -80,7 +80,7 @@ export async function panelApi(req, env, db, path) {
         webhook: { url: w.url || '', ours: !!w.url && w.url === `${origin}/webhook`, pending: w.pending_update_count || 0, lastError: w.last_error_message || null, lastErrorAt: w.last_error_date || null },
         running: !!w.url && w.url === `${origin}/webhook`,
         stats: { users: counts.users, premium: counts.premium, readyVideos: counts.ready, today: funnel },
-        maintenance: counts.maint === '1',
+        maintenance: String(env.MAINTENANCE_OFF) !== 'true' && counts.maint === '1',
         broadcast: bc ? { id: bc.id, kind: bc.kind, total: bc.total, sent: bc.sent, failed: bc.failed, done: !!bc.done } : null,
         terabox: { cookie: !!(cfg.cookie || env.TB_COOKIE), cookieFrom: cfg.cookie ? 'panel' : env.TB_COOKIE ? 'secret' : 'none', jstoken: (cfg.jstoken || env.JSTOKEN || '').slice(0, 10) },
         logs: logs.map(r => r.value),

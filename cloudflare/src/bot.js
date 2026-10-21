@@ -328,7 +328,9 @@ export function createBot(env, api, db, origin) {
     await db.lpush(AUDIT_LOG_KEY, JSON.stringify({ action, admin, details, time: ymdHMS() }));
     await db.ltrim(AUDIT_LOG_KEY, 0, 999);
   }
-  const isMaintenance = () => cached('maint', async () => (await db.get(MAINTENANCE_KEY)) === '1');
+  // MAINTENANCE_OFF=true (deploy var) forces it off without a D1 write — for when D1 refuses writes
+  const maintOff = String(env.MAINTENANCE_OFF) === 'true';
+  const isMaintenance = () => !maintOff && cached('maint', async () => (await db.get(MAINTENANCE_KEY)) === '1');
   async function setMaintenance(on, reason = '') {
     if (on) {
       await db.set(MAINTENANCE_KEY, '1');
@@ -338,7 +340,7 @@ export function createBot(env, api, db, origin) {
     uncache('maint');
     return on;
   }
-  const getMaintenance = async () => [(await db.get(MAINTENANCE_KEY)) === '1', (await db.get(`${MAINTENANCE_KEY}:reason`)) || ''];
+  const getMaintenance = async () => [!maintOff && (await db.get(MAINTENANCE_KEY)) === '1', (await db.get(`${MAINTENANCE_KEY}:reason`)) || ''];
 
 
   async function isUserOnChat(chat, uid) {
@@ -427,7 +429,7 @@ export function createBot(env, api, db, origin) {
     const sv = new Set(s.results.map(r => r.key));
     const exp = hv[PREMIUM_EXPIRY_KEY];
     return {
-      maintenance: k[MAINTENANCE_KEY]?.value === '1',
+      maintenance: !maintOff && k[MAINTENANCE_KEY]?.value === '1',
       banned: sv.has(BANNED_USERS_KEY),
       admin: ADMINS.includes(int(uid)) || sv.has(DYNAMIC_ADMINS_KEY),
       premium: exp != null && now < int(exp),
