@@ -517,7 +517,10 @@ export function createBot(env, api, db, origin) {
   });
 
   // ==================== gift cards ====================
-  const giftcardButtons = codes => codes.slice(0, 25).map(c => [Button.inline(`🎁 ${c}`, `redeem_${c}`)]);
+  // t.me/<bot>?start=gc_<code>: one tap opens the bot and redeems (no copy-paste); /start handles it
+  const redeemLink = async code => `https://t.me/${(await api.me()).username || 'YourBot'}?start=gc_${code}`;
+  const giftcardButtons = async codes => Promise.all(codes.slice(0, 25).map(async c => [Button.url(`🎁 Redeem ${c}`, await redeemLink(c))]));
+  const redeemLine = async c => `🎁 [Redeem ${c}](${await redeemLink(c)}) · \`/redeem ${c}\``;
 
   on(/^\/gen\s+(\S+)(?:\s+(\d+))?(?:\s+(.+))?/, async (m, g) => {
     const dur = g[1].toLowerCase(), count = int(g[2] || 1), tag = (g[3] || '').trim();
@@ -533,8 +536,8 @@ export function createBot(env, api, db, origin) {
     }
     await db.batch(st);
     const label = days > 0 ? `${days} day(s)` : 'Permanent (Unlimited)';
-    const lines = codes.map(c => (tag ? `\`/redeem ${c}\` (Tag: ${tag})` : `\`/redeem ${c}\``));
-    await m.reply(`**${count} Gift Card(s) Generated**\n\nDuration: **${label}**${tag ? `\nTag: **${tag}**` : ''}\n\n**Send these to users:**\n${lines.join('\n')}`, { buttons: giftcardButtons(codes) });
+    const lines = await Promise.all(codes.map(async c => `${await redeemLine(c)}${tag ? ` (Tag: ${tag})` : ''}`));
+    await m.reply(`**${count} Gift Card(s) Generated**\n\nDuration: **${label}**${tag ? `\nTag: **${tag}**` : ''}\n\n**Send these to users** (one tap on a link redeems it):\n${lines.join('\n')}`, { buttons: await giftcardButtons(codes) });
   }, ADMIN);
 
   async function gcItems(withTags) {
@@ -543,15 +546,15 @@ export function createBot(env, api, db, origin) {
       code: r.code, status: r.used_by == null ? 'available' : 'used', label: r.days === 0 ? 'Permanent' : `${r.days}d`, user: r.used_by ?? '?', tag: (withTags && r.tag) || '',
     }));
   }
-  function gcPage(items, page) {
+  async function gcPage(items, page) {
     const pages = Math.max(1, Math.ceil(items.length / GC_LIST_PER_PAGE));
     page = Math.min(page, pages);
     const start = (page - 1) * GC_LIST_PER_PAGE;
     const avail = items.filter(i => i.status === 'available').length;
-    const lines = items.slice(start, start + GC_LIST_PER_PAGE).map((it, i) => {
+    const lines = await Promise.all(items.slice(start, start + GC_LIST_PER_PAGE).map(async (it, i) => {
       const t = it.tag ? ` (${it.tag})` : '';
-      return it.status === 'available' ? `${start + i + 1}. \`/redeem ${it.code}\` — ${it.label}${t} [Available]` : `${start + i + 1}. \`${it.code}\` — ${it.label}${t} [Used by \`${it.user}\`]`;
-    });
+      return it.status === 'available' ? `${start + i + 1}. ${await redeemLine(it.code)} — ${it.label}${t} [Available]` : `${start + i + 1}. \`${it.code}\` — ${it.label}${t} [Used by \`${it.user}\`]`;
+    }));
     const text = `**Gift Cards** (${items.length} total)\nAvailable: ${avail} | Used: ${items.length - avail}\nPage ${page}/${pages}\n\n${lines.join('\n')}`;
     const nav = [];
     if (page > 1) nav.push(Button.inline('◀️ Prev', `gcpage_${page - 1}_${items.length}`));
@@ -561,14 +564,14 @@ export function createBot(env, api, db, origin) {
   on(/^\/gclist/, async m => {
     const items = await gcItems(false);
     if (!items.length) return m.reply('No gift cards found.');
-    const [text, buttons] = gcPage(items, 1);
+    const [text, buttons] = await gcPage(items, 1);
     await m.reply(text, { buttons });
   }, ADMIN);
   onCb(/^gcpage_/, async e => {
     if (!(await isAdmin(e.uid))) return e.answer('Access denied!', true);
     const p = e.data.split('_');
     if (!int(p[1])) return e.answer('Invalid callback data.', true);
-    const [text, buttons] = gcPage(await gcItems(true), int(p[1]));
+    const [text, buttons] = await gcPage(await gcItems(true), int(p[1]));
     await e.edit(text, { buttons });
   });
 
@@ -706,6 +709,14 @@ export function createBot(env, api, db, origin) {
     const admins = await getAllAdmins();
     if (!admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
+    // gift card link (t.me/<bot>?start=gc_<code>): redeem straight away, same as /redeem <code>
+    if (arg?.startsWith('gc_')) {
+      let [ok, text, info] = await redeemCode(uid, arg.slice(3));
+      if (ok) text += identityBlock(m.from.first_name || '-', m.from.last_name, m.from.username, uid);
+      await m.reply(text, { buttons: mainMenuButtons(uid) });
+      if (ok && info) await notifyRedeem(uid, m.from, info);
+      return;
+    }
     await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
     if (refPending) await sendJoinPrompt(m.chatId, await missingChannels(uid));
   });
