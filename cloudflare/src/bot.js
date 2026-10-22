@@ -739,6 +739,7 @@ export function createBot(env, api, db, origin) {
     }
     await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
     if (refPending) await sendJoinPrompt(m.chatId, await missingChannels(uid));
+    else if (arg === 'plans' && planViewHook) await planViewHook(m.chatId, uid); // t.me/<bot>?start=plans
   });
 
   // ==================== menu callbacks ====================
@@ -799,8 +800,9 @@ mp4, mkv, webm, mov, avi, flv, wmv, m4v, mpg, mpeg, 3gp, ts, and more...
     let status = '🆓 **Free Plan**';
     if (await isPremium(e.uid)) {
       const rem = await premiumRemaining(e.uid);
-      status = rem > 9000000 ? '♾️ **Permanent Premium**' : `⏰ **Active** — ${Math.floor(rem / 86400)}d ${Math.floor((rem % 86400) / 3600)}h remaining`;
+      status = rem > 9000000 ? '♾️ **Permanent Premium**' : `⏰ **Active** — ${Math.floor(rem / 86400)}d ${Math.floor((rem % 86400) / 3600)}h left (expires ${dmyHM(Math.floor(nowS()) + rem)})`;
     }
+    const subActive = +(await urow(e.uid)).sub_until > nowS();
     await e.edit(`
 ┏━━━━━━━━━━━━━━━━━⍟
 ┃  ⭐ 𝐏𝐫𝐞𝐦𝐢𝐮𝐦
@@ -821,8 +823,8 @@ mp4, mkv, webm, mov, avi, flv, wmv, m4v, mpg, mpeg, 3gp, ts, and more...
 • ✅ Folder download
 
 👥 Earn free Premium: /ref
-Contact @buggybeats to purchase.
-`, { buttons: [[Button.inline('🎁 Redeem Gift Card', 'menu_redeem')], [Button.inline('◀️ Back', 'menu_main')]] });
+${subActive ? '✅ Your paid plan is active.' : '💳 Buy Premium below 👇'}
+`, { buttons: [...(planViewHook && !subActive ? [[Button.inline('💳 Buy Premium / See plans', 'vid_plans')]] : []), [Button.inline('🎁 Redeem Gift Card', 'menu_redeem')], [Button.inline('◀️ Back', 'menu_main')]] });
   });
 
   onCb(/^menu_redeem$/, e => e.edit(`
@@ -1125,7 +1127,8 @@ Restore: reply to the file with \`/restore\`
     else await m.reply(`${g[1]} is not in the list.`);
   }, ADMIN);
 
-  on(/^\/plan/, async m => m.reply((await db.get('custom_plan_text')) || `
+  // the plain plans text: used when /videos (the payment worker) isn't set up or its plans can't be loaded
+  const planText = async () => (await db.get('custom_plan_text')) || `
 ┏━━━━━━━━━━━━━━━━━⍟
 ┃ 𝐓𝐞𝐫𝐚𝐁𝐨𝐱 𝐅𝐚𝐬𝐭𝐞𝐬𝐭 𝐃𝐋 𝐁𝐨𝐭
 ┗━━━━━━━━━━━━━━━━━━━━━⍟
@@ -1140,8 +1143,15 @@ Restore: reply to the file with \`/restore\`
 • No size limit
 • Priority speed
 
-Contact @buggybeats for premium.
-`));
+👥 Free Premium: /ref · 🎁 Gift card: /redeem
+`;
+  const premiumLeft = rem => (rem > 9000000 ? '♾️ Permanent' : `till ${dmyHM(Math.floor(nowS()) + rem)}`);
+  // /plan, /plans: status + the buy menu (private chat); groups get a button to the bot's chat
+  on(/^\/plans?\b/, async m => {
+    if (!m.isPrivate) return m.reply('💳 Plans and payments are in private chat 👇', { buttons: [[Button.url('💳 See plans', `https://t.me/${await botName()}?start=plans`)]] });
+    if (planViewHook) return planViewHook(m.chatId, m.uid);
+    await m.reply(await planText());
+  });
 
   on(/^\/pre\s+(\d+)\s+(\S+)/, async (m, g) => {
     const uid = g[1], dur = g[2].toLowerCase();
@@ -1945,7 +1955,7 @@ Contact @buggybeats for premium.
   // reminder button: show the purchase plans right away (falls back to text when /videos isn't set up)
   onCb(/^renew_info$/, async e => {
     await e.answer('See plans below.');
-    if (showPlansHook) return showPlansHook(e.chatId);
+    if (planViewHook) return planViewHook(e.chatId, e.uid);
     await e.reply('⭐ Renew Premium\n\nUse /plan to check plans or contact an admin to renew.');
   });
 
@@ -2005,7 +2015,7 @@ Contact @buggybeats for premium.
 
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
-  let showPlansHook = null; // the /videos plans menu, used by the premium reminder's Renew button
+  let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
   let ordersTick = null, subReminders = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
@@ -2230,11 +2240,12 @@ Contact @buggybeats for premium.
     });
 
     const getPlans = () => cached('vid_plans', () => getJ(`${pay}/api/plans`), 300);
-    async function showPlans(chatId, intro = null) {
+    // returns false (sending nothing) when quiet and the plans can't be loaded
+    async function showPlans(chatId, intro = null, quiet = false) {
       const res = await getPlans();
-      if (!res) return api.send(chatId, '⚠️ Error loading plans. Please try again later.');
+      if (!res) return quiet ? false : api.send(chatId, '⚠️ Error loading plans. Please try again later.');
       const plans = (res.plans || []).filter(p => p.status === 'active');
-      if (!plans.length) return api.send(chatId, '⚠️ No plans available right now. Contact admin.');
+      if (!plans.length) return quiet ? false : api.send(chatId, '⚠️ No plans available right now. Contact admin.');
       // cheapest first (the easy first purchase); the lowest price per day is marked best value
       plans.sort((a, b) => a.price - b.price);
       const best = plans.reduce((a, p) => (p.price / p.validity_days < a.price / a.validity_days ? p : a), plans[0]);
@@ -2246,8 +2257,28 @@ Contact @buggybeats for premium.
       const caption = (intro ? `${intro}\n\n` : '') + '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
       const r = await api.call('sendPhoto', { chat_id: chatId, photo: PLANS_PHOTO, caption, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
       if (!r.ok) await api.send(chatId, caption, { html: true, buttons });
+      return true;
     }
-    showPlansHook = showPlans;
+    // The user's status (paid plan / Premium / admin / trial) above the buy menu. While a paid plan
+    // is active there is nothing to buy (the payment worker refuses a second one), so only the status.
+    async function planView(chatId, uid) {
+      const u = await urow(uid), now = nowS();
+      const custom = await db.get('custom_plan_text');
+      if (custom) await api.send(chatId, custom);
+      if (+u.sub_until > now)
+        return api.send(chatId, `✅ <b>Your plan is active till ${dmyHM(u.sub_until)}</b>\n⭐ Premium included — unlimited /videos, multi-file links, folders, custom thumbnail.\n\nWe'll remind you when it ends so you can renew.`, { html: true });
+      const lines = [];
+      if (ADMINS.includes(int(uid)) || u.admin === 1) lines.push('👑 <b>Admin</b> — everything is free for you (plans shown as a preview).');
+      else if (u.premium_until > now) lines.push(`⭐ <b>Premium active</b> — ${premiumLeft(u.premium_until - Math.floor(now))}\nBuying a plan adds its days on top.`);
+      else if (!u.trial_at) lines.push(`🎁 You have <b>${TRIAL} free videos</b> — send /videos to try.`);
+      else if (int(u.trial_n) < TRIAL) lines.push(`🎁 <b>${TRIAL - int(u.trial_n)} free video(s)</b> left — send /videos.`);
+      else lines.push('🆓 Free plan — your free videos are used up.');
+      if (await freeMode()) lines.push('🎉 /videos is <b>free for everyone</b> right now!');
+      lines.push('💎 <b>Premium</b> = unlimited /videos · multi-file links · folders · custom thumbnail');
+      // plans API down: the plain plans text (unless the /setplan text above already went out)
+      if (!(await showPlans(chatId, lines.join('\n'), true)) && !custom) await api.send(chatId, await planText());
+    }
+    planViewHook = planView;
     onCb(/^vid_trial$/, async e => {
       const ctx = await loadCtx(e.uid);
       if (ctx.state.trial_start_time) { // an old button pressed again: no second trial
@@ -2270,8 +2301,8 @@ Contact @buggybeats for premium.
       if (!status) return done('❌ Error fetching user data. Please try again.');
       if (status.subscribed) {
         const until = subUntil(status);
-        if (until > nowS()) await setState(uid, { sub_until: until, sub_checked: nowS() });
-        return done('✅ You already have an active subscription!');
+        if (until > nowS()) await setState(uid, { sub_until: Math.floor(until), sub_checked: Math.floor(nowS()) });
+        return done(`✅ <b>Your plan is already active${until > nowS() ? ` till ${dmyHM(until)}` : ''}.</b>\nWe'll remind you when it ends so you can renew.`);
       }
       let token = status.user_token;
       if (!token) token = (await getJ(`${pay}/api/telegram/register`, { telegram_id: uid, name: e.from.username || 'User' }))?.user_token;
@@ -2321,13 +2352,14 @@ Contact @buggybeats for premium.
     async function paymentDone(uid, o, auto) {
       if (!(await db.del(`vid_order:${uid}`))) return false;
       await setState(uid, { sub_checked: 0 });
+      if (int(o.days) > 0) await addPremiumDays(uid, int(o.days)); // a paid plan includes bot Premium for its days
       await logx(`payment ok ${uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}${auto ? ' (auto)' : ''}`);
       funnel('paid');
       funnel('revenue', int(o.amount));
       for (const a of await getAllAdmins())
         await api.send(a, `💰 Payment received${auto ? ' (auto-verified)' : ''}\nUser: ${escHtml(o.first || '-')} (@${escHtml(o.user || '-')})\nID: <code>${uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
       await api.send(o.chat || uid,
-        `🎉 <b>Payment Verified!</b>\n\n✅ Your payment of ₹${o.amount} has been confirmed.\n📋 Plan: ${escHtml(o.plan)}\n🆔 Order ID: <code>${o.order_id}</code>\n\nThank you! Your subscription has been activated.\nSend /videos to start watching 🎬`,
+        `🎉 <b>Payment Verified!</b>\n\n✅ Your payment of ₹${o.amount} has been confirmed.\n📋 Plan: ${escHtml(o.plan)}\n🆔 Order ID: <code>${o.order_id}</code>\n\nThank you! Your plan is active — ⭐ Premium included (multi-file links, folders, custom thumbnail).\nSend /videos to start watching 🎬`,
         { html: true });
       return true;
     }
@@ -2368,7 +2400,7 @@ Contact @buggybeats for premium.
         }
       }
     };
-    onCb(/^vid_plans$/, async e => { await e.answer(); await showPlans(e.chatId); });
+    onCb(/^vid_plans$/, async e => { await e.answer(); await planView(e.chatId, e.uid); });
 
     // Paid /videos plans: a reminder ~2h before the end (renew / upgrade) and one when it ends.
     // users.sub_rem remembers what was sent; a new sub_until clears it (setState).
@@ -2378,9 +2410,9 @@ Contact @buggybeats for premium.
       const done = { soon: [], ended: [] };
       for (const r of rows.slice(0, 10)) { // ponytail: 10 per run (each plans menu is 1-2 Telegram calls)
         const ended = r.sub_until <= now, mins = Math.max(1, Math.round((r.sub_until - now) / 60));
-        await showPlans(r.id, ended
-          ? '⏰ <b>Your /videos plan has ended.</b>\nRenew now to keep watching — longer plans save more per day:'
-          : `⏳ <b>Your /videos plan ends in ${mins >= 60 ? `${Math.round(mins / 60)} hour(s)` : `${mins} min`}.</b>\nRenew now so your videos don't stop — longer plans save more per day:`);
+        // before the end only a heads-up: a second plan can't be bought while one is active
+        if (ended) await showPlans(r.id, '⏰ <b>Your /videos plan has ended.</b>\nRenew now to keep watching — longer plans save more per day:');
+        else await api.send(r.id, `⏳ <b>Your /videos plan ends in ${mins >= 60 ? `${Math.round(mins / 60)} hour(s)` : `${mins} min`}</b> (${dmyHM(r.sub_until)}).\nYou can renew as soon as it ends — we'll send you the plans then.`, { html: true });
         done[ended ? 'ended' : 'soon'].push(r.id);
       }
       for (const [stage, ids] of Object.entries(done))

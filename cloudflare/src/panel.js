@@ -7,7 +7,7 @@ const BOT_TOKEN_KEY = 'panel:bot_token'; // a token set from the panel overrides
 const BOT_ID_KEY = 'panel:bot_id';
 
 export const COMMANDS = [
-  ['start', 'Start the bot'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Premium plans'],
+  ['start', 'Start the bot'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'],
   ['redeem', 'Redeem a gift card'], ['ref', 'Invite friends, earn Premium'], ['top', 'Top inviters'], ['mystats', 'Your statistics'],
   ['mystatus', 'Premium / tag / stats'], ['history', 'Your history'], ['search', 'Search the library'],
   ['videos', 'Videos'], ['lang', 'Language'],
