@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS users_premium ON users (premium_until) WHERE premium_until IS NOT NULL;
 CREATE INDEX IF NOT EXISTS users_ref ON users (ref_by) WHERE ref_by IS NOT NULL;
+CREATE INDEX IF NOT EXISTS users_ref_ok ON users (ref_ok) WHERE ref_ok > 0;   -- /top leaderboard
 CREATE INDEX IF NOT EXISTS users_banned ON users (banned) WHERE banned = 1;
 CREATE INDEX IF NOT EXISTS users_admin ON users (admin) WHERE admin = 1;
 
