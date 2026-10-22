@@ -8,7 +8,8 @@ import { Button, md } from './tg.js';
 
 const MAINTENANCE_KEY = 'maintenance_mode';
 const FREE_MODE_KEY = 'videos_free_mode';
-const PLANS_PHOTO = 'https://iili.io/nXUjApR.md.png';
+// const PLANS_PHOTO = 'https://iili.io/nXUjApR.md.png'; // old plans banner
+const PLANS_PHOTO = 'https://i.postimg.cc/Mp1YJqjN/Unlock-Unlimited-Videos-Pricing-Banner.png';
 const GC_LIST_PER_PAGE = 10;
 const REF_DAYS = 1; // Premium days for every friend who joins
 const REF_NEW_DAYS = 1; // Premium days the friend gets for joining with a link
