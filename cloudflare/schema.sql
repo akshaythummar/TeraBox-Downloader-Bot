@@ -34,8 +34,10 @@ CREATE TABLE IF NOT EXISTS users (
   v_pos REAL,                             -- /videos: position in the pre-uploaded list (videos.ready)
   v_start REAL,
   trial_at REAL,                          -- /videos trial start
+  trial_n INTEGER NOT NULL DEFAULT 0,     -- /videos trial videos used (VIDEOS_TRIAL_VIDEOS, default 5)
   sub_until INTEGER,                      -- paid /videos subscription end (payment worker)
   sub_checked INTEGER,
+  sub_rem TEXT,                           -- renew reminder sent for this sub_until: soon | ended
   registered INTEGER NOT NULL DEFAULT 0   -- registered with the payment worker
 );
 CREATE INDEX IF NOT EXISTS users_premium ON users (premium_until) WHERE premium_until IS NOT NULL;
@@ -43,6 +45,7 @@ CREATE INDEX IF NOT EXISTS users_ref ON users (ref_by) WHERE ref_by IS NOT NULL;
 CREATE INDEX IF NOT EXISTS users_ref_ok ON users (ref_ok) WHERE ref_ok > 0;   -- /top leaderboard
 CREATE INDEX IF NOT EXISTS users_banned ON users (banned) WHERE banned = 1;
 CREATE INDEX IF NOT EXISTS users_admin ON users (admin) WHERE admin = 1;
+CREATE INDEX IF NOT EXISTS users_sub ON users (sub_until) WHERE sub_until IS NOT NULL;   -- renew reminders
 
 -- Each /videos user's 200 links (big JSON, kept out of the users row that every request reads).
 CREATE TABLE IF NOT EXISTS video_lists (id INTEGER PRIMARY KEY, links TEXT NOT NULL);

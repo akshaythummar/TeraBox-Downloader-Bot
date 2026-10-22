@@ -2005,6 +2005,7 @@ Contact @buggybeats for premium.
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let showPlansHook = null; // the /videos plans menu, used by the premium reminder's Renew button
+  let ordersTick = null, subReminders = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -2012,7 +2013,7 @@ Contact @buggybeats for premium.
     const pools = String(env.VIDEOS_POOL_WORKER).split(',').map(x => x.trim().replace(/\/$/, '')).filter(Boolean);
     let poolTurn = Math.floor(Math.random() * pools.length);
     const pool = () => pools[poolTurn++ % pools.length];
-    const trialSeconds = int(env.VIDEOS_TRIAL_SECONDS || 180), promo = env.VIDEOS_PROMO_URL || '';
+    const TRIAL = int(env.VIDEOS_TRIAL_VIDEOS || 5), promo = env.VIDEOS_PROMO_URL || '';
     const getJ = async (url, body) => {
       try {
         const r = await fetch(url, { method: body ? 'POST' : 'GET', signal: AbortSignal.timeout(10000), ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) });
@@ -2020,12 +2021,13 @@ Contact @buggybeats for premium.
       } catch { return null; }
     };
     // /videos state lives in the users row; the code keeps the old video_state field names
-    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
+    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', trial_n: 'trial_n', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
     // One users-row write (+ video_lists when a new 200 is fetched). Never throws: if D1 refuses
     // writes (e.g. free daily write limit hit) the video is still sent — only position/cooldown isn't saved.
     const setState = async (uid, fields) => {
       const { video_links, ...rest } = fields, cols = {};
       for (const [k, v] of Object.entries(rest)) if (VCOL[k]) cols[VCOL[k]] = v; else console.log('setState: unknown field', k);
+      if ('sub_until' in rest) cols.sub_rem = null;
       const st = [];
       if (Object.keys(cols).length) st.push(db.setUserQ(uid, cols));
       if (video_links != null) st.push(db.q('INSERT INTO video_lists (id, links) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET links = excluded.links', int(uid), video_links));
@@ -2040,7 +2042,8 @@ Contact @buggybeats for premium.
       const t = Date.parse(st.subscription_end_at || '') / 1000;
       return t > 0 ? t : +st.seconds_remaining > 0 ? nowS() + +st.seconds_remaining : 0;
     };
-    // Bot premium (referral, gift code, /pre…) and admins also unlock /videos.
+    // Bot premium (referral, gift code, /pre…) and admins also unlock /videos. Returns 'trial' while the
+    // user still has free trial videos left.
     async function hasAccess(uid, ctx) {
       if (ctx.free || ctx.admin || ctx.premium) return true;
       const state = ctx.state, now = nowS();
@@ -2053,8 +2056,7 @@ Contact @buggybeats for premium.
           if (st.subscribed) return true;
         }
       }
-      const el = nowS() - parseFloat(state.trial_start_time);
-      return state.trial_start_time && el >= 0 && el <= trialSeconds;
+      return state.trial_start_time && int(state.trial_n) < TRIAL ? 'trial' : false;
     }
     // ---- per-user pool list (same as the old bot) ----
     // Each user gets 200 random links from the pool, served in order; when they run out, a new
@@ -2100,7 +2102,7 @@ Contact @buggybeats for premium.
       const u = ur.results[0] || {};
       const state = {
         video_links: u.links, video_index: u.v_idx, last_video_time: u.v_last, vid_pos: u.v_pos, vid_start: u.v_start,
-        trial_start_time: u.trial_at, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
+        trial_start_time: u.trial_at, trial_n: u.trial_n, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
       };
       // Each user starts at a random video (vid_start), walks to the end, wraps to the beginning and
       // stops just before vid_start — so users get different orders and nobody gets a repeat.
@@ -2170,11 +2172,12 @@ Contact @buggybeats for premium.
     }, ADMIN);
 
     // save = state fields to write in the same row write as the new position (e.g. last_video_time)
-    async function serveVideo(chatId, uid, target, ctx = null, save = {}) {
+    async function serveVideo(chatId, uid, target, ctx = null, save = {}, caption = null) {
       ctx ||= await loadCtx(uid);
+      const cap = caption ? { caption } : {};
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
-        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
+        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
         const pos = { vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
         if (r.ok) { funnel('videos'); return setState(uid, { ...save, ...pos }); }
         await db.run('UPDATE videos SET ready = NULL WHERE md5 = ?', ctx.ready.md5); // unusable file_id
@@ -2186,11 +2189,22 @@ Contact @buggybeats for premium.
         nextVideo(uid, ctx, save),
       ]);
       if (!c) return target.reply('❌ No videos found, try again in a moment.');
-      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
-      if (!r.ok) return target.reply('❌ Video error: server busy, please try again in a moment.');
+      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
+      if (!r.ok) { await target.reply('❌ Video error: server busy, please try again in a moment.'); return false; }
       const fid = r.result?.video?.file_id;
       funnel('videos');
       if (fid && !c.fid && c.md5) await db.run('INSERT INTO videos (md5, url, file_id) VALUES (?, ?, ?) ON CONFLICT (md5) DO UPDATE SET file_id = excluded.file_id', c.md5, c.url, fid).catch(() => {});
+      return true;
+    }
+    // one trial video (n = how many the user had before): counted in the same row write, and the
+    // plans come right after the last one
+    async function trialVideo(chatId, uid, target, ctx, save, n) {
+      const left = TRIAL - n - 1;
+      const sent = await serveVideo(chatId, uid, target, ctx, { ...save, trial_n: n + 1 }, `🎁 Free video ${n + 1}/${TRIAL}${left ? ` · ${left} left` : ''}`);
+      if (sent !== false && !left) {
+        await api.send(chatId, '⏰ <b>That was your last free video!</b>\nPick a plan to keep watching unlimited videos 👇', { html: true });
+        await showPlans(chatId);
+      }
     }
 
     on(/^\/videos$/, async m => {
@@ -2205,35 +2219,44 @@ Contact @buggybeats for premium.
         hasAccess(m.uid, ctx),
       ]);
       const save = { last_video_time: nowS(), ...(reg ? { registered: 1 } : {}) };
+      if (access === 'trial') return trialVideo(m.chatId, m.uid, m, ctx, save, int(state.trial_n));
       if (access) return serveVideo(m.chatId, m.uid, m, ctx, save);
       await setState(m.uid, save);
       if (!state.trial_start_time || int(parseFloat(state.trial_start_time)) === 0)
-        return m.reply('🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to claim your <b>3-minute free trial</b> and start watching videos right now:', { html: true, buttons: [[Button.inline('🎁 Get Free 3-Min Trial', 'vid_trial')]] });
-      await m.reply('⏰ <b>Your 3-minute free trial has expired!</b>\nPlease choose a plan below to continue watching.', { html: true });
+        return m.reply(`🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to get <b>${TRIAL} free videos</b> and start watching right now:`, { html: true, buttons: [[Button.inline(`🎁 Get ${TRIAL} Free Videos`, 'vid_trial')]] });
+      await m.reply('⏰ <b>Your free trial is over!</b>\nPlease choose a plan below to continue watching.', { html: true });
       await showPlans(m.chatId);
     });
 
-    async function showPlans(chatId) {
-      const res = await getJ(`${pay}/api/plans`);
+    const getPlans = () => cached('vid_plans', () => getJ(`${pay}/api/plans`), 300);
+    async function showPlans(chatId, intro = null) {
+      const res = await getPlans();
       if (!res) return api.send(chatId, '⚠️ Error loading plans. Please try again later.');
       const plans = (res.plans || []).filter(p => p.status === 'active');
       if (!plans.length) return api.send(chatId, '⚠️ No plans available right now. Contact admin.');
       // cheapest first (the easy first purchase); the lowest price per day is marked best value
       plans.sort((a, b) => a.price - b.price);
       const best = plans.reduce((a, p) => (p.price / p.validity_days < a.price / a.validity_days ? p : a), plans[0]);
-      const buttons = plans.map((p, i) => [Button.inline(`${i === 0 ? '⚡ ' : p === best ? '💎 ' : ''}${p.name} - ₹${p.price} (${p.validity_days} days)${p === best && i ? ' • Best value' : ''}`, `vid_plan_${p.id}`)]);
+      // longer plans show how much they save per day against the cheapest one (the upgrade nudge)
+      const base = plans[0].price / plans[0].validity_days;
+      const save = p => Math.round((1 - p.price / p.validity_days / base) * 100);
+      const buttons = plans.map((p, i) => [Button.inline(`${i === 0 ? '⚡ ' : p === best ? '💎 ' : ''}${p.name} - ₹${p.price} (${p.validity_days} days)${i && save(p) >= 10 ? ` • save ${save(p)}%` : ''}`, `vid_plan_${p.id}`)]);
       await funnel('plans_shown');
-      const caption = '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
+      const caption = (intro ? `${intro}\n\n` : '') + '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
       const r = await api.call('sendPhoto', { chat_id: chatId, photo: PLANS_PHOTO, caption, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
       if (!r.ok) await api.send(chatId, caption, { html: true, buttons });
     }
     showPlansHook = showPlans;
     onCb(/^vid_trial$/, async e => {
-      await setState(e.uid, { trial_start_time: nowS() });
-      await funnel('trials');
+      const ctx = await loadCtx(e.uid);
+      if (ctx.state.trial_start_time) { // an old button pressed again: no second trial
+        await e.answer('You already used your free trial.');
+        return int(ctx.state.trial_n) < TRIAL ? trialVideo(e.chatId, e.uid, e, ctx, {}, int(ctx.state.trial_n)) : showPlans(e.chatId);
+      }
+      funnel('trials');
       await e.answer('Trial activated!');
-      await e.reply('🎉 <b>Your 3-minute free trial is now ACTIVE!</b>', { html: true });
-      await serveVideo(e.chatId, e.uid, e);
+      await e.reply(`🎉 <b>Your free trial is ACTIVE!</b> ${TRIAL} free videos — send /videos for the next one.`, { html: true });
+      await trialVideo(e.chatId, e.uid, e, ctx, { trial_start_time: nowS() }, 0);
     });
     // /purchase<N> from the old bot: create an order on the payment worker, show Pay + Verify.
     onCb(/^vid_plan_(\d+)$/, async e => {
@@ -2253,7 +2276,7 @@ Contact @buggybeats for premium.
       if (!token) token = (await getJ(`${pay}/api/telegram/register`, { telegram_id: uid, name: e.from.username || 'User' }))?.user_token;
       if (!token) return done('❌ Error fetching user data. Please try again.');
 
-      const plan = ((await getJ(`${pay}/api/plans`))?.plans || []).find(p => int(p.id) === planId);
+      const plan = ((await getPlans())?.plans || []).find(p => int(p.id) === planId);
       if (!plan) return done('❌ Plan not found. Please try again.');
 
       let order;
@@ -2275,7 +2298,7 @@ Contact @buggybeats for premium.
       if (!order?.status || !order.result?.payment_url) return done(`❌ Failed to create order: ${escHtml(order?.message || 'Unknown error')}`);
 
       await funnel('orders');
-      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId }), { ex: 86400 });
+      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId, at: Math.floor(nowS()), chat: chatId, first: e.from.first_name || '-', user: e.from.username || '-' }), { ex: 86400 });
       await done();
       await api.send(chatId,
         `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${plan.price}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
@@ -2284,39 +2307,84 @@ Contact @buggybeats for premium.
     });
 
     // /verifynew from the old bot: ask the payment worker whether the order was paid.
-    onCb(/^vid_verify$/, async e => {
-      await e.answer();
-      const chatId = e.chatId, raw = await db.get(`vid_order:${e.uid}`);
-      if (!raw) return api.send(chatId, '❌ No payment found. Please start again with /videos');
-      const o = JSON.parse(raw);
-      const checking = await api.send(chatId, '🔍 Checking payment status...');
-      let res = null;
+    async function paymentStatus(o, uid) {
       try {
         const r = await fetch(`${pay}/api/payment-status`, {
           method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, signal: AbortSignal.timeout(15000),
           body: new URLSearchParams({ order_id: o.order_id }),
         });
-        res = r.status === 200 ? (await r.text()).trim() : null;
-      } catch (err) { await logx(`payment-status ${e.uid} failed: ${err.message}`); }
+        return r.status === 200 ? (await r.text()).trim() : null;
+      } catch (err) { await logx(`payment-status ${uid} failed: ${err.message}`); return null; }
+    }
+    // Paid: the order row is deleted first, so the Verify button and the cron can't both count it.
+    async function paymentDone(uid, o, auto) {
+      if (!(await db.del(`vid_order:${uid}`))) return false;
+      await setState(uid, { sub_checked: 0 });
+      await logx(`payment ok ${uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}${auto ? ' (auto)' : ''}`);
+      funnel('paid');
+      funnel('revenue', int(o.amount));
+      for (const a of await getAllAdmins())
+        await api.send(a, `💰 Payment received${auto ? ' (auto-verified)' : ''}\nUser: ${escHtml(o.first || '-')} (@${escHtml(o.user || '-')})\nID: <code>${uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
+      await api.send(o.chat || uid,
+        `🎉 <b>Payment Verified!</b>\n\n✅ Your payment of ₹${o.amount} has been confirmed.\n📋 Plan: ${escHtml(o.plan)}\n🆔 Order ID: <code>${o.order_id}</code>\n\nThank you! Your subscription has been activated.\nSend /videos to start watching 🎬`,
+        { html: true });
+      return true;
+    }
+    onCb(/^vid_verify$/, async e => {
+      await e.answer();
+      const chatId = e.chatId, raw = await db.get(`vid_order:${e.uid}`);
+      if (!raw) return api.send(chatId, '❌ No payment found. Please start again with /videos');
+      const o = { chat: chatId, first: e.from.first_name || '-', user: e.from.username || '-', ...JSON.parse(raw) };
+      const checking = await api.send(chatId, '🔍 Checking payment status...');
+      const res = await paymentStatus(o, e.uid);
       await checking?.delete();
       if (res == null) return api.send(chatId, '❌ Error checking payment status.\n\nPlease try again later or contact support.');
-      if (res === 'success') {
-        await db.del(`vid_order:${e.uid}`);
-        await setState(e.uid, { sub_checked: 0 });
-        await logx(`payment ok ${e.uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}`);
-        await funnel('paid');
-        await funnel('revenue', int(o.amount));
-        for (const a of await getAllAdmins())
-          await api.send(a, `💰 Payment received\nUser: ${escHtml(e.from.first_name || '-')} (@${escHtml(e.from.username || '-')})\nID: <code>${e.uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
-        return api.send(chatId,
-          `🎉 <b>Payment Verified!</b>\n\n✅ Your payment of ₹${o.amount} has been confirmed.\n📋 Plan: ${escHtml(o.plan)}\n🆔 Order ID: <code>${o.order_id}</code>\n\nThank you! Your subscription has been activated.\nSend /videos to start watching 🎬`,
-          { html: true });
-      }
+      if (res === 'success') return paymentDone(e.uid, o, false);
       if (res === 'FAILURE') return api.send(chatId, '❌ <b>Payment Failed</b>\n\nYour payment was not successful. Please try again.', { html: true });
       await api.send(chatId,
         `⏳ <b>Payment Pending</b>\n\nYour payment has not been confirmed yet.\nPlease complete the payment and click verify again.\n\nOrder ID: <code>${o.order_id}</code>`,
         { html: true, buttons: [[Button.inline("✅ I've Paid - Verify", 'vid_verify')]] });
     });
+
+    // Every cron minute: open orders from the last 30 min are checked with the payment worker, so a
+    // user who paid but never pressed Verify is activated anyway; one nudge after 3 min if still pending.
+    // ponytail: 8 checks per minute — plenty for ~25 orders a day; raise if orders grow a lot.
+    ordersTick = async () => {
+      const now = Math.floor(nowS());
+      const rows = await db.all("SELECT key, value FROM store WHERE key GLOB 'vid_order:*' AND expires_at > ?", now);
+      let budget = 8;
+      for (const { key, value } of rows) {
+        let o; try { o = JSON.parse(value); } catch { continue; }
+        const uid = int(key.slice(10)), age = now - int(o.at);
+        if (!o.at || age < 60 || age > 1800 || budget-- <= 0) continue;
+        const res = await paymentStatus(o, uid);
+        if (res === 'success') { await paymentDone(uid, o, true); continue; }
+        if (res === 'FAILURE') { await db.del(key); continue; }
+        if (age >= 180 && !o.nudged) {
+          await db.set(key, JSON.stringify({ ...o, nudged: 1 }), { ex: 86400 - age });
+          await api.send(o.chat || uid, `⏳ <b>Payment not completed yet</b>\n\nYour <b>${escHtml(o.plan)}</b> plan (₹${o.amount}) is waiting. Finish the payment in your UPI app — it activates automatically.\n\nLink expired? Pick the plan again 👇`,
+            { html: true, buttons: [[Button.inline("✅ I've Paid - Verify", 'vid_verify')], [Button.inline('📋 Show plans', 'vid_plans')]] });
+        }
+      }
+    };
+    onCb(/^vid_plans$/, async e => { await e.answer(); await showPlans(e.chatId); });
+
+    // Paid /videos plans: a reminder ~2h before the end (renew / upgrade) and one when it ends.
+    // users.sub_rem remembers what was sent; a new sub_until clears it (setState).
+    subReminders = async () => {
+      const now = Math.floor(nowS());
+      const rows = await db.all("SELECT id, sub_until, sub_rem FROM users WHERE sub_until BETWEEN ? AND ? AND (sub_rem IS NULL OR (sub_rem = 'soon' AND sub_until <= ?))", now - 86400, now + 7200, now);
+      const done = { soon: [], ended: [] };
+      for (const r of rows.slice(0, 10)) { // ponytail: 10 per run (each plans menu is 1-2 Telegram calls)
+        const ended = r.sub_until <= now, mins = Math.max(1, Math.round((r.sub_until - now) / 60));
+        await showPlans(r.id, ended
+          ? '⏰ <b>Your /videos plan has ended.</b>\nRenew now to keep watching — longer plans save more per day:'
+          : `⏳ <b>Your /videos plan ends in ${mins >= 60 ? `${Math.round(mins / 60)} hour(s)` : `${mins} min`}.</b>\nRenew now so your videos don't stop — longer plans save more per day:`);
+        done[ended ? 'ended' : 'soon'].push(r.id);
+      }
+      for (const [stage, ids] of Object.entries(done))
+        if (ids.length) await db.run(`UPDATE users SET sub_rem = ? WHERE id IN (${ids.map(() => '?').join(',')})`, stage, ...ids);
+    };
 
     on(/^\/videosfreemode(?:\s+(on|off))?$/, async (m, g) => {
       if (!(await isAdmin(m.uid))) return m.reply('Not authorized.');
@@ -2464,6 +2532,13 @@ Contact @buggybeats for premium.
     // uploads share the free plan's 50-subrequest budget: skip minutes with a broadcast batch or reminders
     if (uploadTick && !broadcasting && minute !== 0) {
       try { await uploadTick(); } catch (e) { console.log('uploadTick', e.message); }
+    }
+    // payments: every minute; renew reminders at :30 (away from the :00 premium reminders and cleanup)
+    if (ordersTick && !broadcasting) {
+      try { await ordersTick(); } catch (e) { console.log('ordersTick', e.message); }
+    }
+    if (subReminders && !broadcasting && minute === 30) {
+      try { await subReminders(); } catch (e) { console.log('subReminders', e.message); }
     }
     if (minute === 0) {
       await reminderSweep();
