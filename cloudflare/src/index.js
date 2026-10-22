@@ -39,15 +39,10 @@ async function m3u8(env, db, url) {
   return new Response(abs, { headers: { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' } });
 }
 
-// TeraBox renditions the player can switch between (each URL is signed like the bot's links)
-const QUALITIES = [['360p', 'M3U8_AUTO_360'], ['480p', 'M3U8_AUTO_480'], ['720p', 'M3U8_AUTO_720'], ['1080p', 'M3U8_AUTO_1080']];
-
-async function watch(env, url) {
+function watch(url) {
   const p = params(url);
   if (!p) return new Response('Bad link', { status: 400 });
-  const srcs = {};
-  for (const [label, q] of QUALITIES) srcs[label] = `/m3u8?s=${p.s}&f=${p.f}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${p.s}:${p.f}:${q}`)}`;
-  const start = (QUALITIES.find(([, q]) => q === p.q) || QUALITIES[1])[0];
+  const src = `/m3u8?s=${p.s}&f=${p.f}&q=${p.q}&t=${p.t}`;
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>TeraBox Player</title>
@@ -56,18 +51,10 @@ async function watch(env, url) {
 <style>
 html,body{margin:0;height:100%;background:#000;color:#eee;font:14px system-ui,sans-serif;overflow:hidden}
 video{width:100%;height:100%;object-fit:contain;background:#000}
-/* one loader only: hide the browser's own spinner in the native controls (Chrome / Android WebView) */
-video::-webkit-media-controls-loading-panel{display:none!important}
-.spin{position:fixed;top:50%;left:50%;width:44px;height:44px;margin:-22px 0 0 -22px;border:4px solid #ffffff33;border-top-color:#fff;border-radius:50%;animation:r .8s linear infinite;pointer-events:none}
-@keyframes r{to{transform:rotate(360deg)}}
 .pill{padding:8px 14px;border:0;border-radius:20px;background:#000a;color:#fff;font:600 14px system-ui;cursor:pointer;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
 #unmute{position:fixed;top:max(12px,env(safe-area-inset-top));left:12px}
 .bar{position:fixed;top:max(12px,env(safe-area-inset-top));right:12px;display:flex;gap:8px;transition:opacity .3s}
 body.idle .bar,body.idle #unmute{opacity:0;pointer-events:none}
-.menu{position:fixed;top:calc(max(12px,env(safe-area-inset-top)) + 44px);right:12px;display:flex;flex-direction:column;background:#111e;border-radius:14px;overflow:hidden;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
-.menu button{padding:11px 22px;border:0;background:none;color:#fff;font:600 14px system-ui;text-align:left;cursor:pointer}
-.menu button.on{color:#8fd3ff}
-.menu button.on::after{content:" ✓"}
 .flash{position:fixed;top:50%;transform:translateY(-50%);padding:10px 16px;border-radius:24px;background:#000a;color:#fff;font:600 16px system-ui;pointer-events:none;opacity:0;transition:opacity .2s;white-space:nowrap}
 #err{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#000d;text-align:center;padding:24px}
 #err button{padding:10px 22px;border:0;border-radius:20px;background:#fff;color:#000;font:600 14px system-ui;cursor:pointer}
@@ -75,24 +62,18 @@ body.idle .bar,body.idle #unmute{opacity:0;pointer-events:none}
 </style>
 </head><body>
 <video id="v" controls autoplay muted playsinline preload="auto"></video>
-<div id="spin" class="spin"></div>
 <button id="unmute" class="pill" hidden>🔇 Tap to unmute</button>
-<div class="bar"><button id="spd" class="pill">1x</button><button id="qb" class="pill">⚙ ${start}</button></div>
-<div id="menu" class="menu" hidden></div>
+<div class="bar"><button id="spd" class="pill">1x</button></div>
 <div id="fl" class="flash"></div>
 <div id="err"><div id="em"></div><button onclick="location.reload()">↻ Retry</button></div>
 <script>
 const tg = window.Telegram && Telegram.WebApp;
 try { tg.ready(); tg.expand(); tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000'); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch {}
-const $ = id => document.getElementById(id), v = $('v'), SRCS = ${JSON.stringify(srcs)};
-let cur = ${JSON.stringify(start)};
+const $ = id => document.getElementById(id), v = $('v'), src = ${JSON.stringify(src)};
 const KEY = 'pos:' + ${JSON.stringify(`${p.s}:${p.f}`)};
 const store = { get: () => { try { return +localStorage.getItem(KEY) || 0; } catch { return 0; } }, set: x => { try { x ? localStorage.setItem(KEY, x) : localStorage.removeItem(KEY); } catch {} } };
 
-// spinner while loading / buffering — no text
-const busy = on => $('spin').hidden = !on;
-['waiting', 'seeking', 'stalled'].forEach(e => v.addEventListener(e, () => busy(true)));
-['playing', 'canplay', 'seeked', 'pause'].forEach(e => v.addEventListener(e, () => busy(v.readyState < 3 && !v.paused)));
+// loading / buffering: the browser's own spinner (ours on top of it showed two)
 
 // muted by default (also lets autoplay work everywhere); one tap to turn sound on
 v.muted = true;
@@ -102,7 +83,7 @@ $('unmute').onclick = () => { v.muted = false; if (v.volume === 0) v.volume = 1;
 
 // buttons fade out while playing, come back on any touch / mouse move
 let idleT;
-const wake = () => { document.body.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => { if (!v.paused && $('menu').hidden) document.body.classList.add('idle'); }, 3000); };
+const wake = () => { document.body.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => { if (!v.paused) document.body.classList.add('idle'); }, 3000); };
 ['touchstart', 'mousemove', 'click', 'keydown'].forEach(e => addEventListener(e, wake, { passive: true }));
 v.addEventListener('pause', wake); v.addEventListener('play', wake);
 
@@ -149,43 +130,21 @@ const onTurn = () => {
 };
 if (screen.orientation?.addEventListener) screen.orientation.addEventListener('change', onTurn); else addEventListener('orientationchange', onTurn);
 
-const fail = m => { busy(false); $('spin').remove(); if (h) h.destroy(); $('em').textContent = '⚠️ Video could not be played (' + m + '). The link may have expired — try again or resend it to the bot.'; $('err').style.display = 'flex'; };
-let h = null, prev = null; // prev: the quality to go back to if a switch fails
-function load(label, at) {
-  const src = SRCS[label];
-  busy(true);
-  if (window.Hls && Hls.isSupported()) {
-    if (h) h.destroy();
-    // segments come through a proxy that is slow on its first request, so be patient and retry
-    h = new Hls({ fragLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } }, maxBufferLength: 60, startFragPrefetch: true, startPosition: at ?? -1 });
-    h.loadSource(src); h.attachMedia(v);
-    h.on(Hls.Events.MANIFEST_PARSED, () => { prev = null; v.play().catch(() => {}); });
-    h.on(Hls.Events.ERROR, (_, d) => {
-      if (!d.fatal) return;
-      if (prev && d.details === 'manifestLoadError') { flash(label + ' not available', 50); const back = prev; prev = null; return pick(back, true); }
-      if (d.type === Hls.ErrorTypes.NETWORK_ERROR && d.details !== 'manifestLoadError') return h.startLoad();
-      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return h.recoverMediaError();
-      fail(d.details + (d.response?.code ? ' ' + d.response.code : ''));
-    });
-  } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
-    v.src = src;
-    if (at) v.addEventListener('loadedmetadata', () => { v.currentTime = at; }, { once: true });
-    v.onerror = () => { if (prev) { flash(label + ' not available', 50); const back = prev; prev = null; pick(back, true); } else fail('stream error'); };
-    v.play().catch(() => {});
-  } else fail('this browser cannot play HLS');
-}
-// quality menu: switching keeps the position
-function pick(label, quiet) {
-  $('menu').hidden = true;
-  if (label === cur && !quiet) return;
-  if (!quiet) prev = cur;
-  cur = label; $('qb').textContent = '⚙ ' + label;
-  load(label, v.currentTime || undefined);
-}
-$('menu').innerHTML = Object.keys(SRCS).map(l => '<button data-q="' + l + '">' + l + '</button>').join('');
-$('menu').onclick = e => e.target.dataset.q && pick(e.target.dataset.q);
-$('qb').onclick = () => { const m = $('menu'); m.hidden = !m.hidden; m.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.q === cur)); };
-load(cur);
+const fail = m => { $('em').textContent = '⚠️ Video could not be played (' + m + '). The link may have expired — try again or resend it to the bot.'; $('err').style.display = 'flex'; };
+if (window.Hls && Hls.isSupported()) {
+  // segments come through a proxy that is slow on its first request, so be patient and retry
+  const h = new Hls({ fragLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } }, maxBufferLength: 60, startFragPrefetch: true });
+  h.loadSource(src); h.attachMedia(v);
+  h.on(Hls.Events.ERROR, (_, d) => {
+    if (!d.fatal) return;
+    if (d.type === Hls.ErrorTypes.NETWORK_ERROR && d.details !== 'manifestLoadError') return h.startLoad();
+    if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return h.recoverMediaError();
+    h.destroy();
+    fail(d.details + (d.response?.code ? ' ' + d.response.code : ''));
+  });
+} else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; v.onerror = () => fail('stream error'); }
+else fail('this browser cannot play HLS');
+v.play().catch(() => {});
 </script></body></html>`,
     { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } }
   );
@@ -234,7 +193,7 @@ export default {
       })());
       return new Response('ok');
     }
-    if (url.pathname === '/watch') return watch(env, url);
+    if (url.pathname === '/watch') return watch(url);
     if (url.pathname === '/m3u8') return m3u8(env, db, url);
     if (url.pathname.startsWith('/panel-api/')) return panelApi(req, env, db, url.pathname.slice(11));
     if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET)
