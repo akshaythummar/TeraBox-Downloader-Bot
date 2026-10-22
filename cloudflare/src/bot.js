@@ -18,6 +18,9 @@ const DURATION_MAP = { '1d': 1, '2d': 2, '3d': 3, '5d': 5, '7d': 7, '1w': 7, '2w
 // /dl <quality> → TeraBox HLS rendition (replaces the old ffmpeg re-encode)
 const DL_QUALITY_MAP = { '144p': 'M3U8_AUTO_360', '240p': 'M3U8_AUTO_360', '360p': 'M3U8_AUTO_360', '480p': 'M3U8_AUTO_480', '720p': 'M3U8_AUTO_720', '1080p': 'M3U8_AUTO_1080' };
 const DEFAULT_QUALITY = 'M3U8_AUTO_480';
+// Telegram's limit for sendVideo by URL, and TeraBox's CDN link by md5 (fixed params, from the old bot)
+const VIDEO_URL_MAX = 20 * 1024 * 1024;
+const cdnLink = md5 => `https://d8.freeterabox.com/file/${md5}?fid=4401480949283-250528-22673172449066&dstime=1709708137&rt=sh&sign=FDtAER-DCb740ccc5511e5e8fedcff06b081203-xKOOrUER%2B6l7qCouNxQTRYbUXx4%3D&expires=8h&chkv=0&chkbd=0&chkpc=&dp-logid=369036930199400835&dp-callid=0&r=799779934&sh=1&region=jp`;
 
 const VIDEO_EXTENSIONS = new Set(('.mp4 .mkv .webm .mov .avi .flv .wmv .m4v .mpg .mpeg .3gp .ts .vob .ogv .mts .m2ts .divx .asf .rm .rmvb ' +
   '.3g2 .3gp2 .3gpp2 .f4v .f4p .swf .mpe .mpv .m2v .m2p .mpg4 .mpeg1 .mpeg2 .mpeg4 .qt .hdmov .h264 .h265 .hevc .mod .tod .dav .hdv ' +
@@ -218,7 +221,7 @@ export async function resolveCached(env, db, code, fresh = false) {
   }
   const d = await resolveShare(await teraboxCfg(env, db), code, db);
   if (d) {
-    const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size })) };
+    const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size, md5: i.md5 })) };
     if (shareMem.size > 500) shareMem.clear(); // ponytail: crude bound, fine for one isolate's traffic
     shareMem.set(code, [slim, Date.now() + SHARE_TTL * 1000]);
     await db.set(key, JSON.stringify(slim), { ex: SHARE_TTL }).catch(e => console.log('share cache', e.message));
@@ -379,7 +382,7 @@ export function createBot(env, api, db, origin) {
       const entries = have[norm] || [];
       const fresh = fs.filter(f => !entries.some(e => e.s === f.code && e.f === f.fid));
       if (!fresh.length) continue;
-      for (const f of fresh) entries.push({ s: f.code, f: f.fid, name: f.file_name.slice(0, 120), size: f.size, bytes: f.sizebytes });
+      for (const f of fresh) entries.push({ s: f.code, f: f.fid, name: f.file_name.slice(0, 120), size: f.size, bytes: f.sizebytes, ...(f.md5 ? { m: f.md5 } : {}) });
       rows2.push([norm, JSON.stringify(entries.slice(-5))]);
     }
     // multi-row upserts: one statement per 45 rows (D1 allows 100 bound params per statement)
@@ -396,7 +399,7 @@ export function createBot(env, api, db, origin) {
     const d = await resolveCached(env, db, code);
     if (!d) { await logx(`Resolver worker error for ${code}`); return false; }
     const files = d.list.filter(i => i.fs_id).map(i => ({
-      file_name: sanitize(i.server_filename || 'video.mp4'), fid: String(i.fs_id), sizebytes: +i.size || 0,
+      file_name: sanitize(i.server_filename || 'video.mp4'), fid: String(i.fs_id), sizebytes: +i.size || 0, md5: /^[0-9a-f]{32}$/.test(i.md5) ? i.md5 : null,
       size: +i.size ? fmtSize(+i.size) : 'Unknown', code,
     }));
     return files.length ? files : false;
@@ -440,9 +443,24 @@ export function createBot(env, api, db, origin) {
 `;
 
   // The stream "video post": caption + play buttons, as a photo when the user set a /setthumb.
-  async function sendStream(chatId, isPrivate, f, caption, q, userThumb) {
+  // A file up to 20 MB is first sent as the video itself, with the same caption and Watch buttons
+  // under it: Telegram fetches it from TeraBox's CDN by md5 (the old Telebot Creator link; the
+  // other params are fixed). Telegram only fetches URLs up to 20 MB. If that fails (file not on
+  // that CDN, Telegram error) the normal stream post goes out instead, so the user always gets one.
+  async function sendStream(chatId, isPrivate, f, caption, q, userThumb, tryVideo = true) {
     const href = await watchUrl(f.code, f.fid, q);
     const buttons = [[isPrivate ? Button.webapp('▶️ Watch Online', href) : Button.url('▶️ Watch Online', href)], [Button.url('🌐 Open in Browser', href)]];
+    if (tryVideo && f.md5 && f.sizebytes > 0 && f.sizebytes <= VIDEO_URL_MAX) {
+      // a file_id Telegram already gave us for this file is instant; the CDN link is the fallback
+      const known = (await db.one('SELECT file_id FROM videos WHERE md5 = ?', f.md5).catch(() => null))?.file_id;
+      for (const video of known ? [known, cdnLink(f.md5)] : [cdnLink(f.md5)]) {
+        const r = await api.call('sendVideo', { chat_id: chatId, video, caption: md(caption), parse_mode: 'HTML', has_spoiler: SPOILER, supports_streaming: true, reply_markup: { inline_keyboard: buttons } });
+        if (!r.ok) continue;
+        const fid = r.result?.video?.file_id || r.result?.document?.file_id;
+        if (fid && fid !== known) await db.run('INSERT INTO videos (md5, file_id) VALUES (?, ?) ON CONFLICT (md5) DO UPDATE SET file_id = excluded.file_id', f.md5, fid).catch(() => {});
+        return true;
+      }
+    }
     if (userThumb) {
       const r = await api.call('sendPhoto', { chat_id: chatId, photo: userThumb, caption: md(caption), parse_mode: 'HTML', has_spoiler: SPOILER, reply_markup: { inline_keyboard: buttons } });
       if (r.ok) return true;
@@ -1229,8 +1247,9 @@ Contact @buggybeats for premium.
     let failed = 0, sendFails = 0;
     const videos = todo.filter(f => VIDEO_EXTENSIONS.has(extOf(f.file_name)));
     failed += todo.length - videos.length;
-    for (const f of videos.slice(0, MAX_POSTS)) {
-      if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, thumb)) ok.push(f);
+    for (const [i, f] of videos.slice(0, MAX_POSTS).entries()) {
+      // ponytail: video files only for the first 5 (each try can cost 2 Telegram calls + 2 D1 queries)
+      if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, thumb, i < 5)) ok.push(f);
       else { failed++; sendFails++; }
     }
     const rest = videos.slice(MAX_POSTS);
@@ -1780,7 +1799,7 @@ Contact @buggybeats for premium.
     const raw = await db.get(`lib:search:${e.uid}`), results = raw ? JSON.parse(raw) : [];
     if (idx >= results.length) return e.answer('Expired — /search again.', true);
     const r = results[idx];
-    const f = { file_name: r.name, size: r.size, sizebytes: r.bytes, fid: r.f, code: r.s };
+    const f = { file_name: r.name, size: r.size, sizebytes: r.bytes, fid: r.f, code: r.s, md5: r.m || null };
     const ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, (await urow(e.uid)).thumb);
     if (!ok) { await dropEntry(r.norm, r); return e.answer('Removed stale entry — resend the link to fetch fresh.', true); }
     db.bump('lib_hits');
