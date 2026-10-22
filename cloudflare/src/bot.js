@@ -636,21 +636,31 @@ export function createBot(env, api, db, origin) {
   // commands/redeem_core.py
   async function redeemCode(uid, code) {
     code = String(code || '').trim().toUpperCase();
-    if ((await urow(uid)).gc_redeemed === 1 && (await isPremium(uid)))
-      return [false, 'You have already redeemed a gift card and your premium is still active.\nEach user can only redeem **1 gift card** while premium is active.\nWait for expiry or contact admin.', null];
+    const u = await urow(uid);
+    if (u.gc_redeemed === 1 && (await isPremium(uid)))
+      return [false, `⭐ **You already have Premium** (${premiumLeft(u.premium_until - Math.floor(nowS()))}).\n\nOnly **1 gift card** can be redeemed while Premium is active — try again after it ends.`, null];
     // claimed in one statement, so two users pressing at once can't both get it
     const card = await db.one('UPDATE gift_cards SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL RETURNING days, tag', int(uid), Math.floor(nowS()), code);
-    if (!card) return [false, 'Invalid or already used gift card.', null];
+    if (!card) {
+      const c = await db.one('SELECT used_by FROM gift_cards WHERE code = ?', code);
+      return [false, !c ? `❌ **Gift card \`${code}\` doesn't exist.**\nCheck the code and try again.`
+        : c.used_by === int(uid) ? '✅ **You already redeemed this gift card.**\nYour Premium is on your account — see /plan.'
+        : `😕 **Too late — gift card \`${code}\` was already claimed by someone else.**\n\nStay in the channel for the next drop, or get free Premium by inviting friends: /ref`, null];
+    }
     const days = card.days, tag = card.tag || '';
     await db.setUser(uid, { gc_redeemed: 1 });
     if (tag) await setCustomTag(uid, tag);
     await grantPremium(uid, days === 0 ? 99999 : days);
     const tagInfo = tag ? `\nTag: **${tag}**` : '';
-    const text = days === 0
-      ? `Gift card redeemed!\n\n**Premium: Unlimited**\nDuration: Permanent (never expires)${tagInfo}`
-      : `Gift card redeemed!\n\n**Premium: ${days} day(s)**\nExpires: \`${dmyHM(Math.floor(nowS()) + days * 86400)}\`${tagInfo}`;
+    const text = '🎉🎉 **GIFT CARD REDEEMED!** 🎉🎉\n\n' + (days === 0
+      ? `⭐ **Premium: Permanent** (never expires)${tagInfo}`
+      : `⭐ **Premium activated: ${days} day(s)**\n⏰ Expires: **${dmyHM(Math.floor(nowS()) + days * 86400)}**${tagInfo}`) +
+      '\n\n✅ Unlimited /videos · multi-file links · folders · custom thumbnail\n👉 Send /videos to start watching!';
     return [true, text, { code, days, tag }];
   }
+  // after a redeem: success → plan status; failure → ways to still get Premium
+  const redeemButtons = ok => (ok ? [[Button.inline('⭐ My Premium', 'vid_plans')], [Button.inline('🏠 Main menu', 'menu_main')]]
+    : [[Button.inline('👥 Free Premium: invite friends', 'menu_referral')], [Button.inline('💳 Buy Premium', 'vid_plans')], [Button.inline('🏠 Main menu', 'menu_main')]]);
   const identityBlock = (first, last, username, uid) => `\n\nRedeemed by: ${`${first || ''} ${last || ''}`.trim() || '-'} (${username ? `@${username}` : '@-'})\nID: \`${uid}\``;
   async function notifyRedeem(uid, from, info) {
     const tagMsg = info.tag ? `\nTag: ${info.tag}` : '';
@@ -661,7 +671,7 @@ export function createBot(env, api, db, origin) {
   on(/^\/redeem\s+(\S+)/, async (m, g) => {
     let [ok, text, info] = await redeemCode(m.uid, g[1]);
     if (ok) text += identityBlock(m.from.first_name || '-', m.from.last_name, m.from.username, m.uid);
-    await m.reply(text);
+    await m.reply(text, { buttons: redeemButtons(ok) });
     if (ok && info) await notifyRedeem(m.uid, m.from, info);
   });
   // commands/ux.py one-click gift-card button
@@ -669,10 +679,10 @@ export function createBot(env, api, db, origin) {
     const code = e.data.split('redeem_')[1]?.trim().toUpperCase();
     if (!code) return e.answer('Invalid code.', true);
     let [ok, text, info] = await redeemCode(e.uid, code);
-    await e.answer(ok ? 'Redeemed!' : 'Failed');
+    await e.answer(ok ? '🎉 Redeemed! Premium activated' : 'Not redeemed — see the message', !ok);
     if (ok) text += identityBlock(e.from.first_name || '-', e.from.last_name, e.from.username, e.uid);
     if (ok && info) await notifyRedeem(e.uid, e.from, info);
-    if (!(await api.send(e.uid, text))) await e.reply(text);
+    if (!(await api.send(e.uid, text, { buttons: redeemButtons(ok) }))) await e.reply(text, { buttons: redeemButtons(ok) });
   });
 
   on(/^\/allowredeem\s+(\d+)/, async (m, g) => {
@@ -726,18 +736,16 @@ export function createBot(env, api, db, origin) {
     }
     // (the user row — the broadcast list — was already created by index.js trackActivity)
     await funnel('starts');
+    // gift card link (t.me/<bot>?start=gc_<code>): redeem straight away and answer before anything else
+    if (arg?.startsWith('gc_')) {
+      const [ok, text, info] = await redeemCode(uid, arg.slice(3));
+      await m.reply(text, { buttons: redeemButtons(ok) });
+      if (ok && info) await notifyRedeem(uid, m.from, info);
+    }
     const admins = await getAllAdmins();
     if (!admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
-    // gift card link (t.me/<bot>?start=gc_<code>): redeem straight away, same as /redeem <code>
-    if (arg?.startsWith('gc_')) {
-      let [ok, text, info] = await redeemCode(uid, arg.slice(3));
-      if (ok) text += identityBlock(m.from.first_name || '-', m.from.last_name, m.from.username, uid);
-      await m.reply(text, { buttons: mainMenuButtons(uid) });
-      if (ok && info) await notifyRedeem(uid, m.from, info);
-      return;
-    }
-    await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
+    if (!arg?.startsWith('gc_')) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
     if (refPending) await sendJoinPrompt(m.chatId, await missingChannels(uid));
     else if (arg === 'plans' && planViewHook) await planViewHook(m.chatId, uid); // t.me/<bot>?start=plans
   });
