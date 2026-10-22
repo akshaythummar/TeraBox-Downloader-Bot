@@ -6,22 +6,7 @@ import { Button, md } from './tg.js';
 
 // ---------------- constants (from main.py / tools.py) ---------------- //
 
-const PREMIUM_SET_KEY = 'premium_users';
-const PREMIUM_EXPIRY_KEY = 'premium_expiry';
-const BANNED_USERS_KEY = 'banned_users';
-const STATS_KEY = 'bot_stats';
-const AUDIT_LOG_KEY = 'audit_log';
 const MAINTENANCE_KEY = 'maintenance_mode';
-const DYNAMIC_ADMINS_KEY = 'dynamic_admins';
-const CUSTOM_TAGS_KEY = 'custom_tags';
-const GC_REDIS_KEY = 'gift_cards';
-const GC_TAGS_KEY = 'gc_tags';
-const GC_USED_KEY = 'gc_used';
-const THUMB_KEY = 'custom_thumbs';
-const LANG_KEY = 'user_lang';
-const LINK_COUNTS_KEY = 'link_counts';
-const INDEX_KEY = 'lib:index';
-const LOG_KEY = 'bot_log';
 const FREE_MODE_KEY = 'videos_free_mode';
 const PLANS_PHOTO = 'https://iili.io/nXUjApR.md.png';
 const GC_LIST_PER_PAGE = 10;
@@ -130,7 +115,7 @@ const uncache = key => CACHE.delete(key);
 
 export async function teraboxCfg(env, db) {
   return cached('tbcfg', async () => {
-    const rows = await db.all("SELECT key, value FROM kv WHERE key IN ('terabox_cfg:jstoken', 'terabox_cfg:cookie', 'terabox_cfg:proxy')");
+    const rows = await db.all("SELECT key, value FROM store WHERE key IN ('terabox_cfg:jstoken', 'terabox_cfg:cookie', 'terabox_cfg:proxy')");
     const o = Object.fromEntries(rows.map(r => [r.key.split(':')[1], r.value]));
     return { jstoken: o.jstoken || env.JSTOKEN || '', cookie: o.cookie || env.TB_COOKIE || '', proxy: (o.proxy || env.HLS_PROXY).replace(/\/$/, '') };
   });
@@ -220,17 +205,23 @@ export async function resolveShare(cfg, code, db) {
 // Resolver results are reused for 30 min: repeat links skip the ~3s resolver call and
 // the player starts faster. A stream URL from a 10-min-old resolve was verified to still
 // play; /m3u8 re-resolves fresh if a cached one ever fails.
+// Also kept in isolate memory, so a link and its /m3u8 plays usually skip D1 entirely.
 const SHARE_TTL = 1800;
+const shareMem = new Map(); // code → [slim, expires ms]
 export async function resolveCached(env, db, code, fresh = false) {
   const key = `tbshare:${code}`;
   if (!fresh) {
+    const m = shareMem.get(code);
+    if (m && m[1] > Date.now()) return { ...m[0], cached: true };
     const hit = await db.get(key);
     if (hit) return { ...JSON.parse(hit), cached: true };
   }
   const d = await resolveShare(await teraboxCfg(env, db), code, db);
   if (d) {
     const slim = { shareid: d.shareid, uk: d.uk, sign: d.sign, timestamp: d.timestamp, list: d.list.map(i => ({ fs_id: i.fs_id, server_filename: i.server_filename, size: i.size })) };
-    await db.set(key, JSON.stringify(slim), { ex: SHARE_TTL });
+    if (shareMem.size > 500) shareMem.clear(); // ponytail: crude bound, fine for one isolate's traffic
+    shareMem.set(code, [slim, Date.now() + SHARE_TTL * 1000]);
+    await db.set(key, JSON.stringify(slim), { ex: SHARE_TTL }).catch(e => console.log('share cache', e.message));
   }
   return d;
 }
@@ -257,18 +248,23 @@ export function createBot(env, api, db, origin) {
   const ymdHMS = (ts = nowS()) => { const p = parts(ts, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }); return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`; };
   const ymd = () => ymdHMS().slice(0, 10);
 
-  async function logx(line) {
-    console.log(line);
+  // logs table: kind 'bot' (/logs, /errors, panel) ~500 kept, 'audit' (/auditlog) 1000 kept
+  async function addLog(kind, line, keep) {
     try {
-      await db.lpush(LOG_KEY, `${ymdHMS()} [INFO] ${line}`);
-      if (Math.random() < 0.05) await db.ltrim(LOG_KEY, 0, 499); // ponytail: trim 1 in 20 writes, keeps ~500 lines
-    } catch {}
+      await db.run('INSERT INTO logs (kind, line) VALUES (?, ?)', kind, line);
+      // ponytail: trim 1 in 20 writes, keeps roughly `keep` lines
+      if (Math.random() < 0.05) await db.run('DELETE FROM logs WHERE kind = ?1 AND id < (SELECT id FROM logs WHERE kind = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)', kind, keep);
+    } catch (e) { console.log('log write failed:', e.message); }
   }
+  const logx = line => { console.log(line); return addLog('bot', `${ymdHMS()} [INFO] ${line}`, 500); };
+  // newest first
+  const readLogs = async (kind, n) => (await db.all('SELECT line FROM logs WHERE kind = ? ORDER BY id DESC LIMIT ?', kind, n)).map(r => r.line);
 
-  // --- runtime config (config_overrides hash, like /configset in Python) ---
+  // --- runtime config (store 'config_overrides' = JSON object, like /configset in Python) ---
   const csv = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
+  const overrides = async () => { try { return JSON.parse((await db.get('config_overrides')) || '{}'); } catch { return {}; } };
   const runtime = () => cached('cfg', async () => {
-    const o = await db.hgetall('config_overrides');
+    const o = await overrides();
     return {
       MAX_FILES_PER_REQUEST: int(o.MAX_FILES_PER_REQUEST ?? 10),
       VIDEOS_COOLDOWN_SECONDS: parseFloat(o.VIDEOS_COOLDOWN_SECONDS ?? env.VIDEOS_COOLDOWN_SECONDS ?? 1) || 0,
@@ -278,56 +274,51 @@ export function createBot(env, api, db, origin) {
     };
   });
   async function setOverride(key, value) {
-    await db.hset('config_overrides', key, value);
+    const o = await overrides();
+    if (value == null) delete o[key]; else o[key] = String(value);
+    await db.set('config_overrides', JSON.stringify(o));
     uncache('cfg');
   }
 
-  // --- users / admins / premium (main.py) ---
-  const isAdmin = async uid => ADMINS.includes(int(uid)) || cached(`admin:${uid}`, () => db.sismember(DYNAMIC_ADMINS_KEY, String(uid)));
-  const isBanned = uid => cached(`banned:${uid}`, () => db.sismember(BANNED_USERS_KEY, String(uid)));
-  const getAllAdmins = async () => [...new Set([...ADMINS, ...(await db.smembers(DYNAMIC_ADMINS_KEY)).map(int)])];
+  // --- users / admins / premium (main.py) — all in the users row ---
+  const urow = async uid => (await db.user(uid)) || {};
+  const isAdmin = async uid => ADMINS.includes(int(uid)) || cached(`admin:${uid}`, async () => (await urow(uid)).admin === 1);
+  const isBanned = uid => cached(`banned:${uid}`, async () => (await urow(uid)).banned === 1);
+  const getAllAdmins = () => cached('admins', async () => [...new Set([...ADMINS, ...(await db.all('SELECT id FROM users WHERE admin = 1')).map(r => r.id)])], 60);
 
   // adds days on top of any Premium the user already has (grantPremium starts from now)
   async function addPremiumDays(uid, days) {
-    const cur = int(await db.hget(PREMIUM_EXPIRY_KEY, String(uid)));
-    await db.hset(PREMIUM_EXPIRY_KEY, String(uid), Math.max(Math.floor(nowS()), cur) + days * 86400);
-    await db.sadd(PREMIUM_SET_KEY, String(uid));
-    await db.run("DELETE FROM kv WHERE key IN (?1, ?2, ?3)", `reminder_3d:${uid}`, `reminder_1d:${uid}`, `reminder_expired:${uid}`);
+    const cur = int((await urow(uid)).premium_until);
+    await db.setUser(uid, { premium_until: Math.max(Math.floor(nowS()), cur) + days * 86400, reminded: null });
     uncache(`premium:${uid}`);
   }
   async function grantPremium(uid, days) {
-    await db.hset(PREMIUM_EXPIRY_KEY, String(uid), Math.floor(nowS()) + days * 86400);
-    await db.sadd(PREMIUM_SET_KEY, String(uid));
-    await db.run("DELETE FROM kv WHERE key IN (?1, ?2, ?3)", `reminder_3d:${uid}`, `reminder_1d:${uid}`, `reminder_expired:${uid}`);
+    await db.setUser(uid, { premium_until: Math.floor(nowS()) + days * 86400, reminded: null });
     uncache(`premium:${uid}`);
   }
   async function revokePremium(uid) {
-    await db.hdel(PREMIUM_EXPIRY_KEY, String(uid));
-    await db.srem(PREMIUM_SET_KEY, String(uid));
-    if (int(uid) !== OWNER_ID && !(await isAdmin(uid))) await db.hdel(CUSTOM_TAGS_KEY, String(uid));
+    const keepTag = int(uid) === OWNER_ID || (await isAdmin(uid));
+    await db.run(`UPDATE users SET premium_until = NULL${keepTag ? '' : ', tag = NULL'} WHERE id = ?`, int(uid));
     uncache(`premium:${uid}`);
   }
   const isPremium = uid => cached(`premium:${uid}`, async () => {
-    const exp = await db.hget(PREMIUM_EXPIRY_KEY, String(uid));
+    const exp = (await urow(uid)).premium_until;
     if (exp == null) return false;
-    if (nowS() >= int(exp)) { await revokePremium(uid); return false; }
+    if (nowS() >= exp) { await revokePremium(uid); return false; }
     return true;
   });
-  const premiumRemaining = async uid => Math.max(int(await db.hget(PREMIUM_EXPIRY_KEY, String(uid))) - Math.floor(nowS()), 0);
+  const premiumRemaining = async uid => Math.max(int((await urow(uid)).premium_until) - Math.floor(nowS()), 0);
 
   async function getCustomTag(uid) {
-    const tag = await db.hget(CUSTOM_TAGS_KEY, String(uid));
-    if (int(uid) === OWNER_ID) { if (!tag) await db.hset(CUSTOM_TAGS_KEY, String(uid), 'OWNER'); return tag || 'OWNER'; }
-    if (await isAdmin(uid)) { if (!tag) await db.hset(CUSTOM_TAGS_KEY, String(uid), 'ADMIN'); return tag || 'ADMIN'; }
-    if (!(await isPremium(uid))) { if (tag) await db.hdel(CUSTOM_TAGS_KEY, String(uid)); return ''; }
+    const tag = (await urow(uid)).tag;
+    if (int(uid) === OWNER_ID) { if (!tag) await setCustomTag(uid, 'OWNER'); return tag || 'OWNER'; }
+    if (await isAdmin(uid)) { if (!tag) await setCustomTag(uid, 'ADMIN'); return tag || 'ADMIN'; }
+    if (!(await isPremium(uid))) { if (tag) await db.run('UPDATE users SET tag = NULL WHERE id = ?', int(uid)); return ''; }
     return tag || '';
   }
-  const setCustomTag = (uid, tag) => db.hset(CUSTOM_TAGS_KEY, String(uid), tag);
+  const setCustomTag = (uid, tag) => db.setUser(uid, { tag });
 
-  async function logAudit(action, admin, details = '') {
-    await db.lpush(AUDIT_LOG_KEY, JSON.stringify({ action, admin, details, time: ymdHMS() }));
-    await db.ltrim(AUDIT_LOG_KEY, 0, 999);
-  }
+  const logAudit = (action, admin, details = '') => addLog('audit', JSON.stringify({ action, admin, details, time: ymdHMS() }), 1000);
   // MAINTENANCE_OFF=true (deploy var) forces it off without a D1 write — for when D1 refuses writes
   const maintOff = String(env.MAINTENANCE_OFF) === 'true';
   const isMaintenance = () => !maintOff && cached('maint', async () => (await db.get(MAINTENANCE_KEY)) === '1');
@@ -335,11 +326,13 @@ export function createBot(env, api, db, origin) {
     if (on) {
       await db.set(MAINTENANCE_KEY, '1');
       if (reason) await db.set(`${MAINTENANCE_KEY}:reason`, reason);
-      else await db.delete(`${MAINTENANCE_KEY}:reason`);
-    } else await db.run('DELETE FROM kv WHERE key IN (?1, ?2)', MAINTENANCE_KEY, `${MAINTENANCE_KEY}:reason`);
+      else await db.del(`${MAINTENANCE_KEY}:reason`);
+    } else await db.del(MAINTENANCE_KEY, `${MAINTENANCE_KEY}:reason`);
     uncache('maint');
     return on;
   }
+  // a user row's download stats under the field names the texts used (user_stats_<id> hash)
+  const statsOf = u => ({ attempts: u.dl_attempts, total: u.dl_ok, success: u.dl_ok, failed: u.dl_failed, storage: u.dl_bytes, last_activity: u.last_activity });
   const getMaintenance = async () => [!maintOff && (await db.get(MAINTENANCE_KEY)) === '1', (await db.get(`${MAINTENANCE_KEY}:reason`)) || ''];
 
 
@@ -348,35 +341,29 @@ export function createBot(env, api, db, origin) {
     return !!r.ok && (['creator', 'administrator', 'member'].includes(r.result.status) || (r.result.status === 'restricted' && r.result.is_member));
   }
 
-  // commands/analytics.py track_download, as one D1 round trip
-  // n = how many files this call counts for (multi-file links record once, not per file)
-  async function recordDl(uid, size, link, ok = true, n = 1) {
-    if (n <= 0) return;
-    const k = `user_stats_${int(uid)}`;
-    const inc = (key, f, by) => db.q('INSERT INTO hashes(key, field, value) VALUES (?1, ?2, ?3) ON CONFLICT(key, field) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ?3 AS TEXT)', key, f, by);
-    const st = [inc(k, 'attempts', n)];
-    if (ok) {
-      st.push(inc(k, 'total', n), inc(k, 'success', n), inc(STATS_KEY, 'total_downloads', n),
-        db.q('INSERT INTO hashes(key, field, value) VALUES (?1, ?2, ?3) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', k, 'last_activity', ymdHMS()));
-      if (size > 0) st.push(inc(k, 'storage', size));
-      if (link) st.push(db.q('INSERT INTO sorted_sets(key, member, score) VALUES (?1, ?2, ?3) ON CONFLICT(key, member) DO UPDATE SET score = score + ?3', LINK_COUNTS_KEY, String(link).slice(0, 120), n));
-    } else st.push(inc(k, 'failed', n));
-    try {
-      await db.d.batch(st);
-      if (ok && link && Math.random() < 0.05) await db.ztrim(LINK_COUNTS_KEY, 500); // ponytail: prune 1 in 20, keeps ~top 500
-    } catch (e) { console.log('recordDl', e.message); }
+  // commands/analytics.py track_download + history (+ the FREE_HOURLY_LIMIT window) as ONE users-row
+  // write; totals and popular links go to the in-memory counters (counters day 'link').
+  // files = files sent, failedN = sends that failed, g = gate() result when the caller has it.
+  async function recordLink(uid, { files = [], failedN = 0, link, g = null, hourly = 0 }) {
+    const n = files.length;
+    if (!n && !failedN) return;
+    const f = { dl_attempts: ['+', n + failedN] };
+    if (failedN) f.dl_failed = ['+', failedN];
+    if (n) {
+      const history = g ? g.history : (await db.one('SELECT history FROM users WHERE id = ?', int(uid)))?.history;
+      const list = history ? JSON.parse(history) : [];
+      for (const x of files) list.push(JSON.stringify({ file: x.file_name, size: x.size, time: ymdHMS() }));
+      Object.assign(f, { dl_ok: ['+', n], dl_bytes: ['+', files.reduce((a, x) => a + x.sizebytes, 0)], last_activity: ymdHMS(), history: JSON.stringify(list.slice(-50)) });
+      db.bump('total_downloads', n);
+      if (link) db.bump(String(link).slice(0, 120), n, 'link');
+    }
+    // only when /configset FREE_HOURLY_LIMIT is on: links sent in the current hour
+    if (hourly && g) Object.assign(f, g.countExp > nowS() ? { hourly_n: g.count + 1 } : { hourly_n: 1, hourly_until: Math.floor(nowS()) + 3600 });
+    await db.setUser(uid, f).catch(e => console.log('recordLink', e.message));
   }
 
-  // daily funnel counters (funnel:<date> hash) — see /funnel
-  const funnel = (field, n = 1) => db.hincrby(`funnel:${ymd()}`, field, n).catch(() => {});
-
-  async function addHistory(uid, files) {
-    if (!files.length) return;
-    const raw = await db.get(`history_${uid}`);
-    const list = raw ? JSON.parse(raw) : [];
-    for (const f of files) list.push(JSON.stringify({ file: f.file_name, size: f.size, time: ymdHMS() }));
-    await db.set(`history_${uid}`, JSON.stringify(list.slice(-50)), { ex: 2592000 });
-  }
+  // daily funnel counters (counters day = IST date) — see /funnel
+  const funnel = (field, n = 1) => db.bump(field, n, ymd());
 
   // commands/library.py index_file — stream entries carry s(urlcode)/f(fid) instead of a
   // storage message id. One read + one batched write for any number of files.
@@ -385,8 +372,8 @@ export function createBot(env, api, db, origin) {
     for (const f of files.slice(0, 90)) { const n = normalizeName(f.file_name); if (n) byNorm.set(n, [...(byNorm.get(n) || []), f]); }
     if (!byNorm.size) return;
     const norms = [...byNorm.keys()];
-    const rows = await db.all(`SELECT field, value FROM hashes WHERE key = ? AND field IN (${norms.map(() => '?').join(',')})`, INDEX_KEY, ...norms);
-    const have = Object.fromEntries(rows.map(r => [r.field, JSON.parse(r.value)]));
+    const rows = await db.all(`SELECT name, entries FROM library WHERE name IN (${norms.map(() => '?').join(',')})`, ...norms);
+    const have = Object.fromEntries(rows.map(r => [r.name, JSON.parse(r.entries)]));
     const rows2 = [];
     for (const [norm, fs] of byNorm) {
       const entries = have[norm] || [];
@@ -398,7 +385,7 @@ export function createBot(env, api, db, origin) {
     // multi-row upserts: one statement per 45 rows (D1 allows 100 bound params per statement)
     for (let i = 0; i < rows2.length; i += 45) {
       const chunk = rows2.slice(i, i + 45);
-      await db.run(`INSERT INTO hashes(key, field, value) VALUES ${chunk.map(() => `('${INDEX_KEY}', ?, ?)`).join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`, ...chunk.flat());
+      await db.run(`INSERT INTO library (name, entries) VALUES ${chunk.map(() => '(?, ?)').join(', ')} ON CONFLICT (name) DO UPDATE SET entries = excluded.entries`, ...chunk.flat());
     }
   }
 
@@ -415,43 +402,23 @@ export function createBot(env, api, db, origin) {
     return files.length ? files : false;
   }
 
-  // Everything the link handler checks, read in one D1 round trip.
+  // Everything the link handler checks: the user's row + maintenance, in one D1 query.
   async function gate(uid) {
-    const u = String(uid);
-    const [kv, h, s] = await db.d.batch([
-      db.q('SELECT key, value, expires_at FROM kv WHERE key IN (?1, ?2, ?3)', MAINTENANCE_KEY, `check_${u}`, `check_${u}`),
-      db.q('SELECT key, value FROM hashes WHERE field = ?1 AND key IN (?2, ?3)', u, PREMIUM_EXPIRY_KEY, THUMB_KEY),
-      db.q('SELECT key FROM sets WHERE member = ?1 AND key IN (?2, ?3)', u, BANNED_USERS_KEY, DYNAMIC_ADMINS_KEY),
-    ]);
-    const now = nowS();
-    const k = Object.fromEntries(kv.results.filter(r => r.expires_at == null || r.expires_at > now).map(r => [r.key, r]));
-    const hv = Object.fromEntries(h.results.map(r => [r.key, r.value]));
-    const sv = new Set(s.results.map(r => r.key));
-    const exp = hv[PREMIUM_EXPIRY_KEY];
+    const r = await db.one('SELECT u.*, (SELECT value FROM store WHERE key = ?) maint FROM (SELECT 1) LEFT JOIN users u ON u.id = ?', MAINTENANCE_KEY, int(uid));
+    const now = nowS(), exp = r.premium_until;
+    const windowOn = r.hourly_until > now;
     return {
-      maintenance: !maintOff && k[MAINTENANCE_KEY]?.value === '1',
-      banned: sv.has(BANNED_USERS_KEY),
-      admin: ADMINS.includes(int(uid)) || sv.has(DYNAMIC_ADMINS_KEY),
-      premium: exp != null && now < int(exp),
-      expired: exp != null && now >= int(exp),
-      count: k[`check_${u}`]?.value,
-      countExp: k[`check_${u}`]?.expires_at,
-      thumb: hv[THUMB_KEY] || null,
+      maintenance: !maintOff && r.maint === '1',
+      banned: r.banned === 1,
+      admin: ADMINS.includes(int(uid)) || r.admin === 1,
+      premium: exp != null && now < exp,
+      expired: exp != null && now >= exp,
+      count: windowOn ? r.hourly_n : 0,
+      countExp: windowOn ? r.hourly_until : 0,
+      thumb: r.thumb || null,
+      history: r.history,
+      refPending: r.ref_pending === 1,
     };
-  }
-
-  // track active-today / member-since / new-user in one round trip
-  async function trackActivity(uid) {
-    try {
-      const todayKey = `active_${ymd()}`;
-      const [a, , b] = await db.d.batch([
-        db.q("INSERT INTO kv(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING value", todayKey),
-        db.q('INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `member_since:${uid}`, ymd()),
-        db.q("SELECT 1 FROM sets WHERE key = 'all_known_users' AND member = ? LIMIT 1", String(uid)),
-      ]);
-      if (int(a.results[0].value) === 1) await db.expire(todayKey, 86400);
-      if (!b.results.length && (await db.sadd('all_known_users', String(uid)))) { await db.hincrby(STATS_KEY, 'total_users', 1); await funnel('new_users'); }
-    } catch (e) { console.log('track_activity', e.message); }
   }
 
   async function watchUrl(code, fid, q) {
@@ -561,29 +528,20 @@ export function createBot(env, api, db, origin) {
     const st = [];
     for (let i = 0; i < count; i++) {
       const code = `AT-${uuid8()}`;
-      st.push(db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', GC_REDIS_KEY, code, String(days)));
-      if (tag) st.push(db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', GC_TAGS_KEY, code, tag));
+      st.push(db.q('INSERT INTO gift_cards (code, days, tag) VALUES (?, ?, ?) ON CONFLICT (code) DO NOTHING', code, days, tag || null));
       codes.push(code);
     }
-    await db.d.batch(st);
+    await db.batch(st);
     const label = days > 0 ? `${days} day(s)` : 'Permanent (Unlimited)';
     const lines = codes.map(c => (tag ? `\`/redeem ${c}\` (Tag: ${tag})` : `\`/redeem ${c}\``));
     await m.reply(`**${count} Gift Card(s) Generated**\n\nDuration: **${label}**${tag ? `\nTag: **${tag}**` : ''}\n\n**Send these to users:**\n${lines.join('\n')}`, { buttons: giftcardButtons(codes) });
   }, ADMIN);
 
   async function gcItems(withTags) {
-    const [unused, used, tags] = await Promise.all([db.hgetall(GC_REDIS_KEY), db.hgetall(GC_USED_KEY), withTags ? db.hgetall(GC_TAGS_KEY) : {}]);
-    const items = [];
-    for (const [code, d] of Object.entries(unused)) {
-      if (Number.isNaN(parseInt(d, 10))) continue;
-      items.push({ code, status: 'available', label: int(d) === 0 ? 'Permanent' : `${int(d)}d`, tag: tags[code] || '' });
-    }
-    for (const [code, v] of Object.entries(used)) {
-      const p = String(v || '').split(':');
-      const d = int(p[2]);
-      items.push({ code, status: 'used', label: d === 0 ? 'Permanent' : `${d}d`, user: p[0] || '?', tag: tags[code] || '' });
-    }
-    return items;
+    // available first, then used (same order as before)
+    return (await db.all('SELECT code, days, tag, used_by FROM gift_cards ORDER BY used_by IS NOT NULL')).map(r => ({
+      code: r.code, status: r.used_by == null ? 'available' : 'used', label: r.days === 0 ? 'Permanent' : `${r.days}d`, user: r.used_by ?? '?', tag: (withTags && r.tag) || '',
+    }));
   }
   function gcPage(items, page) {
     const pages = Math.max(1, Math.ceil(items.length / GC_LIST_PER_PAGE));
@@ -616,15 +574,15 @@ export function createBot(env, api, db, origin) {
 
   on(/^\/gcdel\s+(\S+)/, async (m, g) => {
     const code = g[1].toUpperCase();
-    await m.reply((await db.hdel(GC_REDIS_KEY, code)) ? `Deleted \`${code}\`.` : `Code \`${code}\` not found.`);
+    await m.reply((await db.run('DELETE FROM gift_cards WHERE code = ? AND used_by IS NULL', code)) ?`Deleted \`${code}\`.` : `Code \`${code}\` not found.`);
   }, ADMIN);
 
   const gcTrackButtons = [[Button.inline('Last 1h', 'gctrack_1h'), Button.inline('Last 24h', 'gctrack_24h'), Button.inline('Last 7d', 'gctrack_7d')], [Button.inline('All', 'gctrack_all')]];
   async function gcTrack(filter, allowIdFilters) {
-    const used = await db.hgetall(GC_USED_KEY);
+    const used = await db.all('SELECT code, days, used_by, used_at FROM gift_cards WHERE used_by IS NOT NULL');
     const now = Math.floor(nowS()), results = [];
-    for (const [code, v] of Object.entries(used)) {
-      const p = String(v || '').split(':'), uid = p[0] || '?', ts = int(p[1]), d = int(p[2]);
+    for (const { code, days: d, used_by: ub, used_at: ts } of used) {
+      const uid = String(ub);
       const age = ts ? (now - ts) / 3600 : 0;
       if (filter === '1h' && age > 1) continue;
       if (filter === '24h' && age > 24) continue;
@@ -637,10 +595,10 @@ export function createBot(env, api, db, origin) {
     if (!results.length) return null;
     let text = `**Gift Card Usage** (${results.length} found)\n\n${results.join('\n\n')}`;
     if (text.length > 3000) text = text.slice(0, 3000) + '\n\n... (truncated)';
-    return [text, Object.keys(used).length];
+    return [text, used.length];
   }
   on(/^\/gctrack(?:\s+(\S+))?/, async (m, g) => {
-    if (!(await db.hlen(GC_USED_KEY))) return m.reply('No redeemed gift cards found.');
+    if (!(await db.one('SELECT 1 FROM gift_cards WHERE used_by IS NOT NULL LIMIT 1'))) return m.reply('No redeemed gift cards found.');
     const r = await gcTrack(g[1], true);
     if (!r) return m.reply('No matching gift cards found.');
     await m.reply(r[0], { buttons: gcTrackButtons });
@@ -655,15 +613,13 @@ export function createBot(env, api, db, origin) {
   // commands/redeem_core.py
   async function redeemCode(uid, code) {
     code = String(code || '').trim().toUpperCase();
-    if ((await db.get(`gc_redeemed_${uid}`)) && (await isPremium(uid)))
+    if ((await urow(uid)).gc_redeemed === 1 && (await isPremium(uid)))
       return [false, 'You have already redeemed a gift card and your premium is still active.\nEach user can only redeem **1 gift card** while premium is active.\nWait for expiry or contact admin.', null];
-    const daysStr = await db.hget(GC_REDIS_KEY, code);
-    if (!daysStr || Number.isNaN(parseInt(daysStr, 10))) return [false, 'Invalid or already used gift card.', null];
-    const days = int(daysStr), tag = (await db.hget(GC_TAGS_KEY, code)) || '';
-    await db.hdel(GC_REDIS_KEY, code);
-    await db.hdel(GC_TAGS_KEY, code);
-    await db.hset(GC_USED_KEY, code, `${uid}:${Math.floor(nowS())}:${days}`);
-    await db.set(`gc_redeemed_${uid}`, '1');
+    // claimed in one statement, so two users pressing at once can't both get it
+    const card = await db.one('UPDATE gift_cards SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL RETURNING days, tag', int(uid), Math.floor(nowS()), code);
+    if (!card) return [false, 'Invalid or already used gift card.', null];
+    const days = card.days, tag = card.tag || '';
+    await db.setUser(uid, { gc_redeemed: 1 });
     if (tag) await setCustomTag(uid, tag);
     await grantPremium(uid, days === 0 ? 99999 : days);
     const tagInfo = tag ? `\nTag: **${tag}**` : '';
@@ -697,7 +653,7 @@ export function createBot(env, api, db, origin) {
   });
 
   on(/^\/allowredeem\s+(\d+)/, async (m, g) => {
-    await db.delete(`gc_redeemed_${g[1]}`);
+    await db.run('UPDATE users SET gc_redeemed = 0 WHERE id = ?', int(g[1]));
     await logAudit('ALLOW_REDEEM', m.uid, `Reset GC redemption for ${g[1]}`);
     await m.reply(`User \`${g[1]}\` can now redeem another gift card.`);
   }, OWNER);
@@ -715,6 +671,8 @@ export function createBot(env, api, db, origin) {
   });
 
   // ==================== broadcasts (queued; the cron sends 40/minute) ====================
+  // the broadcast list = every user row (a full count; only used when a broadcast is queued)
+  const userCount = async () => (await db.one('SELECT COUNT(*) n FROM users')).n;
   async function queueBroadcast(row) {
     const cols = Object.keys(row);
     await db.run(`INSERT INTO broadcasts (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, ...cols.map(c => row[c]));
@@ -725,7 +683,7 @@ export function createBot(env, api, db, origin) {
     const text = m.text.split('/broadcast_legacy')[1].trim();
     if (!text) return m.reply('**Usage:** `/broadcast_legacy <message>`\nSend a message to channel members (legacy). Use /broadcast for all users.');
     const status = await m.reply('Broadcasting...');
-    await queueBroadcast({ kind: 'legacy', mode: 'text', text, total: await db.scard('all_known_users'), status_chat: m.chatId, status_msg: status.id });
+    await queueBroadcast({ kind: 'legacy', mode: 'text', text, total: await userCount(), status_chat: m.chatId, status_msg: status.id });
   }, ADMIN);
 
   // ==================== /start ====================
@@ -743,8 +701,7 @@ export function createBot(env, api, db, origin) {
         await api.send(ref, `👋 **${escapeMarkdown(name)}** opened your link!\n\n⏳ Your +${REF_DAYS} day Premium is added as soon as they join ${missing.join(', ')}.`);
       }
     }
-    // /start-only users get broadcasts too (previously only users who had sent a link)
-    if (await db.sadd('all_known_users', String(uid))) { await db.hincrby(STATS_KEY, 'total_users', 1); await funnel('new_users'); }
+    // (the user row — the broadcast list — was already created by index.js trackActivity)
     await funnel('starts');
     const admins = await getAllAdmins();
     if (!admins.includes(uid))
@@ -798,7 +755,7 @@ mp4, mkv, webm, mov, avi, flv, wmv, m4v, mpg, mpeg, 3gp, ts, and more...
   });
 
   onCb(/^menu_history$/, async e => {
-    const raw = await db.get(`history_${e.uid}`);
+    const raw = (await urow(e.uid)).history;
     let text = '📭 No download history yet.';
     if (raw) {
       const lines = JSON.parse(raw).slice(-10).reverse().map((x, i) => { const en = JSON.parse(x); return `${i + 1}. \`${en.file.slice(0, 30)}\` (${en.size})`; });
@@ -850,7 +807,7 @@ You will receive premium instantly!
 `, { buttons: back('menu_main') }));
 
   onCb(/^menu_mystats$/, async e => {
-    const h = await db.hgetall(`user_stats_${e.uid}`);
+    const h = statsOf(await urow(e.uid));
     const success = int(h.success) || int(h.total), failed = int(h.failed);
     await e.edit(
       '┏━━━━━━━━━━━━━━━━━⍟\n┃  📊 𝐌𝐲 𝐒𝐭𝐚𝐭𝐬\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
@@ -894,7 +851,7 @@ Choose your preferred language:
 
   onCb(/^setlang_/, async e => {
     const code = e.data.replace('setlang_', '');
-    await db.set(`${LANG_KEY}_${e.uid}`, code);
+    await db.setUser(e.uid, { lang: code });
     await e.answer(`Language set to ${LANGUAGES[code] || 'English'}!`);
     await e.edit(welcome(e.from.first_name), { buttons: mainMenuButtons(e.uid) });
   });
@@ -920,8 +877,20 @@ Choose an admin action 👇
     [Button.inline('◀️ Back', 'menu_main')],
   ] }));
 
+  // admin_stats + /stats: counters (day 'all'), active premium, banned, unused gift cards, users seen today
+  async function botTotals() {
+    const today = Number(ymd().replace(/-/g, '')) * 100;
+    await db.flush(true); // include this isolate's not-yet-written counters
+    const r = await db.one(`SELECT
+        (SELECT json_group_object(name, n) FROM counters WHERE day = 'all') s,
+        (SELECT COUNT(*) FROM users WHERE premium_until > ?) prem,
+        (SELECT COUNT(*) FROM users WHERE banned = 1) banned,
+        (SELECT COUNT(*) FROM gift_cards WHERE used_by IS NULL) gc,
+        (SELECT COUNT(DISTINCT uid) FROM activity WHERE hour >= ?) active`, Math.floor(nowS()), today);
+    return { ...r, s: JSON.parse(r.s || '{}') };
+  }
   adminCb(/^admin_stats$/, async e => {
-    const [s, prem, banned, gc, active] = await Promise.all([db.hgetall(STATS_KEY), db.scard(PREMIUM_SET_KEY), db.scard(BANNED_USERS_KEY), db.hlen(GC_REDIS_KEY), db.get(`active_${ymd()}`)]);
+    const { s, prem, banned, gc, active } = await botTotals();
     await e.edit(`
 ┏━━━━━━━━━━━━━━━━━⍟
 ┃  📊 𝐁𝐨𝐭 𝐒𝐭𝐚𝐭𝐢𝐬𝐭𝐢𝐜𝐬
@@ -999,7 +968,7 @@ Owner and Admins get auto-tagged if no custom tag set.
 `, { buttons: back('menu_admin') }));
 
   adminCb(/^admin_ban$/, async e => {
-    const banned = await db.smembers(BANNED_USERS_KEY);
+    const banned = (await db.all('SELECT id FROM users WHERE banned = 1')).map(r => r.id);
     const lines = [];
     for (const uid of banned.slice(0, 10)) { const n = await nameOf(uid); lines.push(n ? `• ${n[0]} — \`${uid}\`` : `• Unknown — \`${uid}\``); }
     await e.edit(`
@@ -1121,7 +1090,7 @@ Restore: reply to the file with \`/restore\`
 
   // ==================== user mgmt / plans ====================
   on(/^\/remove (.*)/, async (m, g) => {
-    if (await db.get(`check_${g[1]}`)) { await db.delete(`check_${g[1]}`); await m.reply(`Removed ${g[1]} from the list.`); }
+    if (await db.run('UPDATE users SET hourly_n = 0, hourly_until = NULL WHERE id = ? AND hourly_until > ?', int(g[1]), Math.floor(nowS()))) { await m.reply(`Removed ${g[1]} from the list.`); }
     else await m.reply(`${g[1]} is not in the list.`);
   }, ADMIN);
 
@@ -1158,7 +1127,7 @@ Contact @buggybeats for premium.
   }, ADMIN);
 
   on(/^\/premium_users/, async m => {
-    const all = await db.smembers(PREMIUM_SET_KEY);
+    const all = (await db.all('SELECT id FROM users WHERE premium_until IS NOT NULL ORDER BY premium_until')).map(r => r.id);
     if (!all.length) return m.reply('No premium users found.');
     const lines = [];
     for (const uid of all) {
@@ -1172,8 +1141,7 @@ Contact @buggybeats for premium.
   }, ADMIN);
 
   on(/^\/demote_all_premium/, async m => {
-    await db.delete(PREMIUM_SET_KEY);
-    await db.delete(PREMIUM_EXPIRY_KEY);
+    await db.run('UPDATE users SET premium_until = NULL, reminded = NULL WHERE premium_until IS NOT NULL');
     CACHE.clear();
     await m.reply('All premium users demoted successfully.');
   }, ADMIN);
@@ -1207,11 +1175,10 @@ Contact @buggybeats for premium.
         return null;
       })(),
       getCustomTag(m.uid), // also drops the tag of an expired premium user
-      trackActivity(m.uid),
       g.expired ? revokePremium(m.uid) : null,
     ]);
     if (joined) return hm.edit(`Please join ${joined} then send me the link again.`);
-    confirmReferral(m.uid, m.from.first_name).catch(() => {}); // no-op unless this user has a pending referral
+    if (g.refPending) await confirmReferral(m.uid, m.from.first_name).catch(e => console.log('confirmReferral', e.message));
 
     const files = await filesP;
     if (!files) return hm.edit(ERRORS.api_unavailable);
@@ -1219,34 +1186,34 @@ Contact @buggybeats for premium.
       return hm.edit(`⚠️ This link has **${files.length} files**.\nFree users can download max **${rt.MAX_FILES_PER_REQUEST}** files.\nUpgrade to **Premium** for unlimited.`);
 
     const todo = g.premium ? files : files.slice(0, 1);
-    const after = () => [db.set(`check_${m.uid}`, int(g.count) + 1, { ex: g.countExp ? Math.max(Math.ceil(g.countExp - nowS()), 1) : 3600 })];
+    const hourly = free ? rt.FREE_HOURLY_LIMIT : 0;
     if (todo.length === 1) {
       const f = todo[0], ext = extOf(f.file_name);
       if (!VIDEO_EXTENSIONS.has(ext))
         return hm.edit(`Sorry! File type \`${ext}\` is not supported (photos aren't supported right now).\nSupported: ${[...VIDEO_EXTENSIONS].sort().join(', ')}`);
       const took = `${((Date.now() - T0) / 1000).toFixed(1)}s`;
       if (!(await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, took), quality, g.thumb))) {
-        await recordDl(m.uid, 0, shorturl, false);
+        await recordLink(m.uid, { failedN: 1, g });
         return hm.edit(`Sorry! Download Failed but you can download it from [here](${url}).`, { buttons: [] });
       }
       console.log(`link ${shorturl} posted in ${Date.now() - T0}ms`);
       await Promise.all([
         hm.edit(`✅ Ready in ${((Date.now() - T0) / 1000).toFixed(1)}s ⚡\n\n👥 Invite friends → +1 day Premium each: /ref`, { buttons: [] }),
         funnel('links'),
-        recordDl(m.uid, f.sizebytes, shorturl, true), libIndex([f]), addHistory(m.uid, [f]), ...after(),
+        recordLink(m.uid, { files: [f], link: shorturl, g, hourly }), libIndex([f]),
       ]);
       return;
     }
-    const [sent, failed] = await sendMany(m, todo, tag, quality, shorturl, g.thumb);
+    const [sent, failed] = await sendMany(m, todo, tag, quality, shorturl, g.thumb, g, hourly);
     if (sent) await funnel('links');
-    await Promise.all([hm.edit(`✅ Complete!\nSent: ${sent}/${todo.length} | Failed: ${failed}`, { buttons: [] }), ...after()]);
+    await hm.edit(`✅ Complete!\nSent: ${sent}/${todo.length} | Failed: ${failed}`, { buttons: [] });
   }
 
   // multi-file / folder: one stream post per video
   // ponytail: 15 posts per message keeps one request under the free plan's 50 subrequests
   // (each post can cost 2 Telegram calls); the rest are listed so the user can open them.
   const MAX_POSTS = 15;
-  async function sendMany(m, todo, tag, quality, link, thumb = null) {
+  async function sendMany(m, todo, tag, quality, link, thumb = null, g = null, hourly = 0) {
     const ok = [];
     let failed = 0, sendFails = 0;
     const videos = todo.filter(f => VIDEO_EXTENSIONS.has(extOf(f.file_name)));
@@ -1258,10 +1225,8 @@ Contact @buggybeats for premium.
     const rest = videos.slice(MAX_POSTS);
     if (rest.length) await m.reply(`➕ ${rest.length} more video(s) in this link:\n${rest.slice(0, 40).map(f => `• \`${captionName(f.file_name)}\``).join('\n')}\n\nUse /search <name> to open them.`);
     await Promise.all([
-      recordDl(m.uid, ok.reduce((a, f) => a + f.sizebytes, 0), link, true, ok.length),
-      recordDl(m.uid, 0, link, false, sendFails),
+      recordLink(m.uid, { files: ok, failedN: sendFails, link, g, hourly }),
       libIndex([...ok, ...rest]),
-      addHistory(m.uid, ok),
     ]);
     return [ok.length, failed];
   }
@@ -1269,8 +1234,8 @@ Contact @buggybeats for premium.
   on(/^\/cleandownloads/, m => m.reply('Downloads folder does not exist. Nothing to clean.'), ADMIN);
 
   on(/^\/mystatus/, async m => {
-    const tag = await getCustomTag(m.uid), h = await db.hgetall(`user_stats_${m.uid}`);
-    const exp = await db.hget(PREMIUM_EXPIRY_KEY, String(m.uid));
+    const tag = await getCustomTag(m.uid), u = await urow(m.uid), h = statsOf(u);
+    const exp = u.premium_until;
     const prem = exp ? `🟡 Premium expires in ${Math.max(Math.floor((parseFloat(exp) - nowS()) / 86400), 0)} days` : '🆓 Free user';
     await m.reply(`**👤 Your Status**\n\n💰 **Premium:** ${prem}\n${tag ? `🏷 Tag: **${tag}**` : '🏷 No custom tag'}\n📊 **Download Stats:**\n` +
       `• Total downloads: **${int(h.total)}**\n• Total storage: **${fmtSize(int(h.storage))}**\n• Last activity: **${h.last_activity || 'Never'}**\n\n💡 Use /plan to check premium plans, /tag to manage your tag.`);
@@ -1278,7 +1243,7 @@ Contact @buggybeats for premium.
 
   // ==================== owner: server ops (Workers equivalents) ====================
   async function bootCard(chatId) {
-    const boots = await db.incr('stats:boot_count');
+    const boots = await db.incr('boot_count');
     const [maint] = await getMaintenance();
     await api.send(chatId,
       '┏━━━━━━━━━━━━━━━━━⍟\n┃  ⚡ **𝐒𝐘𝐒𝐓𝐄𝐌 𝐎𝐍𝐋𝐈𝐍𝐄**\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
@@ -1398,7 +1363,7 @@ Contact @buggybeats for premium.
   }, ADMIN);
 
   on(/^\/history/, async m => {
-    const raw = await db.get(`history_${m.uid}`);
+    const raw = (await urow(m.uid)).history;
     if (!raw) return m.reply('No download history yet.');
     const h = JSON.parse(raw);
     const lines = [...h].reverse().map((x, i) => { const e = JSON.parse(x); return `${i + 1}. \`${e.file}\` (${e.size}) — ${e.time}`; });
@@ -1413,16 +1378,16 @@ Contact @buggybeats for premium.
     if (!m.replyTo) return m.reply('Reply to an image with `/setthumb` to set your custom thumbnail.');
     const photo = m.replyTo.photo?.at(-1);
     if (!photo) return m.reply('Please reply to a **photo/image** only.');
-    await db.hset(THUMB_KEY, String(m.uid), photo.file_id);
+    await db.setUser(m.uid, { thumb: photo.file_id });
     await m.reply('✅ Custom thumbnail set!\nIt will be used on your downloads.');
   });
-  on(/^\/removethumb/, async m => { await db.hdel(THUMB_KEY, String(m.uid)); await m.reply('✅ Custom thumbnail removed.'); });
+  on(/^\/removethumb/, async m => { await db.run('UPDATE users SET thumb = NULL WHERE id = ?', m.uid); await m.reply('✅ Custom thumbnail removed.'); });
 
   on(/^\/lang(?:\s+(\w+))?/, async (m, g) => {
     const code = g[1]?.toLowerCase();
     if (!code || !(code in LANGUAGES))
       return m.reply(`**Select Language:**\n\n${Object.entries(LANGUAGES).map(([k, v]) => `\`${k}\` — ${v}`).join('\n')}\n\nUsage: \`/lang ne\``);
-    await db.set(`${LANG_KEY}_${m.uid}`, code);
+    await db.setUser(m.uid, { lang: code });
     await m.reply(LANG_SET[code].replace('{lang}', LANGUAGES[code]));
   });
 
@@ -1441,12 +1406,12 @@ Contact @buggybeats for premium.
     const files = await getFiles(url);
     if (!files) return hm.edit('Sorry! Could not fetch folder contents.');
     if (files.length === 1) { await hm.delete(); return handleMessage({ ...m, text: url }); }
-    const [sent, failed] = await sendMany(m, files, await getCustomTag(m.uid), null, url, await db.hget(THUMB_KEY, String(m.uid)));
+    const [sent, failed] = await sendMany(m, files, await getCustomTag(m.uid), null, url, (await urow(m.uid)).thumb);
     await hm.edit(`✅ Folder complete!\nSent: ${sent}/${files.length} | Failed: ${failed}`, { buttons: [] });
   });
 
   on(/^\/banned_users/, async m => {
-    const banned = await db.smembers(BANNED_USERS_KEY);
+    const banned = (await db.all('SELECT id FROM users WHERE banned = 1')).map(r => r.id);
     if (!banned.length) return m.reply('No banned users.');
     const lines = [];
     for (const uid of banned) { const n = await nameOf(uid); lines.push(`• ${n ? n[0] : 'Unknown'} (@${n ? n[1] : '-'}) — \`${uid}\``); }
@@ -1456,7 +1421,7 @@ Contact @buggybeats for premium.
   on(/^\/usage/, m => m.reply('**Bot Resource Usage**\n\n**Disk:** N/A\n**RAM:** N/A\n**Downloads:** 0 files (0MB) — streaming only\n**Platform:** Cloudflare Workers\n**Uptime:** serverless (always on)\n'), ADMIN);
 
   on(/^\/logs(?:\s+(\d+))?/, async (m, g) => {
-    const lines = await db.lrange(LOG_KEY, 0, Math.min(int(g[1] || 20), 100) - 1);
+    const lines = await readLogs('bot', Math.min(int(g[1] || 20), 100));
     if (!lines.length) return m.reply('Log file is empty.');
     await m.reply('```\n' + lines.reverse().join('\n').slice(-3000) + '\n```');
   }, ADMIN);
@@ -1468,7 +1433,7 @@ Contact @buggybeats for premium.
     const minutes = int(g[1]);
     if (minutes > 1440) return m.reply('Max 1440 minutes (24 hours).');
     await m.reply(`Announcement scheduled in ${minutes} minute(s).`);
-    await queueBroadcast({ kind: 'announce', mode: 'text', text: g[2], send_at: Math.floor(nowS()) + minutes * 60, total: await db.scard('all_known_users'), status_chat: m.chatId, status_msg: m.id });
+    await queueBroadcast({ kind: 'announce', mode: 'text', text: g[2], send_at: Math.floor(nowS()) + minutes * 60, total: await userCount(), status_chat: m.chatId, status_msg: m.id });
   }, OWNER);
 
   on(/^\/panic/, async m => {
@@ -1477,13 +1442,13 @@ Contact @buggybeats for premium.
     await m.reply('🚨 **EMERGENCY STOP ACTIVATED**\n\nAll download services are now **STOPPED**.\nUsers will see: `Bot under maintenance`\n\nUse `/resume` to bring bot back online.');
   }, OWNER);
   on(/^\/resume/, async m => {
-    await db.delete(MAINTENANCE_KEY); uncache('maint');
+    await db.del(MAINTENANCE_KEY, `${MAINTENANCE_KEY}:reason`); uncache('maint');
     await logAudit('RESUME', m.uid, 'Bot resumed from panic/maintenance');
     await m.reply('✅ **Bot is back online!** All services resumed.');
   }, OWNER);
 
   on(/^\/auditlog(?:\s+(\d+))?/, async (m, g) => {
-    const entries = await db.lrange(AUDIT_LOG_KEY, 0, Math.min(int(g[1] || 15), 50) - 1);
+    const entries = await readLogs('audit', Math.min(int(g[1] || 15), 50));
     if (!entries.length) return m.reply('No audit log entries found.');
     const lines = entries.map((x, i) => { const e = JSON.parse(x); return `${i + 1}. \`${e.time}\` — **${e.action}** by \`${e.admin}\`${e.details ? `\n   ${e.details}` : ''}`; });
     let text = `**📝 Audit Log (last ${lines.length}):**\n\n${lines.join('\n\n')}`;
@@ -1507,7 +1472,7 @@ Contact @buggybeats for premium.
     const uid = int(g[1]);
     if (uid === OWNER_ID) return m.reply('Cannot remove owner from admin.');
     if (await isAdmin(uid)) return m.reply(`User \`${uid}\` is already an admin.`);
-    await db.sadd(DYNAMIC_ADMINS_KEY, String(uid)); uncache(`admin:${uid}`);
+    await db.setUser(uid, { admin: 1 }); uncache(`admin:${uid}`); uncache('admins');
     await logAudit('ADD_ADMIN', m.uid, `Added user ${uid}`);
     const n = await nameOf(uid);
     await m.reply(n ? `✅ **Admin Added!**\n\n**Name:** ${n[0]}\n**Username:** @${n[1]}\n**ID:** \`${uid}\`` : `✅ Admin \`${uid}\` added (user not found for name).`);
@@ -1516,15 +1481,15 @@ Contact @buggybeats for premium.
     const uid = int(g[1]);
     if (uid === OWNER_ID) return m.reply('Cannot remove owner from admin.');
     if (ADMINS.includes(uid)) return m.reply(`❌ Cannot remove \`${uid}\` — they are a **config admin**.\nEdit ADMINS in wrangler.toml to remove them.`);
-    if (!(await db.sismember(DYNAMIC_ADMINS_KEY, String(uid)))) return m.reply(`User \`${uid}\` is not an admin.`);
-    await db.srem(DYNAMIC_ADMINS_KEY, String(uid)); uncache(`admin:${uid}`);
+    if ((await urow(uid)).admin !== 1) return m.reply(`User \`${uid}\` is not an admin.`);
+    await db.run('UPDATE users SET admin = 0 WHERE id = ?', uid); uncache(`admin:${uid}`); uncache('admins');
     await logAudit('REMOVE_ADMIN', m.uid, `Removed user ${uid}`);
     await m.reply(`✅ Admin \`${uid}\` removed.`);
   }, OWNER);
   on(/^\/adminlist/, async m => {
     const lines = [];
     for (const uid of ADMINS) { const n = await nameOf(uid); lines.push(n ? `• ${n[0]} (@${n[1]}) — \`${uid}\` 🔒 Config` : `• Unknown — \`${uid}\` 🔒 Config`); }
-    for (const uid of await db.smembers(DYNAMIC_ADMINS_KEY)) {
+    for (const { id: uid } of await db.all('SELECT id FROM users WHERE admin = 1')) {
       if (ADMINS.includes(int(uid))) continue;
       const n = await nameOf(uid);
       lines.push(n ? `• ${n[0]} (@${n[1]}) — \`${uid}\` ⚡ Dynamic` : `• Unknown — \`${uid}\` ⚡ Dynamic`);
@@ -1539,13 +1504,13 @@ Contact @buggybeats for premium.
   const renewResult = (uid, days, was) => `**${uid}** ${was ? 'renewed' : 'granted'} for **${days} day(s)**.\nExpires: \`${dmyHM(Math.floor(nowS()) + days * 86400)}\``;
 
   on(/^\/finduser\s+(\d+)/, async (m, g) => {
-    const uid = g[1], banned = await db.sismember(BANNED_USERS_KEY, uid), prem = await isPremium(uid);
+    const uid = g[1], banned = (await urow(uid)).banned === 1, prem = await isPremium(uid);
     const rem = prem ? await premiumRemaining(uid) : 0, tag = await getCustomTag(int(uid)), n = await nameOf(uid);
     const premTxt = prem ? (rem > 9000000 ? 'Permanent' : `Premium (${Math.floor(rem / 86400)}d ${Math.floor((rem % 86400) / 3600)}h left)`) : 'Free';
     await m.reply(`**User \`${uid}\`**\n${n ? n[0] : 'Unknown'} (@${n ? n[1] : '-'})\n• Status: ${banned ? 'Banned' : 'Active'}\n• ${premTxt}\n• ${tag ? `Tag: **${tag}**` : 'No tag'}`);
   }, ADMIN);
-  on(/^\/ban\s+(\d+)/, async (m, g) => { await db.sadd(BANNED_USERS_KEY, g[1]); uncache(`banned:${g[1]}`); await m.reply(`Banned user \`${g[1]}\`.`); }, ADMIN);
-  on(/^\/unban\s+(\d+)/, async (m, g) => { await db.srem(BANNED_USERS_KEY, g[1]); uncache(`banned:${g[1]}`); await m.reply(`Unbanned user \`${g[1]}\`.`); }, ADMIN);
+  on(/^\/ban\s+(\d+)/, async (m, g) => { await db.setUser(g[1], { banned: 1 }); uncache(`banned:${g[1]}`); await m.reply(`Banned user \`${g[1]}\`.`); }, ADMIN);
+  on(/^\/unban\s+(\d+)/, async (m, g) => { await db.run('UPDATE users SET banned = 0 WHERE id = ?', int(g[1])); uncache(`banned:${g[1]}`); await m.reply(`Unbanned user \`${g[1]}\`.`); }, ADMIN);
   on(/^\/addpremium\s+(\d+)\s+(\d+)/, async (m, g) => {
     const days = parseDays(g[2]);
     if (!days) return m.reply('**Usage:** `/addpremium <id> <days>`');
@@ -1571,31 +1536,31 @@ Contact @buggybeats for premium.
   }, ADMIN);
   on(/^\/gcheck\s+(\S+)/, async (m, g) => {
     const code = g[1].trim().toUpperCase();
-    const [days, tag, used] = await Promise.all([db.hget(GC_REDIS_KEY, code), db.hget(GC_TAGS_KEY, code), db.hget(GC_USED_KEY, code)]);
-    const t = tag ? `\nTag: **${tag}**` : '';
-    if (used) return m.reply(`\`${code}\` — **USED** by \`${String(used).split(':')[0] || '?'}\`.${t}`);
+    const card = await db.one('SELECT days, tag, used_by FROM gift_cards WHERE code = ?', code);
+    const days = card ? String(card.days) : null, t = card?.tag ? `\nTag: **${card.tag}**` : '';
+    if (card?.used_by != null) return m.reply(`\`${code}\` — **USED** by \`${card.used_by}\`.${t}`);
     if (days == null) return m.reply(`\`${code}\` — invalid or unknown.`);
     await m.reply(`\`${code}\` — **VALID** (${days !== '0' ? `${days} day(s)` : 'Permanent'}).${t}`);
   }, ADMIN);
   on(/^\/untag\s+([\d,\s;]+)/, async (m, g) => {
     const ids = parseIds(g[1]);
     if (!ids.length) return m.reply('**Usage:** `/untag <id1,id2..>`');
-    for (const id of ids) await db.hdel(CUSTOM_TAGS_KEY, String(id));
+    await db.run(`UPDATE users SET tag = NULL WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
     await m.reply(`Untagged ${ids.length}/${ids.length}.`);
   }, ADMIN);
 
   // ==================== commands/analytics.py ====================
   on(/^\/stats/, async m => {
-    const [s, active, prem, banned, gc, topRows, links] = await Promise.all([
-      db.hgetall(STATS_KEY), db.get(`active_${ymd()}`), db.scard(PREMIUM_SET_KEY), db.scard(BANNED_USERS_KEY), db.hlen(GC_REDIS_KEY),
-      db.all("SELECT key, CAST(value AS INTEGER) n FROM hashes WHERE key LIKE 'user_stats_%' AND field = 'total' ORDER BY n DESC LIMIT 5"),
-      db.zrevrange(LINK_COUNTS_KEY, 3),
+    const [{ s, active, prem, banned, gc }, topRows, links] = await Promise.all([
+      botTotals(),
+      db.all('SELECT id, dl_ok n FROM users WHERE dl_ok > 0 ORDER BY dl_ok DESC LIMIT 5'), // ponytail: scans all users; admin-only, fine
+      db.all("SELECT name, n FROM counters WHERE day = 'link' ORDER BY n DESC LIMIT 3").then(rows => rows.map(r => [r.name, r.n])),
     ]);
     const lines = ['**Bot Statistics**', '', `**Total Downloads:** ${int(s.total_downloads)}`, `**Total Users:** ${int(s.total_users)}`,
       `**Active Today:** ${int(active)}`, `**Premium Users:** ${prem}`, `**Banned Users:** ${banned}`, `**Gift Cards:** ${gc}`, `**Library Hits:** ${int(s.lib_hits)}`, '', '**Top 5 Users:**'];
     if (!topRows.length) lines.push('__No user data yet.__');
     for (const [i, r] of topRows.entries()) {
-      const uid = r.key.split('_').pop(), u = await api.user(uid);
+      const uid = r.id, u = await api.user(uid);
       let name = u ? `${u.first_name || ''} ${u.last_name || ''}`.trim() : '';
       if (u?.username) name = `${name} (@${u.username})`.trim();
       lines.push(`${i + 1}. ${name ? `${name} \`${uid}\`` : `\`${uid}\``} — ${r.n} downloads`);
@@ -1607,16 +1572,17 @@ Contact @buggybeats for premium.
   // /funnel [days] — the daily counters from funnel(): who arrives, uses the bot, tries, pays
   on(/^\/funnel(?:\s+(\d+))?/, async (m, g) => {
     const days = Math.min(Math.max(int(g[1] || 7), 1), 31);
-    const keys = Array.from({ length: days }, (_, i) => `funnel:${ymdHMS(nowS() - i * 86400).slice(0, 10)}`);
-    const rows = await db.all(`SELECT key, field, value FROM hashes WHERE key IN (${keys.map(() => '?').join(',')})`, ...keys);
+    const keys = Array.from({ length: days }, (_, i) => ymdHMS(nowS() - i * 86400).slice(0, 10));
+    await db.flush(true);
+    const rows = await db.all(`SELECT day, name, n FROM counters WHERE day IN (${keys.map(() => '?').join(',')})`, ...keys);
     const by = {};
-    for (const r of rows) (by[r.key] ??= {})[r.field] = int(r.value);
+    for (const r of rows) (by[r.day] ??= {})[r.name] = r.n;
     const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue'];
     const tot = Object.fromEntries(F.map(f => [f, keys.reduce((a, k) => a + (by[k]?.[f] || 0), 0)]));
     const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
     const lines = keys.map(k => {
       const d = by[k] || {};
-      return `\`${k.slice(12)}\` 👤${d.new_users || 0} 🔗${d.links || 0} 👥${d.referrals || 0} 🎬${d.videos || 0} 🎁${d.trials || 0} 🛒${d.orders || 0} 💰${d.paid || 0} ₹${d.revenue || 0}`;
+      return `\`${k.slice(5)}\` 👤${d.new_users || 0} 🔗${d.links || 0} 👥${d.referrals || 0} 🎬${d.videos || 0} 🎁${d.trials || 0} 🛒${d.orders || 0} 💰${d.paid || 0} ₹${d.revenue || 0}`;
     });
     await m.reply(
       `**📈 Funnel — last ${days} day(s)**\n\n` +
@@ -1634,7 +1600,7 @@ Contact @buggybeats for premium.
     );
   }, ADMIN);
   on(/^\/userstats(?:\s+(\d+))?/, async (m, g) => {
-    const target = g[1] ? int(g[1]) : m.uid, h = await db.hgetall(`user_stats_${target}`), tag = await db.hget(CUSTOM_TAGS_KEY, String(target));
+    const target = g[1] ? int(g[1]) : m.uid, u = await urow(target), h = statsOf(u), tag = u.tag;
     await m.reply(`**User Stats — \`${target}\`**\n\n**Premium:** N/A\n${tag ? `Tag: **${tag}**` : 'No custom tag'}\n**Downloads:** ${int(h.total)}\n**Storage:** ${fmtSize(int(h.storage))}\n**Last activity:** ${h.last_activity || 'Never'}`);
   }, ADMIN);
   on(/^\/apihealth$/, async m => {
@@ -1645,7 +1611,7 @@ Contact @buggybeats for premium.
   }, ADMIN);
   on(/^\/errors(?:\s+(\d+))?/, async (m, g) => {
     const n = Math.max(1, Math.min(int(g[1] || 15), 100));
-    const errs = (await db.lrange(LOG_KEY, 0, 499)).reverse().filter(l => /ERROR|Error|Failed|failed|Traceback/.test(l)).slice(-n);
+    const errs = (await readLogs('bot', 500)).reverse().filter(l => /ERROR|Error|Failed|failed|Traceback/.test(l)).slice(-n);
     if (!errs.length) return m.reply('No errors found in log.');
     await m.reply('```\n' + errs.join('\n').slice(-3000) + '\n```');
   }, ADMIN);
@@ -1660,8 +1626,7 @@ Contact @buggybeats for premium.
     await m.reply(`Maintenance **${on ? 'ON' : 'OFF'}**${reason ? `\nReason: ${reason}` : ''}`);
   }));
   on(/^\/logrotate$/, denyUnlessAdmin(async m => {
-    const n = (await db.lrange(LOG_KEY, 0, -1)).length;
-    await db.delete(LOG_KEY);
+    const n = await db.run("DELETE FROM logs WHERE kind = 'bot'");
     const text = `Rotated bot_log (${n} lines), kept 0 file(s).`;
     await logAudit('LOGROTATE', m.uid, text);
     await m.reply(text);
@@ -1702,37 +1667,36 @@ Contact @buggybeats for premium.
     const arg = (g[1] || '').trim().toUpperCase();
     if (!arg) return m.reply('**Usage:** `/configreset <KEY>`');
     if (BLOCKED.has(arg) || !SPECS[arg]) return m.reply(`Unknown or protected key: \`${arg}\``);
-    await db.hdel('config_overrides', arg); uncache('cfg');
+    await setOverride(arg, null);
     await logAudit('CONFIGRESET', m.uid, arg);
     const rt = await runtime();
     await m.reply(`\`${arg}\` reset to default (${Array.isArray(rt[arg]) ? rt[arg].join(', ') : rt[arg]}).`);
   }, ADMIN);
 
   // ==================== commands/backup.py ====================
-  const B_SETS = ['premium_users', 'banned_users', 'dynamic_admins', 'all_known_users'];
-  const B_HASHES = ['premium_expiry', 'custom_tags', 'gift_cards', 'gc_tags', 'gc_used', 'bot_stats', 'config_overrides'];
-  const B_STRINGS = ['maintenance_mode', 'maintenance_mode:reason', 'stats:broadcasts', 'stats:boot_count'];
+  // Full snapshot of the tables that can't be rebuilt (users with premium/tags/stats/history, gift
+  // cards, settings, counters, /videos file_ids, library, audit log) as one JSON file.
+  const B_TABLES = { users: ['id'], gift_cards: ['code'], store: ['key'], counters: ['day', 'name'], videos: ['md5'], library: ['name'], logs: ['id'] };
+  const B_WHERE = { store: 'WHERE expires_at IS NULL', logs: "WHERE kind = 'audit'" };
   on(/^\/backup$/, async m => {
-    const msg = await m.reply('Backing up Redis data...');
+    const msg = await m.reply('Backing up the database...');
     try {
-      const data = { sets: {}, hashes: {}, strings: {}, lists: {}, zsets: {} };
-      for (const r of await db.all(`SELECT key, member FROM sets WHERE key IN (${B_SETS.map(() => '?').join(',')}) ORDER BY member`, ...B_SETS)) (data.sets[r.key] ??= []).push(r.member);
-      for (const r of await db.all(`SELECT key, field, value FROM hashes WHERE key IN (${B_HASHES.map(() => '?').join(',')}) OR key LIKE 'user_stats_%'`, ...B_HASHES)) (data.hashes[r.key] ??= {})[r.field] = r.value;
-      for (const r of await db.all(`SELECT key, value FROM kv WHERE (key IN (${B_STRINGS.map(() => '?').join(',')}) OR key LIKE 'history_%' OR key LIKE 'gc_redeemed_%') AND (expires_at IS NULL OR expires_at > ?)`, ...B_STRINGS, nowS())) data.strings[r.key] = r.value;
-      data.lists.audit_log = await db.lrange(AUDIT_LOG_KEY, 0, -1);
-      data.zsets.link_counts = await db.zrange(LINK_COUNTS_KEY);
-      const sum = o => Object.values(o).reduce((a, v) => a + (Array.isArray(v) ? v.length : Object.keys(v).length), 0);
-      const caption = `**Redis Backup**\nSets: ${sum(data.sets)} | Hashes: ${sum(data.hashes)} | Strings: ${Object.keys(data.strings).length} | Lists: ${data.lists.audit_log.length} | ZSets: ${data.zsets.link_counts.length}\nRestore: reply to this file with \`/restore\``;
+      await db.flush(true);
+      const data = { version: 2, time: ymdHMS(), tables: {} };
+      for (const t of Object.keys(B_TABLES)) data.tables[t] = await db.all(`SELECT * FROM ${t} ${B_WHERE[t] || ''}`);
+      const counts = Object.entries(data.tables).map(([t, rows]) => `${t}: ${rows.length}`).join(' | ');
       const form = new FormData();
       form.append('chat_id', String(m.chatId));
-      form.append('caption', md(caption));
+      form.append('caption', md(`**Database Backup** (${data.time})\n${counts}\nRestore: reply to this file with \`/restore\``));
       form.append('parse_mode', 'HTML');
-      form.append('document', new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'backup.json');
+      form.append('document', new Blob([JSON.stringify(data)], { type: 'application/json' }), `backup-${data.time.slice(0, 10)}.json`);
       const r = await (await fetch(`${env.TG_API || 'https://api.telegram.org'}/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: form })).json();
       if (!r.ok) throw new Error(r.description);
       await msg.delete();
     } catch (e) { await msg.edit(`Backup failed: \`${e.message}\``); }
   }, OWNER);
+  // Merges a /backup file back (existing rows are overwritten). Rows go in as JSON chunks through
+  // json_each, so 25k users are ~a dozen statements instead of 25k (D1: ≤50 queries per request).
   on(/^\/restore$/, async m => {
     const doc = m.replyTo?.document;
     if (!doc) return m.reply('Reply to a backup `.json` file with `/restore`.');
@@ -1741,20 +1705,27 @@ Contact @buggybeats for premium.
       const f = await api.call('getFile', { file_id: doc.file_id });
       data = await (await fetch(`${env.TG_API || 'https://api.telegram.org'}/file/bot${env.BOT_TOKEN}/${f.result.file_path}`)).json();
     } catch (e) { return m.reply(`Could not download file: \`${e.message}\``); }
+    if (data?.version !== 2) return m.reply('This is not a backup from this bot version (needs a `/backup` file made after the database upgrade).');
     try {
-      const st = [], c = { sets: 0, hashes: 0, strings: 0, lists: 0, zsets: 0 };
-      for (const [k, ms] of Object.entries(data.sets || {})) for (const v of ms || []) { st.push(db.q('INSERT INTO sets(key, member) VALUES (?, ?) ON CONFLICT DO NOTHING', k, String(v))); c.sets++; }
-      for (const [k, h] of Object.entries(data.hashes || {})) for (const [f, v] of Object.entries(h || {})) { st.push(db.q('INSERT INTO hashes(key, field, value) VALUES (?, ?, ?) ON CONFLICT(key, field) DO UPDATE SET value = excluded.value', k, f, String(v))); c.hashes++; }
-      for (const [k, v] of Object.entries(data.strings || {})) { st.push(db.q('INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = NULL', k, String(v))); c.strings++; }
-      for (const [k, items] of Object.entries(data.lists || {})) {
-        st.push(db.q('DELETE FROM lists WHERE key = ?', k));
-        (items || []).forEach((v, i) => { st.push(db.q('INSERT INTO lists(key, position, value) VALUES (?, ?, ?)', k, i, String(v))); c.lists++; });
+      const done = [];
+      for (const [t, key] of Object.entries(B_TABLES)) {
+        const rows = data.tables?.[t] || [];
+        if (!rows.length) continue;
+        const cols = Object.keys(rows[0]).filter(c => /^[a-z][a-z0-9_]*$/.test(c));
+        const upsert = t === 'logs' ? 'ON CONFLICT (id) DO NOTHING' : key ? `ON CONFLICT (${key.join(', ')}) DO UPDATE SET ${cols.filter(c => !key.includes(c)).map(c => `${c} = excluded.${c}`).join(', ') || `${key[0]} = excluded.${key[0]}`}` : '';
+        const sql = `INSERT INTO ${t} (${cols.join(', ')}) SELECT ${cols.map(c => `json_extract(value, '$.${c}')`).join(', ')} FROM json_each(?) WHERE true ${upsert}`;
+        let chunk = [], size = 0;
+        const send = async () => { if (chunk.length) await db.run(sql, JSON.stringify(chunk)); chunk = []; size = 0; };
+        for (const r of rows) {
+          const o = Object.fromEntries(cols.map(c => [c, r[c]]));
+          chunk.push(o); size += JSON.stringify(o).length;
+          if (size > 500000) await send(); // D1: a bound value may be up to ~2 MB
+        }
+        await send();
+        done.push(`${t}: ${rows.length}`);
       }
-      for (const [k, pairs] of Object.entries(data.zsets || {})) for (const [mem, sc] of pairs || []) { st.push(db.q('INSERT INTO sorted_sets(key, member, score) VALUES (?, ?, ?) ON CONFLICT(key, member) DO UPDATE SET score = excluded.score', k, String(mem), +sc)); c.zsets++; }
-      // ponytail: 500-statement batches; a very large backup may hit the free plan's per-request D1 limit — use the Turso→D1 import in the README instead
-      for (let i = 0; i < st.length; i += 500) await db.d.batch(st.slice(i, i + 500));
       CACHE.clear();
-      await m.reply(`**Restore complete (merged).**\nSets: ${c.sets} | Hashes: ${c.hashes} | Strings: ${c.strings} | Lists: ${c.lists} | ZSets: ${c.zsets}\nRestart the bot if values look stale.`);
+      await m.reply(`**Restore complete (merged).**\n${done.join(' | ')}`);
     } catch (e) { await m.reply(`Restore failed: \`${e.message}\``); }
   }, OWNER);
 
@@ -1765,7 +1736,7 @@ Contact @buggybeats for premium.
     const qt = normalizeName(q).split(' ').filter(Boolean);
     const scored = [];
     if (qt.length) {
-      for (const [norm, raw] of Object.entries(await db.hgetall(INDEX_KEY))) {
+      for (const { name: norm, entries: raw } of await db.all('SELECT name, entries FROM library')) { // ponytail: full scan (~3k rows) per search
         let entries; try { entries = JSON.parse(raw); } catch { continue; }
         const et = new Set(norm.split(' ')), hits = qt.filter(t => et.has(t)).length;
         // entries the old bot indexed point at storage-channel messages (no share code) — skipped
@@ -1786,9 +1757,10 @@ Contact @buggybeats for premium.
     await m.reply(`**Library hits for \`${q}\`:**`, { buttons });
   });
   async function dropEntry(norm, r) {
-    const raw = await db.hget(INDEX_KEY, norm);
+    const raw = (await db.one('SELECT entries FROM library WHERE name = ?', norm))?.entries;
     const kept = (raw ? JSON.parse(raw) : []).filter(e => !(e.s === r.s && e.f === r.f));
-    if (kept.length) await db.hset(INDEX_KEY, norm, JSON.stringify(kept)); else await db.hdel(INDEX_KEY, norm);
+    if (kept.length) await db.run('UPDATE library SET entries = ? WHERE name = ?', JSON.stringify(kept), norm);
+    else await db.run('DELETE FROM library WHERE name = ?', norm);
   }
   onCb(/^lib_/, async e => {
     if (e.data === 'lib_close') return e.delete();
@@ -1798,9 +1770,9 @@ Contact @buggybeats for premium.
     if (idx >= results.length) return e.answer('Expired — /search again.', true);
     const r = results[idx];
     const f = { file_name: r.name, size: r.size, sizebytes: r.bytes, fid: r.f, code: r.s };
-    const ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, await db.hget(THUMB_KEY, String(e.uid)));
+    const ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, (await urow(e.uid)).thumb);
     if (!ok) { await dropEntry(r.norm, r); return e.answer('Removed stale entry — resend the link to fetch fresh.', true); }
-    await db.hincrby(STATS_KEY, 'lib_hits', 1);
+    db.bump('lib_hits');
     await e.answer('Sent from library!');
   });
   on(/^\/reindex$/, async m => {
@@ -1821,22 +1793,20 @@ Contact @buggybeats for premium.
 
   // ==================== commands/mystats.py ====================
   on(/^\/mystats$/, async m => {
-    const h = await db.hgetall(`user_stats_${m.uid}`);
+    const u = await urow(m.uid), h = statsOf(u);
     const attempts = int(h.attempts), success = int(h.success) || int(h.total), failed = int(h.failed) || Math.max(attempts - success, 0);
     if (!attempts && !success) return m.reply('📊 Your Statistics\n\nNo completed downloads yet.\n\nStart by sending a TeraBox link.');
     await m.reply(`📊 Your Statistics\n\nFiles: ${success}\nData downloaded: ${fmtSize(int(h.storage))}\n\nSuccessful: ${success}\nFailed: ${failed}\nAudio conversions: ${int(h.audio)}\nVideo conversions: ${int(h.video)}\n\n` +
-      `Premium: ${(await isPremium(m.uid)) ? 'Active' : 'Free'}\nMember since: ${(await db.get(`member_since:${m.uid}`)) || '?'}`);
+      `Premium: ${(await isPremium(m.uid)) ? 'Active' : 'Free'}\nMember since: ${u.joined || '?'}`);
   });
 
   // ==================== commands/referral.py ====================
-  // A referral is recorded on /start but stays pending (ref:pending:<referrer>) until the new user
+  // A referral is recorded on /start (users.ref_by) but stays pending (ref_pending = 1) until the new user
   // has joined every force channel; confirmReferral then counts it and rewards the referrer, once.
   async function recordReferral(referrer, uid) {
-    if (referrer === uid || (await db.get(`ref:by:${uid}`)) != null) return false;
-    await db.set(`ref:by:${uid}`, referrer);
-    await db.sadd(`ref:invited:${referrer}`, uid);
-    await db.sadd(`ref:pending:${referrer}`, uid);
-    return true;
+    if (referrer === uid) return false;
+    // only a user nobody referred yet
+    return (await db.run('INSERT INTO users (id, ref_by, ref_pending) VALUES (?, ?, 1) ON CONFLICT (id) DO UPDATE SET ref_by = excluded.ref_by, ref_pending = 1 WHERE users.ref_by IS NULL', int(uid), int(referrer))) === 1;
   }
   async function missingChannels(uid) {
     const rt = await runtime(), out = [];
@@ -1844,9 +1814,10 @@ Contact @buggybeats for premium.
     return out;
   }
   async function confirmReferral(uid, name) {
-    const ref = int(await db.get(`ref:by:${uid}`));
-    if (!ref || !(await db.srem(`ref:pending:${ref}`, uid))) return false; // none, or already counted
-    const ok = await db.hincrby('ref:ok', String(ref), 1);
+    // one statement claims it, so it's counted once even if two updates race
+    const ref = int((await db.one('UPDATE users SET ref_pending = 0 WHERE id = ? AND ref_pending = 1 RETURNING ref_by', int(uid)))?.ref_by);
+    if (!ref) return false; // none, or already counted
+    const ok = (await db.one('INSERT INTO users (id, ref_ok) VALUES (?, 1) ON CONFLICT (id) DO UPDATE SET ref_ok = ref_ok + 1 RETURNING ref_ok', ref)).ref_ok;
     await addPremiumDays(ref, REF_DAYS);
     const [bonus, bd] = await checkAndGrantReward(ref);
     await funnel('referrals');
@@ -1868,14 +1839,14 @@ Contact @buggybeats for premium.
     await e.edit('✅ Joined! Now send me any TeraBox link and watch it in ~2 seconds ⚡', { buttons: [] });
   });
   async function refStats(uid) {
-    const [invited, pending] = await Promise.all([db.scard(`ref:invited:${uid}`), db.scard(`ref:pending:${uid}`)]);
-    const ok = int(await db.hget('ref:ok', String(uid)));
+    const r = await db.one('SELECT (SELECT COUNT(*) FROM users WHERE ref_by = ?1) invited, (SELECT COUNT(*) FROM users WHERE ref_by = ?1 AND ref_pending = 1) pending, (SELECT ref_ok FROM users WHERE id = ?1) ok', int(uid));
+    const { invited, pending } = r, ok = int(r.ok);
     const next = TIERS.find(([t]) => ok < t);
     return [invited, ok, next?.[0] ?? null, next?.[1] ?? null, pending];
   }
   async function checkAndGrantReward(uid) {
-    const ok = int(await db.hget('ref:ok', String(uid))), last = int(await db.hget('ref:last_reward', String(uid)));
-    for (const [t, days] of TIERS) if (ok >= t && t > last) { await addPremiumDays(int(uid), days); await db.hset('ref:last_reward', String(uid), t); return [true, days]; }
+    const u = await urow(uid), ok = int(u.ref_ok), last = int(u.ref_reward);
+    for (const [t, days] of TIERS) if (ok >= t && t > last) { await addPremiumDays(int(uid), days); await db.setUser(uid, { ref_reward: t }); return [true, days]; }
     return [false, 0];
   }
   const tierText = ok => TIERS.map(([t, days], i) => {
@@ -1902,7 +1873,7 @@ Contact @buggybeats for premium.
     await e.answer(next ? `✅ Your +${REF_DAYS}d per friend is added automatically.\n\nNext bonus: ${next - ok} more friend(s) → +${nd}d.` : "🏆 You've unlocked every bonus!", true);
   });
   onCb(/^ref_fullstats$/, async e => {
-    const [invited, ok] = await refStats(e.uid), last = int(await db.hget('ref:last_reward', String(e.uid)));
+    const [invited, ok] = await refStats(e.uid), last = int((await urow(e.uid)).ref_reward);
     const earned = refEarned(ok);
     await e.edit('┏━━━━━━━━━━━━━━━━━⍟\n┃  📊 𝗥𝗲𝗳𝗲𝗿𝗿𝗮𝗹 𝗦𝘁𝗮𝘁𝘀\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\n' +
       `👥 Total invited: **${invited}**\n✅ Successful: **${ok}**\n🎁 Rewards earned: **${earned} days** Premium\n📌 Last tier claimed: **${last}** referrals\n\n${tierText(ok)}`,
@@ -1940,7 +1911,7 @@ Contact @buggybeats for premium.
     if (m.uid !== OWNER_ID) return m.reply('Owner only.');
     const text = m.replyTo ? '' : m.text.split('/broadcast').slice(1).join('/broadcast').trim();
     if (!m.replyTo && !text) return m.reply('**Usage:** `/broadcast <message>`\nOr reply to any message with `/broadcast`.');
-    const total = Math.max((await db.scard('all_known_users')) - ((await db.sismember('all_known_users', m.uid)) ? 1 : 0), 0);
+    const total = Math.max((await userCount()) - 1, 0); // minus the owner, who is a user too
     const mode = m.replyTo ? 'forward' : 'text';
     const status = await m.reply(`📢 Broadcast (${mode === 'forward' ? 'copy of the replied message' : 'text'}) queued for **${total}** users.\nStarts within a minute — this message updates live.`);
     await queueBroadcast({ kind: 'broadcast', mode, text, from_chat: m.chatId, msg_id: m.replyTo?.message_id ?? null, exclude: m.uid, total, status_chat: m.chatId, status_msg: status.id });
@@ -1992,14 +1963,18 @@ Contact @buggybeats for premium.
         return [200, 201].includes(r.status) ? await r.json() : null;
       } catch { return null; }
     };
-    const vkey = uid => `video_state:${int(uid)}`;
-    // all fields in one statement (was one D1 query per field). Never throws: if D1 refuses writes
-    // (e.g. free daily write limit hit) the video is still sent — only position/cooldown isn't saved.
+    // /videos state lives in the users row; the code keeps the old video_state field names
+    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
+    // One users-row write (+ video_lists when a new 200 is fetched). Never throws: if D1 refuses
+    // writes (e.g. free daily write limit hit) the video is still sent — only position/cooldown isn't saved.
     const setState = async (uid, fields) => {
-      const e = Object.entries(fields);
-      if (!e.length) return;
-      await db.run(`INSERT INTO hashes(key, field, value) VALUES ${e.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
-        ...e.flatMap(([k, v]) => [vkey(uid), k, String(v)])).then(() => true, err => (console.log('setState', err.message), false));
+      const { video_links, ...rest } = fields, cols = {};
+      for (const [k, v] of Object.entries(rest)) if (VCOL[k]) cols[VCOL[k]] = v; else console.log('setState: unknown field', k);
+      const st = [];
+      if (Object.keys(cols).length) st.push(db.setUserQ(uid, cols));
+      if (video_links != null) st.push(db.q('INSERT INTO video_lists (id, links) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET links = excluded.links', int(uid), video_links));
+      if (!st.length) return true;
+      return db.batch(st).then(() => true, err => (console.log('setState', err.message), false));
     };
     const freeMode = async () => { const s = await db.get(FREE_MODE_KEY); return s == null ? String(env.VIDEOS_FREE_MODE) === 'true' : s === '1'; };
     // A paid subscription's end time is remembered (sub_until), so the payment worker is only
@@ -2018,7 +1993,7 @@ Contact @buggybeats for premium.
         const st = await getJ(`${pay}/api/subscription/status/${int(uid)}`);
         if (st) { // API down → not cached, asked again next time
           const until = st.subscribed ? subUntil(st) : 0;
-          await setState(uid, { sub_checked: now, ...(until > now ? { sub_until: until } : {}) });
+          await setState(uid, { sub_checked: Math.floor(now), ...(until > now ? { sub_until: Math.floor(until) } : {}) });
           if (st.subscribed) return true;
         }
       }
@@ -2027,74 +2002,76 @@ Contact @buggybeats for premium.
     }
     // ---- per-user pool list (same as the old bot) ----
     // Each user gets 200 random links from the pool, served in order; when they run out, a new
-    // 200 is fetched. Once a video has been sent, Telegram's file_id is kept (vid_meta: md5 → file_id) so any user who gets
+    // 200 is fetched. Once a video has been sent, Telegram's file_id is kept (videos: md5 → file_id) so any user who gets
     // that video again receives it instantly, without Telegram downloading the file again.
-    const META = 'vid_meta';
     const md5Of = u => (String(u).match(/\/file\/([0-9a-f]{32})/) || [])[1] || null;
-    const fidOf = v => { try { return JSON.parse(v).f || null; } catch { return v || null; } };
     // The user's next link from their own 200 (old bot behaviour): sent as-is, no checks.
-    // When the 200 are used up, a new 200 is fetched.
-    async function nextVideo(uid, state) {
-      let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index);
+    // When the 200 are used up, a new 200 is fetched. save = other state written in the same row write.
+    async function nextVideo(uid, ctx, save = {}) {
+      const state = ctx.state;
+      let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index), fresh = null;
       if (!links.length || idx >= links.length) {
         links = (await getJ(`${pool()}/?random=200`))?.links || [];
         if (!links.length) return null;
         idx = 0;
-        await setState(uid, { video_links: JSON.stringify(links) });
+        fresh = JSON.stringify(links);
       }
       // write refused (D1 daily limit) → the position can't advance, so pick a random one of the 200
-      if (!(await setState(uid, { video_index: idx + 1 }))) idx = Math.floor(Math.random() * links.length);
+      if (!(await setState(uid, { ...save, video_index: idx + 1, ...(fresh ? { video_links: fresh } : {}) }))) idx = Math.floor(Math.random() * links.length);
       const url = links[idx], md5 = md5Of(url);
-      const fid = md5 ? fidOf(await db.hget(META, md5)) : null;
-      return { url, md5, fid };
+      // loadCtx already looked up the file_id of the link at the saved position
+      const fid = !fresh && idx === int(state.video_index) ? ctx.nextFid : md5 ? (await db.one('SELECT file_id FROM videos WHERE md5 = ?', md5))?.file_id : null;
+      return { url, md5, fid: fid || null };
     }
     // ---- pre-uploaded videos (instant /videos) ----
     // The cron uploads pool videos to VIDEOS_CHANNEL (the old storage channel) and keeps
-    // their Telegram file_id: vid_ready = md5 → upload order, vid_meta = md5 → {u, f}. Each user
-    // walks vid_ready from the start (vid_pos); once they've had them all, /videos falls back to
-    // their own 200 links exactly as before.
-    const READY = 'vid_ready';
+    // their Telegram file_id: videos.ready = upload order. Each user walks the ready list from a
+    // random start (v_pos / v_start); once they've had them all, /videos falls back to their own
+    // 200 links exactly as before.
     const readyMarkup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
-    // Everything /videos needs in ONE D1 round trip (was ~6 sequential queries): the user's state,
-    // premium/admin, and their next pre-uploaded video with its file_id.
+    // Everything /videos needs in ONE D1 round trip: the user's row (state, premium, admin), their
+    // 200 links with the file_id of the next one, free mode, and their next pre-uploaded video.
     async function loadCtx(uid) {
-      const k = vkey(uid), u = String(uid);
-      const readyAfter = (where, ...args) => db.q(`SELECT s.member, s.score, h.value FROM sorted_sets s JOIN hashes h ON h.key = ? AND h.field = s.member
-              WHERE s.key = ? AND s.score > ${where} ORDER BY s.score LIMIT 1`, META, READY, ...args);
-      const [st, pa, nxt, first] = await db.d.batch([
-        db.q('SELECT field, value FROM hashes WHERE key = ?', k),
-        db.q('SELECT (SELECT value FROM hashes WHERE key = ? AND field = ?) exp, (SELECT 1 FROM sets WHERE key = ? AND member = ?) adm, (SELECT value FROM kv WHERE key = ?) vfree', PREMIUM_EXPIRY_KEY, u, DYNAMIC_ADMINS_KEY, u, FREE_MODE_KEY),
-        readyAfter(`COALESCE((SELECT CAST(value AS REAL) FROM hashes WHERE key = ? AND field = 'vid_pos'), 0)`, k),
+      const readyAfter = where => db.q(`SELECT md5, ready, file_id FROM videos WHERE ready > ${where} ORDER BY ready LIMIT 1`);
+      const nextLink = "json_extract(vl.links, '$[' || COALESCE(u.v_idx, 0) || ']')";
+      const [ur, nxt, first] = await db.batch([
+        db.q(`SELECT u.*, vl.links, (SELECT value FROM store WHERE key = ?) vfree,
+                (SELECT file_id FROM videos WHERE md5 = substr(${nextLink}, instr(${nextLink}, '/file/') + 6, 32)) next_fid
+              FROM (SELECT 1) LEFT JOIN users u ON u.id = ? LEFT JOIN video_lists vl ON vl.id = u.id`, FREE_MODE_KEY, int(uid)),
+        readyAfter(`COALESCE((SELECT v_pos FROM users WHERE id = ${int(uid)}), 0)`),
         readyAfter('0'),
       ]);
-      const state = Object.fromEntries(st.results.map(x => [x.field, x.value]));
-      const p = pa.results[0] || {};
+      const u = ur.results[0] || {};
+      const state = {
+        video_links: u.links, video_index: u.v_idx, last_video_time: u.v_last, vid_pos: u.v_pos, vid_start: u.v_start,
+        trial_start_time: u.trial_at, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
+      };
       // Each user starts at a random video (vid_start), walks to the end, wraps to the beginning and
       // stops just before vid_start — so users get different orders and nobody gets a repeat.
-      const pos = parseFloat(state.vid_pos) || 0, start = parseFloat(state.vid_start) || 0;
+      const pos = +u.v_pos || 0, start = +u.v_start || 0;
       let row = null, newStart = null;
       if (!pos) {
-        row = await db.one(`SELECT s.member, s.score, h.value FROM sorted_sets s JOIN hashes h ON h.key = ? AND h.field = s.member
-              WHERE s.key = ? ORDER BY s.score LIMIT 1 OFFSET ?`, META, READY, Math.floor(Math.random() * (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', READY)).n));
-        newStart = row?.score ?? null;
+        const n = (await db.one('SELECT COUNT(*) n FROM videos WHERE ready IS NOT NULL')).n;
+        row = n ? await db.one('SELECT md5, ready, file_id FROM videos WHERE ready IS NOT NULL ORDER BY ready LIMIT 1 OFFSET ?', Math.floor(Math.random() * n)) : null;
+        newStart = row?.ready ?? null;
       } else if (pos >= start) {
-        row = nxt.results[0] || (first.results[0]?.score < start ? first.results[0] : null);
+        row = nxt.results[0] || (first.results[0]?.ready < start ? first.results[0] : null);
       } else {
-        row = nxt.results[0]?.score < start ? nxt.results[0] : null; // already wrapped: stop before the start
+        row = nxt.results[0]?.ready < start ? nxt.results[0] : null; // already wrapped: stop before the start
       }
-      const fid = row ? fidOf(row.value) : null;
       return {
         state,
-        admin: ADMINS.includes(int(uid)) || !!p.adm,
-        free: p.vfree == null ? String(env.VIDEOS_FREE_MODE) === 'true' : p.vfree === '1', // read fresh every time: panel toggle is instant
-        premium: p.exp != null && nowS() < int(p.exp),
-        ready: fid ? { md5: row.member, pos: row.score, fid, ...(newStart != null ? { start: newStart } : {}) } : null,
+        nextFid: u.next_fid || null,
+        admin: ADMINS.includes(int(uid)) || u.admin === 1,
+        free: u.vfree == null ? String(env.VIDEOS_FREE_MODE) === 'true' : u.vfree === '1', // read fresh every time: panel toggle is instant
+        premium: u.premium_until != null && nowS() < u.premium_until,
+        ready: row?.file_id ? { md5: row.md5, pos: row.ready, fid: row.file_id, ...(newStart != null ? { start: newStart } : {}) } : null,
       };
     }
     // ponytail: 45 sends + 1 pool fetch stays under the free plan's 50 subrequests per cron run.
     // Telegram caps how fast a bot may post into one channel: a 429 drops that channel until the
     // next run. More channels in VIDEOS_CHANNEL (comma-separated) = more uploads per minute.
-    // Daily cap keeps D1 under its free 100k rows written/day (2 rows per upload).
+    // Daily cap keeps D1 under its free 100k rows written/day (2 rows per upload: row + ready index).
     const CHANNELS = String(env.VIDEOS_CHANNEL || '').split(',').map(x => x.trim()).filter(Boolean);
     const PER_RUN = 45, PER_DAY = int(env.VIDEOS_UPLOADS_PER_DAY || 25000);
     uploadTick = async () => {
@@ -2107,7 +2084,7 @@ Contact @buggybeats for premium.
       const have = new Set();
       for (let i = 0; i < cand.length; i += 90) { // D1: max 100 bound parameters per query
         const part = cand.slice(i, i + 90).map(([m]) => m);
-        for (const r of await db.all(`SELECT field FROM hashes WHERE key = ? AND value LIKE '%"f":%' AND field IN (${part.map(() => '?').join(',')})`, META, ...part)) have.add(r.field);
+        for (const r of await db.all(`SELECT md5 FROM videos WHERE file_id IS NOT NULL AND md5 IN (${part.map(() => '?').join(',')})`, ...part)) have.add(r.md5);
       }
       const todo = cand.filter(([m]) => !have.has(m)).slice(0, Math.min(PER_RUN, PER_DAY - today));
       const live = [...CHANNELS], done = [];
@@ -2120,49 +2097,44 @@ Contact @buggybeats for premium.
         if (fid) done.push([m, u, fid]);
         else if (r.error_code === 429) live.splice(live.indexOf(ch), 1); // channel rate limit: stop it for this run
       }
-      for (let i = 0; i < done.length; i += 30) { // multi-row writes, 90 parameters each
-        const part = done.slice(i, i + 30), now = Date.now();
-        await db.d.batch([
-          db.q(`INSERT INTO hashes(key, field, value) VALUES ${part.map(() => `('${META}', ?, ?)`).join(', ')} ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
-            ...part.flatMap(([m, u, f]) => [m, JSON.stringify({ u, f })])),
-          db.q(`INSERT INTO sorted_sets(key, member, score) VALUES ${part.map(() => `('${READY}', ?, ?)`).join(', ')} ON CONFLICT DO NOTHING`,
-            ...part.flatMap(([m], j) => [m, now + i + j])),
-        ]);
+      for (let i = 0; i < done.length; i += 20) { // multi-row writes, 80 parameters each
+        const part = done.slice(i, i + 20), now = Date.now();
+        await db.run(`INSERT INTO videos (md5, url, file_id, ready) VALUES ${part.map(() => '(?, ?, ?, ?)').join(', ')}
+                      ON CONFLICT (md5) DO UPDATE SET url = excluded.url, file_id = excluded.file_id, ready = COALESCE(videos.ready, excluded.ready)`,
+        ...part.flatMap(([m, u, f], j) => [m, u, f, now + i + j]));
       }
       if (done.length) await db.set(dayKey, today + done.length, { ex: 2 * 86400 });
       console.log(`videos uploaded ${done.length}/${todo.length} (today ${today + done.length})${live.length < CHANNELS.length ? ' — channel rate limit hit' : ''}`);
     };
 
     on(/^\/videosready$/, async m => {
-      const n = (await db.one('SELECT COUNT(*) n FROM sorted_sets WHERE key = ?', READY)).n;
+      const n = (await db.one('SELECT COUNT(*) n FROM videos WHERE ready IS NOT NULL')).n;
       const today = int(await db.get(`vid_up:${new Date().toISOString().slice(0, 10)}`));
       await m.reply(`🎬 Instant videos ready: **${n}**\nUploaded today: ${today}/${PER_DAY}\nChannel(s): \`${CHANNELS.join(', ') || 'not set'}\` — up to ${PER_RUN} per minute.`);
     }, ADMIN);
 
-    // save = state fields to write in the same statement as the new position (e.g. last_video_time)
+    // save = state fields to write in the same row write as the new position (e.g. last_video_time)
     async function serveVideo(chatId, uid, target, ctx = null, save = {}) {
       ctx ||= await loadCtx(uid);
-      const state = ctx.state;
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
         const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
-        if (r.ok) return Promise.all([setState(uid, { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) }), funnel('videos')]);
-        await db.run('DELETE FROM sorted_sets WHERE key = ? AND member = ?', READY, ctx.ready.md5); // unusable file_id
-        save = { ...save, vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
+        const pos = { vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
+        if (r.ok) { funnel('videos'); return setState(uid, { ...save, ...pos }); }
+        await db.run('UPDATE videos SET ready = NULL WHERE md5 = ?', ctx.ready.md5); // unusable file_id
+        save = { ...save, ...pos };
       }
-      if (Object.keys(save).length) await setState(uid, save);
       // 2) otherwise the user's own 200 links, as before
       const [, c] = await Promise.all([
         api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" while Telegram fetches the link
-        nextVideo(uid, state),
+        nextVideo(uid, ctx, save),
       ]);
       if (!c) return target.reply('❌ No videos found, try again in a moment.');
-      const markup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
-      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...markup });
+      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...readyMarkup });
       if (!r.ok) return target.reply('❌ Video error: server busy, please try again in a moment.');
       const fid = r.result?.video?.file_id;
-      await funnel('videos');
-      if (fid && !c.fid && c.md5) await db.hset(META, c.md5, JSON.stringify({ u: c.url, f: fid })).catch(() => {});
+      funnel('videos');
+      if (fid && !c.fid && c.md5) await db.run('INSERT INTO videos (md5, url, file_id) VALUES (?, ?, ?) ON CONFLICT (md5) DO UPDATE SET file_id = excluded.file_id', c.md5, c.url, fid).catch(() => {});
     }
 
     on(/^\/videos$/, async m => {
@@ -2273,7 +2245,7 @@ Contact @buggybeats for premium.
       await checking?.delete();
       if (res == null) return api.send(chatId, '❌ Error checking payment status.\n\nPlease try again later or contact support.');
       if (res === 'success') {
-        await db.delete(`vid_order:${e.uid}`);
+        await db.del(`vid_order:${e.uid}`);
         await setState(e.uid, { sub_checked: 0 });
         await logx(`payment ok ${e.uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}`);
         await funnel('paid');
@@ -2353,12 +2325,12 @@ Contact @buggybeats for premium.
     // one cron at a time: a minute's run can take ~55s, the lock keeps the next one from overlapping
     if (!(await db.set('bc_lock', b.id, { ex: 75, nx: true }))) return true;
     try {
-      const users = (await db.all("SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?", b.cursor, BC_BATCH))
-        .map(r => r.member).filter(u => !(b.exclude && u === String(b.exclude)));
-      const lastMember = (await db.one("SELECT MAX(member) m FROM (SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?)", b.cursor, BC_BATCH))?.m;
-      const done = !lastMember || (await db.one("SELECT COUNT(*) n FROM (SELECT member FROM sets WHERE key = 'all_known_users' AND member > ? ORDER BY member LIMIT ?)", b.cursor, BC_BATCH)).n < BC_BATCH;
+      // users in id order after the cursor (the users primary key: reads only this batch)
+      const ids = (await db.all('SELECT id FROM users WHERE id > ? ORDER BY id LIMIT ?', int(b.cursor), BC_BATCH)).map(r => r.id);
+      const users = ids.filter(u => !(b.exclude && u === b.exclude)).map(String);
+      const done = ids.length < BC_BATCH;
       // reserve this range first, so nobody gets the message twice even if a run is cut short
-      await db.run('UPDATE broadcasts SET cursor = ? WHERE id = ?', lastMember ?? b.cursor, b.id);
+      if (ids.length) await db.run('UPDATE broadcasts SET cursor = ? WHERE id = ?', String(ids.at(-1)), b.id);
       const payload = { mode: b.mode, text: b.mode === 'forward' ? null : md(b.text), from_chat: b.from_chat, msg_id: b.msg_id };
       let sent = 0, failed = 0;
       if (env.SENDER) {
@@ -2391,7 +2363,7 @@ Contact @buggybeats for premium.
       if (stopped) return true; // the Stop button already showed the final state
       return await finishTick(b, sent, failed, done);
     } finally {
-      await db.delete('bc_lock');
+      await db.del('bc_lock');
     }
   }
 
@@ -2404,7 +2376,7 @@ Contact @buggybeats for premium.
       return true;
     }
     if (b.kind === 'broadcast') {
-      await db.incr('stats:broadcasts');
+      db.bump('broadcasts');
       await api.edit(b.status_chat, b.status_msg, bcProgress(b, S, F, 'complete'), { buttons: [] });
     } else if (b.kind === 'legacy') {
       await api.edit(b.status_chat, b.status_msg, bcProgress(b, S, F, 'complete'), { buttons: [] });
@@ -2412,35 +2384,26 @@ Contact @buggybeats for premium.
     return true;
   }
 
-  // referral.py referral_sweep_once — 3d / 1d / expired reminders
+  // referral.py referral_sweep_once — 3d / 1d / expired reminders. users.reminded remembers the last
+  // one sent (grant/addPremium clear it); the partial index means only premium rows are read.
   async function reminderSweep() {
-    const exp = await db.hgetall(PREMIUM_EXPIRY_KEY);
-    const flags = new Set((await db.all("SELECT key FROM kv WHERE key LIKE 'reminder_%' AND (expires_at IS NULL OR expires_at > ?)", nowS())).map(r => r.key));
     const now = Math.floor(nowS()), btn = [[Button.inline('Renew Premium', 'renew_info')]];
+    const rows = await db.all("SELECT id, premium_until, reminded FROM users WHERE premium_until < ? AND (reminded IS NULL OR reminded <> 'expired')", now + 3 * 86400);
     let budget = 15; // keeps each cron run inside the free-plan subrequest limit
-    for (const [uid, e] of Object.entries(exp)) {
+    for (const { id, premium_until: e, reminded } of rows) {
       if (budget <= 0) break;
-      const rem = int(e) - now;
-      if (rem <= 0) {
-        if (flags.has(`reminder_expired:${uid}`)) continue;
-        budget--;
-        await db.set(`reminder_expired:${uid}`, '1');
-        await api.send(int(uid), "⭐ Premium Reminder\n\nYour Premium access has expired.\n\nDon't lose your Premium benefits.", { buttons: btn });
-        continue;
-      }
-      for (const [win, flag, label] of [[86400, 'reminder_1d', '1 day'], [3 * 86400, 'reminder_3d', '3 days']]) {
-        if (rem > win) continue;
-        if (!flags.has(`${flag}:${uid}`)) {
-          budget--;
-          await db.set(`${flag}:${uid}`, '1', { ex: win + 86400 });
-          await api.send(int(uid), `⭐ Premium Reminder\n\nYour Premium access expires in ${label}.\n\nDon't lose your Premium benefits.`, { buttons: btn });
-        }
-        break;
-      }
+      const rem = e - now;
+      const [stage, text] = rem <= 0 ? ['expired', 'Your Premium access has expired.']
+        : rem <= 86400 ? (reminded === '1d' ? [] : ['1d', 'Your Premium access expires in 1 day.'])
+        : reminded ? [] : ['3d', 'Your Premium access expires in 3 days.'];
+      if (!stage) continue;
+      budget--;
+      await db.run('UPDATE users SET reminded = ? WHERE id = ?', stage, id);
+      await api.send(id, `⭐ Premium Reminder\n\n${text}\n\nDon't lose your Premium benefits.`, { buttons: btn });
     }
   }
 
-  async function cron(minute) {
+  async function cron(minute, hour) {
     const broadcasting = await broadcastTick();
     // uploads share the free plan's 50-subrequest budget: skip minutes with a broadcast batch or reminders
     if (uploadTick && !broadcasting && minute !== 0) {
@@ -2448,12 +2411,22 @@ Contact @buggybeats for premium.
     }
     if (minute === 0) {
       await reminderSweep();
-      await db.run('DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?', nowS());
-      // activity graph data (index.js trackActivity): keep 48h of hourly sets, 3 days of message counts
-      const cut = ymdHMS(nowS() - 48 * 3600).replace(/\D/g, '').slice(0, 10);
-      await db.run("DELETE FROM sets WHERE key LIKE 'act:%' AND key < ?", `act:${cut}`);
-      await db.run("DELETE FROM hashes WHERE key LIKE 'msgs:%' AND key < ?", `msgs:${cut.slice(0, 8)}`);
+      const now = Math.floor(nowS());
+      const cutHour = Number(ymdHMS(now - 48 * 3600).replace(/\D/g, '').slice(0, 10)); // panel graph: keep 48h
+      const cutDay = ymdHMS(now - 40 * 86400).slice(0, 10); // /funnel shows up to 31 days
+      await db.batch([
+        db.q('DELETE FROM store WHERE expires_at <= ?', now),
+        db.q('DELETE FROM activity WHERE hour < ?', cutHour),
+        db.q("DELETE FROM counters WHERE day GLOB '[0-9]*' AND day < ?", cutDay),
+      ]);
+      if (hour === 0) { // once a day: popular links back to the top 500, exact user total
+        await db.batch([
+          db.q("DELETE FROM counters WHERE day = 'link' AND name NOT IN (SELECT name FROM counters WHERE day = 'link' ORDER BY n DESC LIMIT 500)"),
+          db.q("INSERT INTO counters (day, name, n) VALUES ('all', 'total_users', (SELECT COUNT(*) FROM users)) ON CONFLICT (day, name) DO UPDATE SET n = excluded.n"),
+        ]);
+      }
     }
+    await db.flush(true);
   }
 
   // Bot made admin of / removed from a channel → tell the owner the channel ID (for VIDEOS_CHANNEL)
@@ -2461,10 +2434,10 @@ Contact @buggybeats for premium.
     if (u.chat?.type !== 'channel') return;
     const st = u.new_chat_member?.status, id = u.chat.id, title = u.chat.title || '-';
     if (st === 'administrator') {
-      await db.hset('bot_channels', String(id), title);
+      await db.set(`bot_channel:${id}`, title);
       await api.send(OWNER_ID, `📢 Bot is now admin in channel **${escapeMarkdown(title)}**\nID: \`${id}\`${u.new_chat_member.can_post_messages ? '' : '\n⚠️ Give it "Post messages" permission.'}\n\nAdd it to VIDEOS_CHANNEL in wrangler.toml to upload /videos there.`);
     } else if (st === 'left' || st === 'kicked' || st === 'member') {
-      await db.hdel('bot_channels', String(id));
+      await db.del(`bot_channel:${id}`);
       await api.send(OWNER_ID, `📢 Bot is no longer admin in channel **${escapeMarkdown(title)}** (\`${id}\`).`);
     }
   }

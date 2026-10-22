@@ -10,11 +10,12 @@ The whole bot runs on one Cloudflare Worker with one D1 database. It does not us
 |---|---|
 | `src/index.js` | Worker entry point: the Telegram webhook, the player page (`/watch`), the stream redirect (`/m3u8`), one-time `/setup`, and the cron |
 | `src/bot.js` | Every command and button handler, ported from the Python code |
-| `src/db.js` | `storage.py` (the Turso "Redis" layer) rewritten for D1, with the same 5 tables and the same keys |
+| `src/db.js` | D1 helpers: plain SQL, the `store` key/value table, user rows, and counters kept in memory and written every ~2 minutes |
 | `src/tg.js` | Bot API calls. It also converts the Telethon-style markdown in the copied texts (`**bold**`, `` `code` ``) to HTML |
-| `schema.sql` | The 5 storage tables plus a `broadcasts` queue |
+| `schema.sql` | Schema v2: one `users` row per user, plus `videos`, `video_lists`, `library`, `gift_cards`, `activity`, `counters`, `logs`, `store`, `broadcasts` |
+| `migrate_v2.sql` | One-time copy from the old Redis-style tables (`kv`, `hashes`, `sets`, `sorted_sets`, `lists`) into schema v2 |
 
-Because the tables and keys match the Python bot, you can import your existing Turso data as it is (section 4). That includes users, premium, gift cards, tags, referrals, history, stats and the audit log.
+Schema v2 is built for D1's free plan, which counts every row **and index entry** written (100k/day): everything about a user is one row, so a link or a /videos costs 1–3 rows written instead of 5–15. Python/Turso data is imported into the old 5 tables and converted with `migrate_v2.sql` (section 4).
 
 ## 1. How a link is handled
 
@@ -76,7 +77,11 @@ turso db shell <your-turso-db> .dump > dump.sql
 grep -vE '^(BEGIN TRANSACTION|COMMIT|PRAGMA)' dump.sql | sed 's/^CREATE TABLE /CREATE TABLE IF NOT EXISTS /' > import.sql
 npx wrangler d1 execute terabox-bot --remote --file import.sql
 ```
-Run `schema.sql` first (deploy step 1), then this. The old link→storage-message cache rows come across too but are simply ignored: every link now gets a fresh stream post.
+This loads the old 5 tables. Then run `schema.sql` and `migrate_v2.sql`, which copies everything into the v2 tables (users, premium, gift cards, tags, referrals, history, stats, audit log, /videos positions and file_ids). The old tables are left as they are, as a backup. The migration writes about one row per user, so run it early in the UTC day (D1 counts writes per UTC day).
+```bash
+npx wrangler d1 execute terabox-bot --remote --file schema.sql
+npx wrangler d1 execute terabox-bot --remote --file migrate_v2.sql
+```
 
 ## 5. Free-tier limits and how this bot stays inside them
 
@@ -84,7 +89,9 @@ Run `schema.sql` first (deploy step 1), then this. The old link→storage-messag
 |---|---|
 | 100k Worker requests/day per account | About 3 per link (webhook + player page + stream redirect) |
 | 50 outgoing calls per request (Telegram, resolver…) | A link with many files posts 15 videos and lists the rest (they open via `/search`). Name lookups in lists stop at 35. Broadcasts send 40 users per minute from the cron |
-| 50 D1 queries per request | Writes are batched. Measured locally: about 28 statements for a new user's link, about 30 round trips for a 30-file link |
+| 50 D1 queries per request | Writes are batched. A link is ~5 queries, /videos ~3 |
+| 100k D1 rows written/day | One `users` row per user (no hidden index), partial indexes only, counters written every ~2 min instead of per event. A repeat message in the same hour writes nothing |
+| 5M D1 rows read/day | Panel polls read counters, not `COUNT(*)` over every user; the 24h active-user count is cached 5 min |
 | 10 ms CPU per request | Only I/O and small JSON work |
 
 **The real limit is the HLS proxy worker.** Every video segment is one request to it, so a 30-minute video costs about 200–300 requests, which works out to roughly 300–500 full plays a day on one free account. Ways to raise that:

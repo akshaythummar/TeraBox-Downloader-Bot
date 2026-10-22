@@ -131,15 +131,27 @@ v.play().catch(() => {});
   );
 }
 
-// hourly activity for the panel graph: users seen per hour (set act:<YYYYMMDDHH>, IST) and messages
-// per hour (hash msgs:<YYYYMMDD>, field = hour). An already-seen user writes no row.
-function trackActivity(db, uid) {
-  if (!uid) return Promise.resolve();
-  const h = new Date(Date.now() + 5.5 * 3600e3).toISOString().replace(/\D/g, '').slice(0, 10);
-  return db.d.batch([
-    db.q('INSERT INTO sets(key, member) VALUES (?, ?) ON CONFLICT DO NOTHING', `act:${h}`, String(uid)),
-    db.q("INSERT INTO hashes(key, field, value) VALUES (?, ?, '1') ON CONFLICT(key, field) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)", `msgs:${h.slice(0, 8)}`, h.slice(8)),
-  ]).catch(e => console.log('trackActivity', e.message));
+// Every update: make sure the sender has a users row (= the broadcast list) and mark them active in
+// this IST hour (panel graph). A per-isolate memo skips D1 for someone already seen this hour, so most
+// messages cost no query at all; message counts go to the in-memory counters (db.bump).
+const seen = new Set();
+async function trackActivity(db, uid) {
+  if (!uid) return;
+  const ist = new Date(Date.now() + 5.5 * 3600e3).toISOString();
+  const day = ist.slice(0, 10), hh = ist.slice(11, 13), hour = +ist.replace(/\D/g, '').slice(0, 10);
+  db.bump(`msgs:${hh}`, 1, day);
+  const k = `${hour}:${uid}`;
+  if (seen.has(k)) return;
+  try {
+    const [u, a] = await db.batch([
+      db.q('INSERT INTO users (id, joined) VALUES (?, ?) ON CONFLICT (id) DO NOTHING', uid, day),
+      db.q('INSERT INTO activity (hour, uid) VALUES (?, ?) ON CONFLICT DO NOTHING', hour, uid),
+    ]);
+    if (u.meta.changes) { db.bump('total_users'); db.bump('new_users', 1, day); }
+    if (a.meta.changes) db.bump(`act:${hh}`, 1, day);
+    if (seen.size > 5000) seen.clear();
+    seen.add(k);
+  } catch (e) { console.log('trackActivity', e.message); }
 }
 
 export default {
@@ -152,10 +164,14 @@ export default {
       if (req.headers.get('x-telegram-bot-api-secret-token') !== env.WEBHOOK_SECRET) return new Response('forbidden', { status: 403 });
       const u = await req.json();
       const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
-      // ack Telegram immediately so it never retries; finish the work in the background
-      ctx.waitUntil(trackActivity(db, (u.message || u.callback_query)?.from?.id));
-      const work = u.message ? bot.onMessage(u.message) : u.callback_query ? bot.onCallback(u.callback_query) : u.my_chat_member ? bot.onChatMember(u.my_chat_member) : null;
-      if (work) ctx.waitUntil(work.catch(e => console.log('update failed', e.stack)));
+      // ack Telegram immediately so it never retries; finish the work in the background.
+      // The user row exists before the handler runs (referrals, /start rely on it).
+      ctx.waitUntil((async () => {
+        await trackActivity(db, (u.message || u.callback_query)?.from?.id);
+        const work = u.message ? bot.onMessage(u.message) : u.callback_query ? bot.onCallback(u.callback_query) : u.my_chat_member ? bot.onChatMember(u.my_chat_member) : null;
+        if (work) await work.catch(e => console.log('update failed', e.stack));
+        await db.flush();
+      })());
       return new Response('ok');
     }
     if (url.pathname === '/watch') return watch(url);
@@ -169,6 +185,7 @@ export default {
     const db = new DB(env.DB);
     env = { ...env, BOT_TOKEN: await botToken(env, db) };
     const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, '');
-    await bot.cron(new Date(event.scheduledTime).getUTCMinutes());
+    const t = new Date(event.scheduledTime);
+    await bot.cron(t.getUTCMinutes(), t.getUTCHours());
   },
 };

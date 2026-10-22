@@ -45,47 +45,53 @@ export async function panelApi(req, env, db, path) {
 
   switch (path) {
     case 'status': {
-      const [me, wh, counts, bc, logs, cfgRows] = await Promise.all([
+      await db.flush(true); // this isolate's not-yet-written counters
+      const ist = ms => new Date(ms + 5.5 * 3600e3).toISOString();
+      // last 24 hours, oldest first (IST, same as index.js trackActivity)
+      const hours = Array.from({ length: 24 }, (_, i) => ist(Date.now() - (23 - i) * 3600e3));
+      const days = [...new Set(hours.map(h => h.slice(0, 10)))], today = ist(Date.now()).slice(0, 10);
+      const now = Math.floor(Date.now() / 1000);
+      // a few dozen rows read per poll: counters, not COUNT(*) over 25k users
+      const [me, wh, counts, bc, logs, cfgRows, cnt] = await Promise.all([
         api.call('getMe', {}),
         api.call('getWebhookInfo', {}),
-        db.one(`SELECT (SELECT COUNT(*) FROM sets WHERE key = 'all_known_users') users,
-                       (SELECT COUNT(*) FROM hashes WHERE key = 'premium_expiry' AND CAST(value AS INTEGER) > strftime('%s','now')) premium,
-                       (SELECT value FROM kv WHERE key = 'maintenance_mode') maint,
-                       (SELECT COUNT(*) FROM sorted_sets WHERE key = 'vid_ready') ready`),
+        db.one(`SELECT (SELECT n FROM counters WHERE day = 'all' AND name = 'total_users') users,
+                       (SELECT COUNT(*) FROM users WHERE premium_until > ?) premium,
+                       (SELECT value FROM store WHERE key = 'maintenance_mode') maint,
+                       (SELECT value FROM store WHERE key = 'videos_free_mode') vfree,
+                       (SELECT value FROM store WHERE key = ?) token,
+                       (SELECT COUNT(*) FROM videos WHERE ready IS NOT NULL) ready`, now, BOT_TOKEN_KEY),
         db.one('SELECT * FROM broadcasts ORDER BY id DESC LIMIT 1'),
-        db.all("SELECT value FROM lists WHERE key = 'bot_log' ORDER BY position LIMIT 25"),
-        db.all("SELECT key, value FROM kv WHERE key IN ('terabox_cfg:cookie', 'terabox_cfg:jstoken')"),
+        db.all("SELECT line FROM logs WHERE kind = 'bot' ORDER BY id DESC LIMIT 25"),
+        db.all("SELECT key, value FROM store WHERE key IN ('terabox_cfg:cookie', 'terabox_cfg:jstoken')"),
+        db.all(`SELECT day, name, n FROM counters WHERE day IN (${days.map(() => '?').join(',')})`, ...days),
       ]);
-      const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); // IST date, like the bot's funnel
-      const funnel = Object.fromEntries((await db.all('SELECT field, value FROM hashes WHERE key = ?', `funnel:${today}`)).map(r => [r.field, +r.value]));
+      const by = {};
+      for (const r of cnt) (by[r.day] ??= {})[r.name] = r.n;
+      const activity = hours.map(h => ({ hour: +h.slice(11, 13), date: h.slice(0, 10).replace(/-/g, ''), users: by[h.slice(0, 10)]?.[`act:${h.slice(11, 13)}`] || 0, messages: by[h.slice(0, 10)]?.[`msgs:${h.slice(11, 13)}`] || 0 }));
+      const funnel = Object.fromEntries(Object.entries(by[today] || {}).filter(([k]) => !k.includes(':')));
+      // distinct users over 24h scans the activity table, so it's cached for 5 minutes
+      let active24 = await db.get('stat:active24');
+      if (active24 == null) {
+        const from = +hours[0].replace(/\D/g, '').slice(0, 10);
+        active24 = (await db.one('SELECT COUNT(DISTINCT uid) n FROM activity WHERE hour >= ?', from)).n;
+        await db.set('stat:active24', active24, { ex: 300 });
+      }
       const cfg = Object.fromEntries(cfgRows.map(r => [r.key.split(':')[1], r.value]));
-      // last 24 hours, oldest first (IST hour keys, same as index.js trackActivity)
-      const hours = Array.from({ length: 24 }, (_, i) => new Date(Date.now() + 5.5 * 3600e3 - (23 - i) * 3600e3).toISOString().replace(/\D/g, '').slice(0, 10));
-      const ph = hours.map(() => '?').join(',');
-      const days = [...new Set(hours.map(h => h.slice(0, 8)))];
-      const [perHour, distinct, msgRows] = await Promise.all([
-        db.all(`SELECT key, COUNT(*) n FROM sets WHERE key IN (${ph}) GROUP BY key`, ...hours.map(h => `act:${h}`)),
-        db.one(`SELECT COUNT(DISTINCT member) n FROM sets WHERE key IN (${ph})`, ...hours.map(h => `act:${h}`)),
-        db.all(`SELECT key, field, value FROM hashes WHERE key IN (${days.map(() => '?').join(',')})`, ...days.map(d => `msgs:${d}`)),
-      ]);
-      const users = Object.fromEntries(perHour.map(r => [r.key.slice(4), r.n]));
-      const msgs = Object.fromEntries(msgRows.map(r => [r.key.slice(5) + r.field, +r.value]));
-      const activity = hours.map(h => ({ hour: +h.slice(8), date: h.slice(0, 8), users: users[h] || 0, messages: msgs[h] || 0 }));
-      const vfree = await db.get('videos_free_mode');
       const w = wh.result || {};
       return ok({
         bot: me.ok ? { id: me.result.id, username: me.result.username, name: me.result.first_name } : null,
         tokenError: me.ok ? null : me.description,
-        tokenSource: (await db.get(BOT_TOKEN_KEY)) ? 'panel' : 'secret',
+        tokenSource: counts.token ? 'panel' : 'secret',
         webhook: { url: w.url || '', ours: !!w.url && w.url === `${origin}/webhook`, pending: w.pending_update_count || 0, lastError: w.last_error_message || null, lastErrorAt: w.last_error_date || null },
         running: !!w.url && w.url === `${origin}/webhook`,
-        stats: { users: counts.users, premium: counts.premium, readyVideos: counts.ready, today: funnel },
+        stats: { users: counts.users || 0, premium: counts.premium, readyVideos: counts.ready, today: funnel },
         maintenance: String(env.MAINTENANCE_OFF) !== 'true' && counts.maint === '1',
         broadcast: bc ? { id: bc.id, kind: bc.kind, total: bc.total, sent: bc.sent, failed: bc.failed, done: !!bc.done } : null,
         terabox: { cookie: !!(cfg.cookie || env.TB_COOKIE), cookieFrom: cfg.cookie ? 'panel' : env.TB_COOKIE ? 'secret' : 'none', jstoken: (cfg.jstoken || env.JSTOKEN || '').slice(0, 10) },
-        logs: logs.map(r => r.value),
-        activity, activeUsers24h: distinct?.n || 0,
-        videosFree: vfree == null ? String(env.VIDEOS_FREE_MODE) === 'true' : vfree === '1',
+        logs: logs.map(r => r.line),
+        activity, activeUsers24h: +active24 || 0,
+        videosFree: counts.vfree == null ? String(env.VIDEOS_FREE_MODE) === 'true' : counts.vfree === '1',
       });
     }
 
@@ -109,8 +115,7 @@ export async function panelApi(req, env, db, path) {
       // a different bot can't use the old bot's saved video file_ids
       let cleared = false;
       if (prevId && String(prevId) !== String(me.result.id)) {
-        await db.run("DELETE FROM sorted_sets WHERE key = 'vid_ready'");
-        await db.run("DELETE FROM hashes WHERE key = 'vid_meta'");
+        await db.run('DELETE FROM videos');
         cleared = true;
         if (body.stopOld !== false) await api.call('deleteWebhook', {}); // the old bot stops answering
       }
@@ -123,7 +128,7 @@ export async function panelApi(req, env, db, path) {
 
     case 'maintenance': {
       if (body.on) await db.set('maintenance_mode', '1');
-      else await db.run("DELETE FROM kv WHERE key IN ('maintenance_mode', 'maintenance_mode:reason')");
+      else await db.del('maintenance_mode', 'maintenance_mode:reason');
       return ok({ message: `Maintenance ${body.on ? 'ON' : 'OFF'} (applies within a few seconds).` });
     }
 
@@ -137,7 +142,7 @@ export async function panelApi(req, env, db, path) {
       if (!text) return fail('Write a message first.');
       if (await db.one('SELECT 1 FROM broadcasts WHERE done = 0 LIMIT 1')) return fail('A broadcast is already running — stop it first.');
       const owner = +env.OWNER_ID;
-      const total = await db.scard('all_known_users');
+      const total = (await db.one('SELECT COUNT(*) n FROM users')).n;
       const status = await api.send(owner, `📢 Broadcast from the panel queued for **${total}** users.\nStarts within a minute — this message updates live.`);
       await db.run('INSERT INTO broadcasts (kind, mode, text, total, status_chat, status_msg) VALUES (?, ?, ?, ?, ?, ?)', 'broadcast', 'text', text, total, owner, status?.id ?? null);
       return ok({ message: `Queued for ${total} users. Progress is shown here and in your Telegram chat.` });
