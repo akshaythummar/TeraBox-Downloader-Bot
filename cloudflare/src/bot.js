@@ -426,9 +426,10 @@ export function createBot(env, api, db, origin) {
     };
   }
 
-  async function watchUrl(code, fid, q) {
+  // r = who shared it (the player's "open the bot" / share buttons credit them)
+  async function watchUrl(code, fid, q, r = 0) {
     q ||= DEFAULT_QUALITY;
-    return `${origin}/watch?s=${code}&f=${fid}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${code}:${fid}:${q}`)}`;
+    return `${origin}/watch?s=${code}&f=${fid}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${code}:${fid}:${q}`)}${int(r) ? `&r=${int(r)}` : ''}`;
   }
 
   const cardCaption = (f, from, tag, took) => `
@@ -449,9 +450,11 @@ export function createBot(env, api, db, origin) {
   // under it: Telegram fetches it from TeraBox's CDN by md5 (the old Telebot Creator link; the
   // other params are fixed). Telegram only fetches URLs up to 20 MB. If that fails (file not on
   // that CDN, Telegram error) the normal stream post goes out instead, so the user always gets one.
-  async function sendStream(chatId, isPrivate, f, caption, q, userThumb, tryVideo = true) {
-    const href = await watchUrl(f.code, f.fid, q);
-    const buttons = [[isPrivate ? Button.webapp('▶️ Watch Online', href) : Button.url('▶️ Watch Online', href)], [Button.url('🌐 Open in Browser', href)]];
+  // sharer = the user the post is for: the Share button carries their referral credit
+  async function sendStream(chatId, isPrivate, f, caption, q, userThumb, tryVideo = true, sharer = 0) {
+    const href = await watchUrl(f.code, f.fid, q, sharer);
+    const share = await videoShare(f.code, f.fid, sharer);
+    const buttons = [[isPrivate ? Button.webapp('▶️ Watch Online', href) : Button.url('▶️ Watch Online', href)], [Button.url('🌐 Open in Browser', href)], ...(share ? [[Button.url('📤 Share this video', share)]] : [])];
     if (tryVideo && f.md5 && f.sizebytes > 0 && f.sizebytes <= VIDEO_URL_MAX) {
       // a file_id Telegram already gave us for this file is instant; the CDN link is the fallback
       const known = (await db.one('SELECT file_id FROM videos WHERE md5 = ?', f.md5).catch(() => null))?.file_id;
@@ -723,7 +726,9 @@ export function createBot(env, api, db, origin) {
   on(/^\/start/, async m => {
     const uid = m.uid, name = m.from.first_name;
     const arg = m.text.split(/\s+/)[1];
-    const ref = arg?.startsWith('ref_AT-') ? int(arg.split('ref_AT-')[1]) : 0;
+    // shared video link: v_<code>_<fid>_<sharer> (the code may contain _, the two numbers can't)
+    const vm = arg?.match(/^v_([\w-]+)_(\d+)_(\d+)$/);
+    const ref = arg?.startsWith('ref_AT-') ? int(arg.split('ref_AT-')[1]) : vm ? int(vm[3]) : 0;
     let refPending = false;
     if (ref > 0 && (await recordReferral(ref, uid))) {
       // the referrer is rewarded only once this user has joined the force channels
@@ -742,11 +747,13 @@ export function createBot(env, api, db, origin) {
       await m.reply(text, { buttons: redeemButtons(ok) });
       if (ok && info) await notifyRedeem(uid, m.from, info);
     }
+    // the shared video first (it handles the force-join prompt itself)
+    if (vm) await handleMessage({ ...m, text: `https://www.terabox.com/s/${vm[1]}`, deep: arg }, null, vm[2]);
     const admins = await getAllAdmins();
     if (!admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
-    if (!arg?.startsWith('gc_')) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
-    if (refPending) await sendJoinPrompt(m.chatId, await missingChannels(uid));
+    if (!arg?.startsWith('gc_') && !vm) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
+    if (refPending && !vm) await sendJoinPrompt(m.chatId, await missingChannels(uid));
     else if (arg === 'plans' && planViewHook) await planViewHook(m.chatId, uid); // t.me/<bot>?start=plans
   });
 
@@ -1196,7 +1203,8 @@ Restore: reply to the file with \`/restore\`
   }, ADMIN);
 
   // ==================== the link handler (handle_message) ====================
-  async function handleMessage(m, quality = null) {
+  // pickFid: send only that file of the link (a shared video); m.deep: the start param to come back to
+  async function handleMessage(m, quality = null, pickFid = null) {
     const T0 = Date.now();
     const url = getUrl(m.text);
     if (!url) return m.reply(ERRORS.unsupported_link);
@@ -1226,11 +1234,16 @@ Restore: reply to the file with \`/restore\`
       getCustomTag(m.uid), // also drops the tag of an expired premium user
       g.expired ? revokePremium(m.uid) : null,
     ]);
-    if (joined) return hm.edit(`Please join ${joined} then send me the link again.`);
+    if (joined) {
+      const join = chanUrl(joined) ? [[Button.url(`📣 Join ${joined}`, chanUrl(joined))]] : [];
+      if (!m.deep) return hm.edit(`Please join ${joined} then send me the link again.`, { buttons: join });
+      return hm.edit(`📢 Join ${joined} to watch this video, then tap the button below 👇`, { buttons: [...join, [Button.url('✅ Joined — get the video', `https://t.me/${await botName()}?start=${m.deep}`)]] });
+    }
     if (g.refPending) await confirmReferral(m.uid, m.from.first_name).catch(e => console.log('confirmReferral', e.message));
 
-    const files = await filesP;
+    let files = await filesP;
     if (!files) return hm.edit(ERRORS.api_unavailable);
+    if (pickFid) { const one = files.filter(f => f.fid === String(pickFid)); if (one.length) files = one; }
     if (files.length > rt.MAX_FILES_PER_REQUEST && !g.premium)
       return hm.edit(`⚠️ This link has **${files.length} files**.\nFree users can download max **${rt.MAX_FILES_PER_REQUEST}** files.\nUpgrade to **Premium** for unlimited.`);
 
@@ -1241,7 +1254,7 @@ Restore: reply to the file with \`/restore\`
       if (!VIDEO_EXTENSIONS.has(ext))
         return hm.edit(`Sorry! File type \`${ext}\` is not supported (photos aren't supported right now).\nSupported: ${[...VIDEO_EXTENSIONS].sort().join(', ')}`);
       const took = `${((Date.now() - T0) / 1000).toFixed(1)}s`;
-      if (!(await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, took), quality, g.thumb))) {
+      if (!(await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, took), quality, g.thumb, true, m.uid))) {
         await recordLink(m.uid, { failedN: 1, g });
         return hm.edit(`Sorry! Download Failed but you can download it from [here](${url}).`, { buttons: [] });
       }
@@ -1269,7 +1282,7 @@ Restore: reply to the file with \`/restore\`
     failed += todo.length - videos.length;
     for (const [i, f] of videos.slice(0, MAX_POSTS).entries()) {
       // ponytail: video files only for the first 5 (each try can cost 2 Telegram calls + 2 D1 queries)
-      if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, thumb, i < 5)) ok.push(f);
+      if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, thumb, i < 5, m.uid)) ok.push(f);
       else { failed++; sendFails++; }
     }
     const rest = videos.slice(MAX_POSTS);
@@ -1820,7 +1833,7 @@ Restore: reply to the file with \`/restore\`
     if (idx >= results.length) return e.answer('Expired — /search again.', true);
     const r = results[idx];
     const f = { file_name: r.name, size: r.size, sizebytes: r.bytes, fid: r.f, code: r.s, md5: r.m || null };
-    const ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, (await urow(e.uid)).thumb);
+    const ok = await sendStream(e.uid, true, f, cardCaption(f, e.from, await getCustomTag(e.uid), null), null, (await urow(e.uid)).thumb, true, e.uid);
     if (!ok) { await dropEntry(r.norm, r); return e.answer('Removed stale entry — resend the link to fetch fresh.', true); }
     db.bump('lib_hits');
     await e.answer('Sent from library!');
@@ -1910,6 +1923,17 @@ Restore: reply to the file with \`/restore\`
   const refEarned = ok => ok * REF_DAYS + TIERS.reduce((a, [t, d]) => (ok >= t ? a + d : a), 0);
   const botName = () => cached('botname', async () => (await api.me()).username || 'YourBot', 3600);
   const refLink = async uid => `https://t.me/${await botName()}?start=ref_AT-${int(uid)}`;
+  // one video, shareable: t.me/<bot>?start=v_<code>_<fid>_<sharer> opens the bot and sends that video;
+  // the sharer gets referral credit (start params are max 64 chars: the sharer is dropped if needed)
+  const videoStart = async (code, fid, uid) => {
+    let p = `v_${code}_${fid}_${int(uid)}`;
+    if (p.length > 64) p = `v_${code}_${fid}_0`;
+    return p.length > 64 ? null : `https://t.me/${await botName()}?start=${p}`;
+  };
+  const videoShare = async (code, fid, uid) => {
+    const link = await videoStart(code, fid, uid);
+    return link && `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent('🎬 Watch this video in 1 tap — no download needed 👇')}`;
+  };
   // Telegram's share sheet with the invite link + a short pitch
   const refShare = async uid => `https://t.me/share/url?url=${encodeURIComponent(await refLink(uid))}&text=${encodeURIComponent(`🎬 Watch any TeraBox video in 2 seconds — no download!\n🎁 Join with my link and get +${REF_NEW_DAYS} day Premium free`)}`;
 

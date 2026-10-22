@@ -39,10 +39,23 @@ async function m3u8(env, db, url) {
   return new Response(abs, { headers: { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' } });
 }
 
-function watch(url) {
+// the bot's @username for the player's buttons (one getMe per isolate)
+// ponytail: not refreshed if the panel switches to another bot token until the isolate restarts
+let botUser = null;
+async function botUsername(env) {
+  if (!botUser) botUser = (await makeApi(env.BOT_TOKEN, env.TG_API).call('getMe', {})).result?.username || null;
+  return botUser;
+}
+
+async function watch(env, url) {
   const p = params(url);
   if (!p) return new Response('Bad link', { status: 400 });
   const src = `/m3u8?s=${p.s}&f=${p.f}&q=${p.q}&t=${p.t}`;
+  // "open the bot" = this same video in the bot, crediting whoever shared the link (r)
+  const bot = await botUsername(env), r = /^\d{1,15}$/.test(url.searchParams.get('r') || '') ? url.searchParams.get('r') : '0';
+  let start = `v_${p.s}_${p.f}_${r}`;
+  if (start.length > 64) start = `v_${p.s}_${p.f}_0`;
+  const open = bot && start.length <= 64 ? `https://t.me/${bot}?start=${start}` : null;
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>TeraBox Player</title>
@@ -55,6 +68,10 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 #unmute{position:fixed;top:max(12px,env(safe-area-inset-top));left:12px}
 .bar{position:fixed;top:max(12px,env(safe-area-inset-top));right:12px;display:flex;gap:8px;transition:opacity .3s}
 body.idle .bar,body.idle #unmute{opacity:0;pointer-events:none}
+.cta{position:fixed;left:50%;bottom:calc(64px + env(safe-area-inset-bottom));transform:translateX(-50%);width:min(92vw,360px);padding:14px;border-radius:18px;background:#141821ee;box-shadow:0 10px 30px #000a;text-align:center;font:600 15px system-ui;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.cta div{display:flex;gap:8px;margin-top:10px}
+.cta button{flex:1;padding:11px 8px;border:0;border-radius:12px;font:700 14px system-ui;cursor:pointer;color:#fff;background:#2a2f3c}
+.cta button.go{background:linear-gradient(135deg,#8a6bff,#22c3ee)}
 .flash{position:fixed;top:50%;transform:translateY(-50%);padding:10px 16px;border-radius:24px;background:#000a;color:#fff;font:600 16px system-ui;pointer-events:none;opacity:0;transition:opacity .2s;white-space:nowrap}
 #err{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#000d;text-align:center;padding:24px}
 #err button{padding:10px 22px;border:0;border-radius:20px;background:#fff;color:#000;font:600 14px system-ui;cursor:pointer}
@@ -63,7 +80,8 @@ body.idle .bar,body.idle #unmute{opacity:0;pointer-events:none}
 </head><body>
 <video id="v" controls autoplay muted playsinline preload="auto"></video>
 <button id="unmute" class="pill" hidden>🔇 Tap to unmute</button>
-<div class="bar"><button id="spd" class="pill">1x</button></div>
+<div class="bar">${open ? '<button id="shr" class="pill">📤 Share</button>' : ''}<button id="spd" class="pill">1x</button></div>
+${open ? `<div id="cta" class="cta" hidden>🎬 Want more videos like this?<div><button id="more" class="go">🤖 Open @${bot}</button><button id="shr2">📤 Share</button></div></div>` : ''}
 <div id="fl" class="flash"></div>
 <div id="err"><div id="em"></div><button onclick="location.reload()">↻ Retry</button></div>
 <script>
@@ -86,6 +104,18 @@ let idleT;
 const wake = () => { document.body.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => { if (!v.paused) document.body.classList.add('idle'); }, 3000); };
 ['touchstart', 'mousemove', 'click', 'keydown'].forEach(e => addEventListener(e, wake, { passive: true }));
 v.addEventListener('pause', wake); v.addEventListener('play', wake);
+
+// share / open the bot (inside Telegram through the Mini App API, in a browser as a normal link)
+const OPEN = ${JSON.stringify(open)}, SHARE_TEXT = '🎬 Watch this video in 1 tap — no download needed 👇';
+const go = u => { try { if (tg && tg.initData && tg.openTelegramLink) return tg.openTelegramLink(u); } catch {} if (!window.open(u, '_blank')) location.href = u; };
+const share = () => { if (!tg?.initData && navigator.share) return navigator.share({ text: SHARE_TEXT, url: OPEN }).catch(() => {}); go('https://t.me/share/url?url=' + encodeURIComponent(OPEN) + '&text=' + encodeURIComponent(SHARE_TEXT)); };
+if (OPEN) {
+  $('shr').onclick = $('shr2').onclick = share;
+  $('more').onclick = () => go(OPEN);
+  // the card shows when paused (after it started) or finished, hides while playing
+  const cta = () => $('cta').hidden = !(v.ended || (v.paused && v.currentTime > 3));
+  ['pause', 'play', 'ended', 'seeked'].forEach(e => v.addEventListener(e, cta));
+}
 
 // playback speed
 const SPEEDS = [1, 1.25, 1.5, 2];
@@ -193,7 +223,7 @@ export default {
       })());
       return new Response('ok');
     }
-    if (url.pathname === '/watch') return watch(url);
+    if (url.pathname === '/watch') return watch(env, url);
     if (url.pathname === '/m3u8') return m3u8(env, db, url);
     if (url.pathname.startsWith('/panel-api/')) return panelApi(req, env, db, url.pathname.slice(11));
     if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET)
