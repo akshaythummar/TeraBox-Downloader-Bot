@@ -2,16 +2,14 @@
 // with the x-panel-key header = PANEL_PASSWORD secret. JSON in, JSON out.
 
 import { makeApi } from './tg.js';
+import { COMMANDS, setAdminMenus } from './bot.js';
+
+export { COMMANDS };
 
 const BOT_TOKEN_KEY = 'panel:bot_token'; // a token set from the panel overrides the BOT_TOKEN secret
 const BOT_ID_KEY = 'panel:bot_id';
 
-export const COMMANDS = [
-  ['start', 'Start the bot'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'],
-  ['redeem', 'Redeem a gift card'], ['ref', 'Invite friends, earn Premium'], ['top', 'Top inviters'], ['mystats', 'Your statistics'],
-  ['mystatus', 'Premium / tag / stats'], ['history', 'Your history'], ['search', 'Search the library'],
-  ['videos', 'Videos'], ['lang', 'Language'],
-].map(([command, description]) => ({ command, description }));
+
 
 let tokenCache = null;
 // the token in use: panel override (D1) or the BOT_TOKEN secret; cached 30s per isolate
@@ -23,7 +21,7 @@ export async function botToken(env, db) {
 }
 
 // webhook + command menu (what /setup did)
-export async function setupWebhook(env, token, origin) {
+export async function setupWebhook(env, token, origin, db = null) {
   const api = makeApi(token, env.TG_API);
   const hook = await api.call('setWebhook', {
     url: `${origin}/webhook`, secret_token: env.WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query', 'my_chat_member'], drop_pending_updates: false,
@@ -31,6 +29,7 @@ export async function setupWebhook(env, token, origin) {
   // scoped lists (e.g. left by another bot host) override the default one — clear them first
   for (const type of ['all_private_chats', 'all_group_chats', 'all_chat_administrators']) await api.call('deleteMyCommands', { scope: { type } });
   const cmds = await api.call('setMyCommands', { commands: COMMANDS });
+  if (db) await setAdminMenus(api, env, db).catch(e => console.log('admin menus', e.message));
   return { hook, cmds };
 }
 
@@ -97,7 +96,7 @@ export async function panelApi(req, env, db, path) {
 
     case 'start': {
       if (!origin) return fail('PUBLIC_URL is not set in wrangler.toml');
-      const r = await setupWebhook(env, token, origin);
+      const r = await setupWebhook(env, token, origin, db);
       return r.hook.ok ? ok({ message: 'Bot started: webhook set to Cloudflare.' }) : fail(r.hook.description || 'setWebhook failed');
     }
 
@@ -122,7 +121,7 @@ export async function panelApi(req, env, db, path) {
       await db.set(BOT_TOKEN_KEY, t);
       await db.set(BOT_ID_KEY, me.result.id);
       tokenCache = null;
-      const r = origin ? await setupWebhook(env, t, origin) : null;
+      const r = origin ? await setupWebhook(env, t, origin, db) : null;
       return ok({ message: `Now running @${me.result.username}.${cleared ? ' Saved video file_ids were cleared (new bot).' : ''}${r?.hook.ok ? ' Webhook set.' : ''}` });
     }
 

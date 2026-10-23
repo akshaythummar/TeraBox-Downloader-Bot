@@ -230,7 +230,7 @@ export default {
     if (url.pathname === '/m3u8') return m3u8(env, db, url);
     if (url.pathname.startsWith('/panel-api/')) return panelApi(req, env, db, url.pathname.slice(11));
     if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET)
-      return Response.json(await setupWebhook(env, env.BOT_TOKEN, url.origin));
+      return Response.json(await setupWebhook(env, env.BOT_TOKEN, url.origin, db));
     return new Response('Not found', { status: 404 });
   },
   async scheduled(event, env) {

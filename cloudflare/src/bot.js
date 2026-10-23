@@ -66,6 +66,97 @@ No download, no waiting — it streams right here in Telegram.
 Choose an option below 👇
 `;
 
+// ---------------- admin commands: one list for the Admin Panel, /adcmd and the admins' "/" menu ---------------- //
+// [command, what it does / usage, owner-only?]
+export const ADMIN_HELP = [
+  ['stats', '📊 Stats & Logs', [
+    ['stats', 'Bot stats, top users, popular links'],
+    ['funnel', 'Daily funnel: new users → trials → payments. /funnel 7'],
+    ['userstats', 'A user\'s download stats: /userstats <id>'],
+    ['logs', 'Recent bot log: /logs 50'],
+    ['errors', 'Recent failures: /errors 20'],
+    ['apihealth', 'TeraBox API + HLS proxy status'],
+    ['auditlog', 'Admin action log: /auditlog 30', 1],
+  ]],
+  ['premium', '⭐ Premium', [
+    ['pre', 'Give Premium: /pre <id> 7d (1d 2d 3d 5d 7d 1w 2w 1m unlimited)'],
+    ['addpremium', 'Give Premium days: /addpremium <id> <days>'],
+    ['renew', 'Renew / extend: /renew <id> <days>'],
+    ['de', 'Remove Premium: /de <id>'],
+    ['premium_users', 'List Premium users with expiry'],
+    ['finduser', 'Look up a user: /finduser <id>'],
+  ]],
+  ['gc', '🎁 Gift Cards', [
+    ['gen', 'Make cards with one-tap redeem links: /gen 1d 5 VIP'],
+    ['gclist', 'All cards with status'],
+    ['gctrack', 'Who redeemed: /gctrack 24h, /gctrack <user id>, /gctrack <code>'],
+    ['gcheck', 'Check a card: /gcheck AT-XXXXXXXX'],
+    ['gcdel', 'Delete an unused card: /gcdel AT-XXXXXXXX'],
+    ['allowredeem', 'Let a user redeem another card: /allowredeem <id>', 1],
+  ]],
+  ['users', '👥 Users & Admins', [
+    ['ban', 'Ban: /ban <id>'],
+    ['unban', 'Unban: /unban <id>'],
+    ['banned_users', 'List banned users'],
+    ['settag', 'Set a tag: /settag <id> <tag>'],
+    ['masstag', 'Tag many: /masstag <id1,id2> <tag>'],
+    ['untag', 'Remove tags: /untag <id1,id2>'],
+    ['remove', 'Reset a user\'s hourly link limit: /remove <id>'],
+    ['addadmin', 'Add an admin: /addadmin <id>', 1],
+    ['removeadmin', 'Remove an admin: /removeadmin <id>', 1],
+    ['adminlist', 'List admins', 1],
+  ]],
+  ['bc', '📢 Broadcast', [
+    ['broadcast', 'To all users: /broadcast <text>, or reply to any message — preview + confirm first', 1],
+    ['broadcaststatus', 'Live progress of a broadcast', 1],
+    ['stopbroadcast', 'Stop a running broadcast', 1],
+    ['announce', 'Scheduled: /announce <minutes> <text>', 1],
+    ['broadcast_legacy', 'Text broadcast without preview: /broadcast_legacy <text>'],
+  ]],
+  ['videos', '🎬 /videos & Plans', [
+    ['videosfreemode', '/videos free for everyone: /videosfreemode on | off'],
+    ['videosready', 'How many pre-uploaded videos are ready'],
+    ['setcooldown', '/videos cooldown: /setcooldown <seconds>', 1],
+    ['setplan', 'Text shown above the /plan menu: /setplan <text>', 1],
+  ]],
+  ['config', '⚙️ Settings & TeraBox', [
+    ['configview', 'All runtime settings'],
+    ['configset', 'Change one: /configset DAILY_FREE_VIDEOS 5 (also FREE_HOURLY_LIMIT, MAX_FILES_PER_REQUEST, VIDEOS_COOLDOWN_SECONDS, FORCE_CHANNELS)'],
+    ['configreset', 'Back to default: /configreset <KEY>'],
+    ['maintenance', 'Maintenance: /maintenance on [reason] | off'],
+    ['setapi', 'TeraBox login: /setapi cookie <value> | jstoken <value> | proxy <url>'],
+    ['reloadconfig', 'Reload the TeraBox settings'],
+    ['maxfiles', 'Max files per link for free users: /maxfiles <n>', 1],
+    ['setforce', 'Add a force-join channel: /setforce channel @name', 1],
+    ['removeforce', 'Remove one: /removeforce channel @name', 1],
+    ['panic', 'Emergency stop (maintenance on)', 1],
+    ['resume', 'Back online (maintenance off)', 1],
+  ]],
+  ['backup', '💾 Backup', [
+    ['backup', 'Full database backup as a file', 1],
+    ['restore', 'Reply to a backup file to restore it', 1],
+    ['logrotate', 'Clear the bot log'],
+    ['restart', 'Show the system card (build, maintenance)', 1],
+  ]],
+];
+
+// Telegram "/" menu for each admin: the user commands + the admin ones they may use. Shown only to
+// them (chat scope). Errors are ignored (Telegram refuses it for someone who never opened the bot).
+export const COMMANDS = [
+  ['start', 'Start the bot'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'], ['top', 'Top inviters'],
+  ['redeem', 'Redeem a gift card'], ['ref', 'Invite friends, earn Premium'], ['mystats', 'Your statistics'],
+  ['mystatus', 'Premium / tag / stats'], ['history', 'Your history'], ['search', 'Search the library'],
+  ['videos', 'Videos'], ['lang', 'Language'],
+].map(([command, description]) => ({ command, description }));
+export async function setAdminMenus(api, env, db, only = null) {
+  const owner = +env.OWNER_ID;
+  const ids = only ? [only] : [...new Set([owner, ...String(env.ADMINS || '').split(',').map(Number).filter(Boolean), ...(await db.all('SELECT id FROM users WHERE admin = 1')).map(r => r.id)])];
+  for (const id of ids) {
+    const admin = ADMIN_HELP.flatMap(([, , cmds]) => cmds.filter(c => !c[2] || id === owner)).map(([command, d]) => ({ command, description: `⚙️ ${d}`.slice(0, 256) }));
+    await api.call('setMyCommands', { commands: [...COMMANDS, ...admin], scope: { type: 'chat', chat_id: id } });
+  }
+}
+
 // ---------------- pure helpers (tools.py) ---------------- //
 
 const nowS = () => Date.now() / 1000;
@@ -926,22 +1017,23 @@ Choose your preferred language:
   // ==================== admin panel ====================
   const adminCb = (re, fn) => onCb(re, async e => ((await isAdmin(e.uid)) ? fn(e) : e.answer('Access denied!', true)));
 
-  adminCb(/^menu_admin$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  ⚙️ 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-Choose an admin action 👇
-`, { buttons: [
-    [Button.inline('📊 Stats', 'admin_stats'), Button.inline('💻 Usage', 'admin_usage')],
-    [Button.inline('⭐ Premium Mgmt', 'admin_premium'), Button.inline('🎁 Gift Cards', 'admin_gc')],
-    [Button.inline('🏷 Tags', 'admin_tags'), Button.inline('🚫 Ban Users', 'admin_ban')],
-    [Button.inline('📝 Logs', 'admin_logs'), Button.inline('📢 Broadcast', 'admin_broadcast')],
-    [Button.inline('🔧 Maintenance', 'admin_maint')],
-    [Button.inline('🩺 API Health', 'admin_api'), Button.inline('🧩 Config', 'admin_config')],
-    [Button.inline('💾 Backup', 'admin_backup')],
-    [Button.inline('◀️ Back', 'menu_main')],
+  adminCb(/^menu_admin$/, e => e.edit('┏━━━━━━━━━━━━━━━━━⍟\n┃  ⚙️ 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥\n┗━━━━━━━━━━━━━━━━━━━━━⍟\n\nPick a section — each one lists its commands with examples.\n💡 Tip: type **/** in this chat — admin commands are in the menu (⚙️).', { buttons: [
+    [Button.inline('📊 Live stats', 'admin_stats'), Button.inline('🔧 Maintenance', 'admin_maint')],
+    ...ADMIN_HELP.reduce((rows, [key, title], i) => (i % 2 ? rows[rows.length - 1].push(Button.inline(title, `ah_${key}`)) : rows.push([Button.inline(title, `ah_${key}`)]), rows), []),
+    [Button.inline('🩺 API Health', 'admin_api'), Button.inline('🧩 Current settings', 'admin_config')],
+    [Button.inline('📋 All commands', 'ah_all'), Button.inline('◀️ Back', 'menu_main')],
   ] }));
+  // one section's commands (owner-only ones marked 👑, hidden from other admins)
+  const helpLines = (cmds, uid) => cmds.filter(c => !c[2] || int(uid) === OWNER_ID).map(([c, d, o]) => `${o ? '👑 ' : ''}/${c} — ${escapeMarkdown(d)}`);
+  adminCb(/^ah_\w+$/, async e => {
+    const key = e.data.slice(3);
+    if (key === 'all') return e.edit(adcmdText(e.uid).slice(0, 4000), { buttons: back('menu_admin') });
+    const sec = ADMIN_HELP.find(([k]) => k === key);
+    if (!sec) return e.answer('Unknown section', true);
+    await e.edit(`**${sec[1]}**\n\n${helpLines(sec[2], e.uid).join('\n')}${int(e.uid) === OWNER_ID ? '\n\n👑 = owner only' : ''}`, { buttons: back('menu_admin') });
+  });
+  const adcmdText = uid => '┏━━━━━━━━━━⍟\n┃ 𝘼𝙙𝙢𝙞𝙣 𝘾𝙤𝙢𝙢𝙖𝙣𝙙𝙨\n┗━━━━━━━━━━━━━━━━━⍟\n\n' +
+    ADMIN_HELP.map(([, title, cmds]) => { const l = helpLines(cmds, uid); return l.length ? `**── ${title} ──**\n${l.join('\n')}` : ''; }).filter(Boolean).join('\n\n');
 
   // admin_stats + /stats: counters (day 'all'), active premium, banned, unused gift cards, users seen today
   async function botTotals() {
@@ -970,112 +1062,6 @@ Choose an admin action 👇
 🎁 **Gift Cards:** ${gc}
 `, { buttons: back('menu_admin') });
   });
-
-  adminCb(/^admin_usage$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  💻 𝐑𝐞𝐬𝐨𝐮𝐫𝐜𝐞 𝐔𝐬𝐚𝐠𝐞
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-💾 **Disk:** N/A (Cloudflare Workers)
-🧠 **RAM:** N/A (Cloudflare Workers)
-📁 **Downloads:** 0 files (0MB) — streaming only
-`, { buttons: back('menu_admin') }));
-
-  adminCb(/^admin_premium$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  ⭐ 𝐏𝐫𝐞𝐦𝐢𝐮𝐦 𝐌𝐚𝐧𝐚𝐠𝐞𝐦𝐞𝐧𝐭
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-**Commands:**
-\`/pre <user_id> <duration>\` — Promote
-\`/de <user_id>\` — Demote
-\`/premium_users\` — List all
-\`/demote_all_premium\` — Remove all
-\`/addpremium <id> <days>\` — Grant days
-\`/delpremium <id>\` — Revoke
-\`/renew <id> <days>\` — Renew/extend
-\`/finduser <id>\` — Lookup user
-\`/userstats [id]\` — Download stats
-
-**Duration:** 1d, 2d, 3d, 5d, 7d, 1w, 2w, 1m, unlimited
-`, { buttons: back('menu_admin') }));
-
-  adminCb(/^admin_gc$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  🎁 𝐆𝐢𝐟𝐭 𝐂𝐚𝐫𝐝 𝐌𝐚𝐧𝐚𝐠𝐞𝐦𝐞𝐧𝐭
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-**Commands:**
-\`/gen <duration> [count]\` — Generate cards
-\`/gclist\` — List all cards (with buttons)
-\`/gctrack\` — Track who used cards
-\`/gctrack 24h\` — Cards used last 24h
-\`/gctrack <user_id>\` — Cards used by user
-\`/gcdel <code>\` — Delete a card
-\`/gcheck <code>\` — Validate a card
-\`/allowredeem <user_id>\` — Reset user redemption
-
-**Duration:** 1d, 2d, 3d, 5d, 7d, 1w, 2w, 1m, unlimited
-`, { buttons: back('menu_admin') }));
-
-  adminCb(/^admin_tags$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  🏷 𝐓𝐚𝐠 𝐌𝐚𝐧𝐚𝐠𝐞𝐦𝐞𝐧𝐭
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-**Commands:**
-\`/settag <user_id> <tag>\` — Set custom tag
-\`/masstag <id1,id2> <tag>\` — Tag many users
-\`/untag <id1,id2>\` — Remove tags
-\`/tag\` — View your own tag
-
-**Auto Tags:**
-Owner and Admins get auto-tagged if no custom tag set.
-`, { buttons: back('menu_admin') }));
-
-  adminCb(/^admin_ban$/, async e => {
-    const banned = (await db.all('SELECT id FROM users WHERE banned = 1')).map(r => r.id);
-    const lines = [];
-    for (const uid of banned.slice(0, 10)) { const n = await nameOf(uid); lines.push(n ? `• ${n[0]} — \`${uid}\`` : `• Unknown — \`${uid}\``); }
-    await e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  🚫 𝐁𝐚𝐧 𝐔𝐬𝐞𝐫𝐬
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-**Current banned:**
-${lines.length ? lines.join('\n') : 'No banned users.'}
-
-**Commands:**
-\`/finduser <id>\` — Lookup user
-\`/ban <user_id>\` — Ban
-\`/unban <user_id>\` — Unban
-\`/banned_users\` — List all
-`, { buttons: back('menu_admin') });
-  });
-
-  adminCb(/^admin_logs$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  📝 𝐋𝐨𝐠𝐬
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-Use: \`/logs\` or \`/logs 50\`
-\`/errors [n]\` — Download failures
-\`/apihealth\` — API status
-\`/logrotate\` — Rotate log now
-`, { buttons: back('menu_admin') }));
-
-  adminCb(/^admin_broadcast$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  📢 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-**Commands:**
-\`/broadcast <message>\` — Send now (owner)
-\`/broadcast_legacy <message>\` — Via channel (admin)
-\`/broadcaststatus\` — Live progress of a broadcast (owner)
-\`/stopbroadcast\` — Stop a running broadcast (owner)
-\`/announce <minutes> <msg>\` — Schedule delay
-`, { buttons: back('menu_admin') }));
 
   adminCb(/^admin_maint$/, async e => {
     const [on, reason] = await getMaintenance();
@@ -1144,16 +1130,6 @@ Use: \`/logs\` or \`/logs 50\`
     return bad ? [false, null, `Bad entry \`${bad}\` (use @name or -100id).`] : [true, items, ''];
   }
   adminCb(/^admin_config$/, async e => e.edit('**Runtime Config**\n\n' + (await configViewText()) + '\n\nEdit: `/configset <KEY> <VALUE>` · Reset: `/configreset <KEY>`', { buttons: back('menu_admin') }));
-
-  adminCb(/^admin_backup$/, e => e.edit(`
-┏━━━━━━━━━━━━━━━━━⍟
-┃  💾 𝐁𝐚𝐜𝐤𝐮𝐩
-┗━━━━━━━━━━━━━━━━━━━━━⍟
-
-Use: \`/backup\`
-Full snapshot: premium, bans, tags, gift cards, stats, history, config.
-Restore: reply to the file with \`/restore\`
-`, { buttons: back('menu_admin') }));
 
   // ==================== user mgmt / plans ====================
   on(/^\/remove (.*)/, async (m, g) => {
@@ -1357,101 +1333,7 @@ Restore: reply to the file with \`/restore\`
     await m.reply(`Force ${g[1]} removed.\nCurrent ${g[1]}s: ${pyList(list)}`);
   }, OWNER);
 
-  on(/^\/adcmd/, async m => {
-    let text = `
-┏━━━━━━━━━━⍟
-┃ 𝘼𝙙𝙢𝙞𝙣 & 𝙊𝙬𝙣𝙚𝙧 𝘾𝙤𝙢𝙢𝙖𝙣𝙙𝙨
-┗━━━━━━━━━━━━━━━━━⍟
-
-**── Premium Management ──**
-/pre \`<user_id>\` \`<duration>\` — Promote to premium
-/de \`<user_id>\` — Demote from premium
-/premium_users — List all premium with expiry
-/demote_all_premium — Remove all premium
-/addpremium \`<id>\` \`<days>\` — Grant premium days
-/delpremium \`<id>\` — Revoke premium
-/renew \`<id>\` \`<days>\` — Renew/extend premium
-/userstats \`[id]\` — Per-user download stats
-
-**Duration:** \`1d\` \`2d\` \`3d\` \`5d\` \`7d\` \`1w\` \`2w\` \`1m\` \`unlimited\`
-
-**── Gift Cards ──**
-/gen \`<duration>\` \`[count]\` — Generate gift cards
-/gclist — List all gift cards
-/gcdel \`<code>\` — Delete a gift card
-/gcheck \`<code>\` — Validate a gift card
-
-**── User Management ──**
-/finduser \`<id>\` — Lookup user (status/premium/tag)
-/ban \`<user_id>\` — Ban user
-/unban \`<user_id>\` — Unban user
-/banned_users — List banned users
-/masstag \`<id1,id2>\` \`<tag>\` — Tag many users
-/untag \`<id1,id2>\` — Remove tags
-/remove \`<user_id>\` — Remove user rate limit
-/broadcast \`<message>\` — Broadcast (owner only)
-/broadcast_legacy \`<message>\` — Broadcast via channel
-/broadcaststatus — Live progress of a broadcast
-/stopbroadcast — Stop a running broadcast
-/announce \`<minutes>\` \`<message>\` — Scheduled broadcast
-
-**── Bot Management ──**
-/stats — Bot statistics + top users/links
-/usage — Disk, RAM, CPU usage
-/logs \`[count]\` — Recent error logs
-/errors \`[count]\` — Recent download failures
-/apihealth — Resolver/HLS worker status
-/logrotate — Rotate bot.log now (auto daily)
-/configview — View runtime config
-/configset \`<KEY>\` \`<VALUE>\` — Edit runtime config
-/configreset \`<KEY>\` — Reset key to default
-/setapi \`<jstoken|cookie|proxy>\` \`<value>\` — Rotate TeraBox config live
-/reloadconfig — Reload resolver config
-/backup — Full Redis snapshot
-/restore — Restore (reply to backup file)
-/reindex — Rebuild file library (owner)
-/setplan \`<text>\` — Update plan text
-/cleandownloads — Clean downloads folder
-
-**── Media Tools ──**
-/mp3 — Reply to video → bitrate menu (128/192/256/320)
-/compress — Reply to video → resolution menu (480/720/1080)
-/dl \`<link>\` — Download original quality
-/dl \`720p\` \`<link>\` — Download + compress 720p
-/dl \`480p\` \`<link>\` — Download + compress 480p
-/folder \`<link>\` — Download entire folder (premium)
-/quick \`<link>\` — Fast single-file download
-/preview \`<link>\` — Preview first 3 files
-/search \`<name>\` — Find files in the library
-/mystatus — Your premium/tag/stats
-/mystats — Download statistics
-/ref — Invite friends, earn Premium
-/cancel — Cancel active downloads
-/setthumb — Reply to image → set thumbnail (premium)
-/removethumb — Remove custom thumbnail
-/lang \`<code>\` — Set language (en/ne/hi)
-`;
-    if (m.uid === OWNER_ID) text += `
-**── Owner Only ──**
-/update — Pull latest code & restart bot
-/setforce channel \`@username\` — Add force channel
-/setforce group \`@username\` — Add force group
-/removeforce channel \`@username\` — Remove force channel
-/removeforce group \`@username\` — Remove force group
-/panic — 🚨 Emergency stop all services
-/resume — Bring bot back online
-/maintenance [on/off] — Toggle maintenance mode
-/auditlog \`[count]\` — View admin action log
-/maxfiles \`<number>\` — Set max files per request
-/setcooldown \`<seconds>\` — Set /videos cooldown (links have none)
-
-**── Admin Management (Owner) ──**
-/addadmin \`<user_id>\` — Add new admin
-/removeadmin \`<user_id>\` — Remove admin
-/adminlist — List all admins
-`;
-    await m.reply(text);
-  }, ADMIN);
+  on(/^\/adcmd/, async m => m.reply(adcmdText(m.uid).slice(0, 4000)), ADMIN);
 
   on(/^\/history/, async m => {
     const raw = (await urow(m.uid)).history;
@@ -1564,6 +1446,7 @@ Restore: reply to the file with \`/restore\`
     if (uid === OWNER_ID) return m.reply('Cannot remove owner from admin.');
     if (await isAdmin(uid)) return m.reply(`User \`${uid}\` is already an admin.`);
     await db.setUser(uid, { admin: 1 }); uncache(`admin:${uid}`); uncache('admins');
+    await setAdminMenus(api, env, db, uid); // their "/" menu gets the admin commands
     await logAudit('ADD_ADMIN', m.uid, `Added user ${uid}`);
     const n = await nameOf(uid);
     await m.reply(n ? `✅ **Admin Added!**\n\n**Name:** ${n[0]}\n**Username:** @${n[1]}\n**ID:** \`${uid}\`` : `✅ Admin \`${uid}\` added (user not found for name).`);
@@ -1574,6 +1457,7 @@ Restore: reply to the file with \`/restore\`
     if (ADMINS.includes(uid)) return m.reply(`❌ Cannot remove \`${uid}\` — they are a **config admin**.\nEdit ADMINS in wrangler.toml to remove them.`);
     if ((await urow(uid)).admin !== 1) return m.reply(`User \`${uid}\` is not an admin.`);
     await db.run('UPDATE users SET admin = 0 WHERE id = ?', uid); uncache(`admin:${uid}`); uncache('admins');
+    await api.call('deleteMyCommands', { scope: { type: 'chat', chat_id: uid } }); // back to the normal "/" menu
     await logAudit('REMOVE_ADMIN', m.uid, `Removed user ${uid}`);
     await m.reply(`✅ Admin \`${uid}\` removed.`);
   }, OWNER);
