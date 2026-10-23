@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS users (
   v_pos REAL,                             -- /videos: position in the pre-uploaded list (videos.ready)
   v_start REAL,
   trial_at REAL,                          -- /videos trial start
-  trial_n INTEGER NOT NULL DEFAULT 0,     -- /videos trial videos used (VIDEOS_TRIAL_VIDEOS, default 5)
+  trial_n INTEGER NOT NULL DEFAULT 0,     -- /videos free videos used (today's, with DAILY_FREE_VIDEOS)
+  free_day TEXT,                          -- IST day trial_n counts for (daily free videos)
   sub_until INTEGER,                      -- paid /videos subscription end (payment worker)
   sub_checked INTEGER,
   sub_rem TEXT,                           -- renew reminder sent for this sub_until: soon | ended

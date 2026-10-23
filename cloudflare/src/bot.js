@@ -279,6 +279,7 @@ export function createBot(env, api, db, origin) {
       MAX_FILES_PER_REQUEST: int(o.MAX_FILES_PER_REQUEST ?? 10),
       VIDEOS_COOLDOWN_SECONDS: parseFloat(o.VIDEOS_COOLDOWN_SECONDS ?? env.VIDEOS_COOLDOWN_SECONDS ?? 1) || 0,
       FREE_HOURLY_LIMIT: int(o.FREE_HOURLY_LIMIT ?? 0),
+      DAILY_FREE_VIDEOS: int(o.DAILY_FREE_VIDEOS ?? env.VIDEOS_DAILY_FREE ?? 5),
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
     };
@@ -1113,6 +1114,7 @@ Use: \`/logs\` or \`/logs 50\`
     MAX_FILES_PER_REQUEST: { section: 'Limits', kind: 'int', min: 1, max: 50 },
     VIDEOS_COOLDOWN_SECONDS: { section: 'Limits', kind: 'int', min: 0, max: 300 },
     FREE_HOURLY_LIMIT: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
+    DAILY_FREE_VIDEOS: { section: 'Limits', kind: 'int', min: 0, max: 50 },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
@@ -2108,7 +2110,7 @@ Restore: reply to the file with \`/restore\`
       } catch { return null; }
     };
     // /videos state lives in the users row; the code keeps the old video_state field names
-    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', trial_n: 'trial_n', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
+    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', trial_n: 'trial_n', free_day: 'free_day', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
     // One users-row write (+ video_lists when a new 200 is fetched). Never throws: if D1 refuses
     // writes (e.g. free daily write limit hit) the video is still sent — only position/cooldown isn't saved.
     const setState = async (uid, fields) => {
@@ -2143,7 +2145,15 @@ Restore: reply to the file with \`/restore\`
           if (st.subscribed) return true;
         }
       }
-      return state.trial_start_time && int(state.trial_n) < TRIAL ? 'trial' : false;
+      ctx.freeInfo = freeInfo(state, (await runtime()).DAILY_FREE_VIDEOS);
+      return ctx.freeInfo && ctx.freeInfo.used < ctx.freeInfo.limit ? 'trial' : false;
+    }
+    // Free videos for a user who has claimed the trial. With DAILY_FREE_VIDEOS > 0 they get that many
+    // every IST day (trial_n counts today's, free_day = the day it counts for); 0 = the one-time trial.
+    function freeInfo(state, daily) {
+      if (!state.trial_start_time) return null;
+      if (daily > 0) return { limit: daily, used: state.free_day === ymd() ? int(state.trial_n) : 0, daily: true };
+      return { limit: TRIAL, used: int(state.trial_n), daily: false };
     }
     // ---- per-user pool list (same as the old bot) ----
     // Each user gets 200 random links from the pool, served in order; when they run out, a new
@@ -2189,7 +2199,7 @@ Restore: reply to the file with \`/restore\`
       const u = ur.results[0] || {};
       const state = {
         video_links: u.links, video_index: u.v_idx, last_video_time: u.v_last, vid_pos: u.v_pos, vid_start: u.v_start,
-        trial_start_time: u.trial_at, trial_n: u.trial_n, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
+        trial_start_time: u.trial_at, trial_n: u.trial_n, free_day: u.free_day, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
       };
       // Each user starts at a random video (vid_start), walks to the end, wraps to the beginning and
       // stops just before vid_start — so users get different orders and nobody gets a repeat.
@@ -2285,11 +2295,14 @@ Restore: reply to the file with \`/restore\`
     }
     // one trial video (n = how many the user had before): counted in the same row write, and the
     // plans come right after the last one
-    async function trialVideo(chatId, uid, target, ctx, save, n) {
-      const left = TRIAL - n - 1;
-      const sent = await serveVideo(chatId, uid, target, ctx, { ...save, trial_n: n + 1 }, `🎁 Free video ${n + 1}/${TRIAL}${left ? ` · ${left} left` : ''}`);
+    async function trialVideo(chatId, uid, target, ctx, save, f) {
+      const n = f.used, left = f.limit - n - 1;
+      const sent = await serveVideo(chatId, uid, target, ctx, { ...save, trial_n: n + 1, ...(f.daily ? { free_day: ymd() } : {}) },
+        `🎁 Free video ${n + 1}/${f.limit}${f.daily ? ' today' : ''}${left ? ` · ${left} left` : ''}`);
       if (sent !== false && !left) {
-        await api.send(chatId, '⏰ <b>That was your last free video!</b>\nPick a plan to keep watching unlimited videos 👇', { html: true });
+        await api.send(chatId, f.daily
+          ? `⏰ <b>That was your last free video for today!</b>\n🎁 ${f.limit} more free tomorrow — or watch unlimited right now 👇`
+          : '⏰ <b>That was your last free video!</b>\nPick a plan to keep watching unlimited videos 👇', { html: true });
         await showPlans(chatId);
       }
     }
@@ -2306,12 +2319,14 @@ Restore: reply to the file with \`/restore\`
         hasAccess(m.uid, ctx),
       ]);
       const save = { last_video_time: nowS(), ...(reg ? { registered: 1 } : {}) };
-      if (access === 'trial') return trialVideo(m.chatId, m.uid, m, ctx, save, int(state.trial_n));
+      if (access === 'trial') return trialVideo(m.chatId, m.uid, m, ctx, save, ctx.freeInfo);
       if (access) return serveVideo(m.chatId, m.uid, m, ctx, save);
       await setState(m.uid, save);
       if (!state.trial_start_time || int(parseFloat(state.trial_start_time)) === 0)
-        return m.reply(`🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to get <b>${TRIAL} free videos</b> and start watching right now:`, { html: true, buttons: [[Button.inline(`🎁 Get ${TRIAL} Free Videos`, 'vid_trial')]] });
-      await m.reply('⏰ <b>Your free trial is over!</b>\nPlease choose a plan below to continue watching.', { html: true });
+        return m.reply(`🎁 <b>FREE TRIAL — Special Offer for New Users!</b>\n\nClick the button below to get <b>${(await runtime()).DAILY_FREE_VIDEOS || TRIAL} free videos${(await runtime()).DAILY_FREE_VIDEOS ? ' every day' : ''}</b> and start watching right now:`, { html: true, buttons: [[Button.inline(`🎁 Get ${(await runtime()).DAILY_FREE_VIDEOS || TRIAL} Free Videos`, 'vid_trial')]] });
+      await m.reply(ctx.freeInfo?.daily
+        ? `⏰ <b>Today's ${ctx.freeInfo.limit} free videos are used up!</b>\nCome back tomorrow for ${ctx.freeInfo.limit} more, or pick a plan to keep watching now 👇`
+        : '⏰ <b>Your free trial is over!</b>\nPlease choose a plan below to continue watching.', { html: true });
       await showPlans(m.chatId);
     });
 
@@ -2346,9 +2361,12 @@ Restore: reply to the file with \`/restore\`
       const lines = [];
       if (ADMINS.includes(int(uid)) || u.admin === 1) lines.push('👑 <b>Admin</b> — everything is free for you (plans shown as a preview).');
       else if (u.premium_until > now) lines.push(`⭐ <b>Premium active</b> — ${premiumLeft(u.premium_until - Math.floor(now))}\nBuying a plan adds its days on top.`);
-      else if (!u.trial_at) lines.push(`🎁 You have <b>${TRIAL} free videos</b> — send /videos to try.`);
-      else if (int(u.trial_n) < TRIAL) lines.push(`🎁 <b>${TRIAL - int(u.trial_n)} free video(s)</b> left — send /videos.`);
-      else lines.push('🆓 Free plan — your free videos are used up.');
+      else {
+        const daily = (await runtime()).DAILY_FREE_VIDEOS, f = freeInfo({ trial_start_time: u.trial_at, trial_n: u.trial_n, free_day: u.free_day }, daily);
+        if (!f) lines.push(`🎁 You have <b>${daily || TRIAL} free videos${daily ? ' every day' : ''}</b> — send /videos to try.`);
+        else if (f.used < f.limit) lines.push(`🎁 <b>${f.limit - f.used} free video(s)</b> left${f.daily ? ' today' : ''} — send /videos.`);
+        else lines.push(f.daily ? `🆓 Today's free videos are used — <b>${f.limit} more tomorrow</b>.` : '🆓 Free plan — your free videos are used up.');
+      }
       if (await freeMode()) lines.push('🎉 /videos is <b>free for everyone</b> right now!');
       lines.push('💎 <b>Premium</b> = unlimited /videos · multi-file links · folders · custom thumbnail');
       // plans API down: the plain plans text (unless the /setplan text above already went out)
@@ -2357,14 +2375,17 @@ Restore: reply to the file with \`/restore\`
     planViewHook = planView;
     onCb(/^vid_trial$/, async e => {
       const ctx = await loadCtx(e.uid);
+      const daily = (await runtime()).DAILY_FREE_VIDEOS;
       if (ctx.state.trial_start_time) { // an old button pressed again: no second trial
-        await e.answer('You already used your free trial.');
-        return int(ctx.state.trial_n) < TRIAL ? trialVideo(e.chatId, e.uid, e, ctx, {}, int(ctx.state.trial_n)) : showPlans(e.chatId);
+        const f = freeInfo(ctx.state, daily);
+        await e.answer(f.used < f.limit ? 'Here is your next free video.' : 'Your free videos are used up for now.');
+        return f.used < f.limit ? trialVideo(e.chatId, e.uid, e, ctx, {}, f) : showPlans(e.chatId);
       }
       funnel('trials');
       await e.answer('Trial activated!');
-      await e.reply(`🎉 <b>Your free trial is ACTIVE!</b> ${TRIAL} free videos — send /videos for the next one.`, { html: true });
-      await trialVideo(e.chatId, e.uid, e, ctx, { trial_start_time: nowS() }, 0);
+      const f = daily > 0 ? { limit: daily, used: 0, daily: true } : { limit: TRIAL, used: 0, daily: false };
+      await e.reply(`🎉 <b>Your free trial is ACTIVE!</b> ${f.limit} free videos${f.daily ? ' <b>every day</b>' : ''} — send /videos for the next one.`, { html: true });
+      await trialVideo(e.chatId, e.uid, e, ctx, { trial_start_time: nowS() }, f);
     });
     // /purchase<N> from the old bot: create an order on the payment worker, show Pay + Verify.
     onCb(/^vid_plan_(\d+)$/, async e => {
