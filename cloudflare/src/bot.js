@@ -2313,10 +2313,18 @@ Choose your preferred language:
       await funnel('orders');
       await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId, at: Math.floor(nowS()), chat: chatId, first: e.from.first_name || '-', user: e.from.username || '-' }), { ex: 86400 });
       await done();
-      await api.send(chatId,
+      const buttons = [[Button.url(`💳 Pay ₹${plan.price}`, order.result.payment_url)], [Button.inline("✅ I've Paid - Verify", 'vid_verify')]];
+      // the QR right in the chat (same QR as the Pay page — the payment worker keeps it fixed per order);
+      // without it (older payment worker, or Telegram can't fetch it) the text-only message as before
+      const qr = order.result.qr_url || String(order.result.payment_url).replace('/instant-pay/', '/qr/');
+      const sent = await api.call('sendPhoto', { chat_id: chatId, photo: qr, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
+        caption: `💳 <b>Pay ₹${plan.price} for ${escHtml(plan.name)}</b> (${plan.validity_days} days)\n\n` +
+          '<b>📱 How to pay:</b>\n1️⃣ Scan this QR in any UPI app — or save it and use <i>Scan from gallery</i> in GPay / PhonePe / Paytm\n' +
+          "2️⃣ Or tap <b>Pay</b> below for the payment page\n3️⃣ Done — it activates automatically (or tap <b>I've Paid</b>)\n\n⏰ This QR expires in 10 minutes" });
+      if (!sent.ok) await api.send(chatId,
         `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${plan.price}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
-        "<b>📱 How to Pay:</b>\n1️⃣ Scan QR or click Pay button\n2️⃣ Complete payment in UPI app\n3️⃣ Click 'I've Paid' below\n\n⏰ Payment link expires in 5 minutes",
-        { html: true, buttons: [[Button.url(`💳 Pay ₹${plan.price}`, order.result.payment_url)], [Button.inline("✅ I've Paid - Verify", 'vid_verify')]] });
+        "<b>📱 How to Pay:</b>\n1️⃣ Scan QR or click Pay button\n2️⃣ Complete payment in UPI app\n3️⃣ Click 'I've Paid' below\n\n⏰ Payment link expires in 10 minutes",
+        { html: true, buttons });
     });
 
     // /verifynew from the old bot: ask the payment worker whether the order was paid.
@@ -2333,7 +2341,13 @@ Choose your preferred language:
     async function paymentDone(uid, o, auto) {
       if (!(await db.del(`vid_order:${uid}`))) return false;
       await setState(uid, { sub_checked: 0 });
-      if (int(o.days) > 0) await addPremiumDays(uid, int(o.days)); // a paid plan includes bot Premium for its days
+      if (int(o.days) > 0) {
+        await addPremiumDays(uid, int(o.days)); // a paid plan includes bot Premium for its days
+        // the plan runs as long as that Premium: sub_until drives the plan's renew reminders and
+        // /plan's "active till"; reminded = 'expired' keeps the Premium reminders from doubling them
+        const end = (await urow(uid)).premium_until;
+        if (end) await db.setUser(uid, { sub_until: end, sub_rem: null, reminded: 'expired' });
+      }
       await logx(`payment ok ${uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}${auto ? ' (auto)' : ''}`);
       funnel('paid');
       funnel('revenue', int(o.amount));
