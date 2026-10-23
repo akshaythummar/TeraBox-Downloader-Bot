@@ -20,6 +20,8 @@ const DURATION_MAP = { '1d': 1, '2d': 2, '3d': 3, '5d': 5, '7d': 7, '1w': 7, '2w
 // /dl <quality> → TeraBox HLS rendition (replaces the old ffmpeg re-encode)
 const DL_QUALITY_MAP = { '144p': 'M3U8_AUTO_360', '240p': 'M3U8_AUTO_360', '360p': 'M3U8_AUTO_360', '480p': 'M3U8_AUTO_480', '720p': 'M3U8_AUTO_720', '1080p': 'M3U8_AUTO_1080' };
 const DEFAULT_QUALITY = 'M3U8_AUTO_480';
+const PHOTO_EXTENSIONS = new Set('.jpg .jpeg .png .webp .gif .bmp'.split(' '));
+const PHOTO_URL_MAX = 5 * 1024 * 1024; // Telegram: sendPhoto by URL up to 5 MB (bigger goes as a file, up to 20 MB)
 // Telegram's limit for sendVideo by URL, and TeraBox's CDN link by md5 (fixed params, from the old bot)
 const VIDEO_URL_MAX = 20 * 1024 * 1024;
 const cdnLink = md5 => `https://d8.freeterabox.com/file/${md5}?fid=4401480949283-250528-22673172449066&dstime=1709708137&rt=sh&sign=FDtAER-DCb740ccc5511e5e8fedcff06b081203-xKOOrUER%2B6l7qCouNxQTRYbUXx4%3D&expires=8h&chkv=0&chkbd=0&chkpc=&dp-logid=369036930199400835&dp-callid=0&r=799779934&sh=1&region=jp`;
@@ -91,6 +93,9 @@ export const shareCode = u => {
   return q ? (q[1].startsWith('1') && q[1].length > 22 ? q[1] : `1${q[1]}`) : null;
 };
 const getUrl = s => (String(s || '').match(/https?:\/\/\S+/g) || []).find(u => URL_RE.test(u)) || null;
+// every TeraBox link in a message, one per share code
+const getUrls = s => [...new Map((String(s || '').match(/https?:\/\/\S+/g) || []).filter(u => URL_RE.test(u)).map(u => [shareCode(u) || u, u])).values()];
+const MAX_LINKS = 3; // ponytail: per message, each link costs ~10 calls of the free plan's 50; raise on Workers Paid
 const extOf = n => { n = n.toLowerCase(); return n.includes('.') ? '.' + n.split('.').pop() : ''; };
 const pyList = a => `[${a.map(x => `'${x}'`).join(', ')}]`;
 const normalizeName = n => String(n || '').toLowerCase().trim().replace(/\.[a-z0-9]{2,5}$/, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -473,6 +478,15 @@ export function createBot(env, api, db, origin) {
     return !!(await api.send(chatId, caption, { buttons }));
   }
 
+  // A photo in a link: Telegram fetches it from TeraBox's CDN by md5, like the videos (≤5 MB as a photo,
+  // ≤20 MB as a file). Returns false when it can't (no md5, too big, not on that CDN).
+  async function sendImage(chatId, f, caption) {
+    if (!f.md5 || !(f.sizebytes > 0) || f.sizebytes > VIDEO_URL_MAX) return false;
+    const asPhoto = f.sizebytes <= PHOTO_URL_MAX;
+    const r = await api.call(asPhoto ? 'sendPhoto' : 'sendDocument', { chat_id: chatId, [asPhoto ? 'photo' : 'document']: cdnLink(f.md5), caption: md(caption), parse_mode: 'HTML' });
+    return !!r.ok;
+  }
+
   // ---------------- message / callback wrappers ---------------- //
 
   const NOOP = { id: 0, edit: async () => {}, delete: async () => {} };
@@ -665,10 +679,12 @@ export function createBot(env, api, db, origin) {
   const redeemButtons = ok => (ok ? [[Button.inline('⭐ My Premium', 'vid_plans')], [Button.inline('🏠 Main menu', 'menu_main')]]
     : [[Button.inline('👥 Free Premium: invite friends', 'menu_referral')], [Button.inline('💳 Buy Premium', 'vid_plans')], [Button.inline('🏠 Main menu', 'menu_main')]]);
   const identityBlock = (first, last, username, uid) => `\n\nRedeemed by: ${`${first || ''} ${last || ''}`.trim() || '-'} (${username ? `@${username}` : '@-'})\nID: \`${uid}\``;
+  // a name the admin can tap to open the user's profile, even without a username
+  const userLink = (uid, name) => `<a href="tg://user?id=${int(uid)}">${escHtml(name || 'User')}</a>`;
   async function notifyRedeem(uid, from, info) {
     const tagMsg = info.tag ? `\nTag: ${info.tag}` : '';
     for (const a of await getAllAdmins())
-      await api.send(a, `Gift Card Redeemed!\nUser: ${from.first_name || '-'} (@${from.username || '-'})\nID: \`${uid}\`\nCode: \`${info.code}\`\nDuration: ${info.days}d${tagMsg}`);
+      await api.send(a, `Gift Card Redeemed!\nUser: ${userLink(uid, from.first_name)} (@${escHtml(from.username || '-')})\nID: <code>${uid}</code>\nCode: <code>${info.code}</code>\nDuration: ${info.days}d${escHtml(tagMsg)}`, { html: true });
   }
 
   on(/^\/redeem\s+(\S+)/, async (m, g) => {
@@ -752,7 +768,7 @@ export function createBot(env, api, db, origin) {
     const admins = await getAllAdmins();
     // only a user's very first /start (gift / shared-video links and their buttons send /start again)
     if (m.raw._newUser && !admins.includes(uid))
-      for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
+      for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${userLink(uid, name)}\nUsername: @${escHtml(m.from.username || '-')}\nID: <code>${uid}</code>`, { html: true });
     if (!arg?.startsWith('gc_') && !vm) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
     if (refPending && !vm) await sendJoinPrompt(m.chatId, await missingChannels(uid));
     else if (arg === 'plans' && planViewHook) await planViewHook(m.chatId, uid); // t.me/<bot>?start=plans
@@ -1252,8 +1268,13 @@ Restore: reply to the file with \`/restore\`
     const hourly = free ? rt.FREE_HOURLY_LIMIT : 0;
     if (todo.length === 1) {
       const f = todo[0], ext = extOf(f.file_name);
+      if (PHOTO_EXTENSIONS.has(ext)) {
+        if (!(await sendImage(m.chatId, f, cardCaption(f, m.from, tag, null)))) return hm.edit(`Sorry! Couldn't fetch this photo (${f.size}). Photos up to 20 MB are supported — open it on TeraBox: ${url}`);
+        await Promise.all([hm.edit(`✅ Photo sent ⚡`, { buttons: [[Button.url('📤 Share & get Premium', await refShare(m.uid))]] }), funnel('links'), recordLink(m.uid, { files: [f], link: shorturl, g, hourly })]);
+        return;
+      }
       if (!VIDEO_EXTENSIONS.has(ext))
-        return hm.edit(`Sorry! File type \`${ext}\` is not supported (photos aren't supported right now).\nSupported: ${[...VIDEO_EXTENSIONS].sort().join(', ')}`);
+        return hm.edit(`Sorry! File type \`${ext}\` is not supported.\nSupported: videos (${[...VIDEO_EXTENSIONS].slice(0, 8).join(', ')}…) and photos (${[...PHOTO_EXTENSIONS].join(', ')}).`);
       const took = `${((Date.now() - T0) / 1000).toFixed(1)}s`;
       if (!(await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, took), quality, g.thumb, true, m.uid))) {
         await recordLink(m.uid, { failedN: 1, g });
@@ -1280,7 +1301,11 @@ Restore: reply to the file with \`/restore\`
     const ok = [];
     let failed = 0, sendFails = 0;
     const videos = todo.filter(f => VIDEO_EXTENSIONS.has(extOf(f.file_name)));
-    failed += todo.length - videos.length;
+    const photos = todo.filter(f => PHOTO_EXTENSIONS.has(extOf(f.file_name)));
+    failed += todo.length - videos.length - photos.length;
+    // ponytail: photos of a folder: the first 5 (each is one Telegram call)
+    for (const f of photos.slice(0, 5)) { if (await sendImage(m.chatId, f, cardCaption(f, m.from, tag, null))) ok.push(f); else { failed++; sendFails++; } }
+    failed += Math.max(photos.length - 5, 0);
     for (const [i, f] of videos.slice(0, MAX_POSTS).entries()) {
       // ponytail: video files only for the first 5 (each try can cost 2 Telegram calls + 2 D1 queries)
       if (await sendStream(m.chatId, m.isPrivate, f, cardCaption(f, m.from, tag, null), quality, thumb, i < 5, m.uid)) ok.push(f);
@@ -2013,8 +2038,26 @@ Restore: reply to the file with \`/restore\`
     if (!m.replyTo && !text) return m.reply('**Usage:** `/broadcast <message>`\nOr reply to any message with `/broadcast`.');
     const total = Math.max((await userCount()) - 1, 0); // minus the owner, who is a user too
     const mode = m.replyTo ? 'forward' : 'text';
-    const status = await m.reply(`📢 Broadcast (${mode === 'forward' ? 'copy of the replied message' : 'text'}) queued for **${total}** users.\nStarts within a minute — this message updates live.`);
-    await queueBroadcast({ kind: 'broadcast', mode, text, from_chat: m.chatId, msg_id: m.replyTo?.message_id ?? null, exclude: m.uid, total, status_chat: m.chatId, status_msg: status.id });
+    // nothing is sent until the owner confirms: first a preview, exactly as users will see it
+    const pv = mode === 'forward'
+      ? await api.call('copyMessage', { chat_id: m.chatId, from_chat_id: m.chatId, message_id: m.replyTo.message_id })
+      : await api.call('sendMessage', { chat_id: m.chatId, text: md(text), parse_mode: 'HTML' });
+    if (!pv.ok) return m.reply(`❌ Preview failed: ${pv.description || 'unknown error'} — nothing was sent.`);
+    await db.set(`bc_draft:${m.uid}`, JSON.stringify({ mode, text, from_chat: m.chatId, msg_id: m.replyTo?.message_id ?? null, total }), { ex: 3600 });
+    await m.reply(`👆 **Preview** — this is exactly what users get (${mode === 'forward' ? 'copy of the replied message' : 'text'}).\n\n📢 Send it to **${total}** users?`,
+      { buttons: [[Button.inline(`✅ Send to ${total} users`, 'bc_go')], [Button.inline('❌ Cancel', 'bc_cancel')]] });
+  });
+  onCb(/^bc_(go|cancel)$/, async e => {
+    if (e.uid !== OWNER_ID) return e.answer('Owner only.', true);
+    const raw = await db.get(`bc_draft:${e.uid}`);
+    if (!raw) { await e.answer('This preview expired — send /broadcast again.', true); return e.edit('⌛ Preview expired — nothing was sent.', { buttons: [] }); }
+    await db.del(`bc_draft:${e.uid}`); // claimed: a double tap can't queue it twice
+    if (e.data === 'bc_cancel') { await e.answer('Cancelled'); return e.edit('❌ Broadcast cancelled — nothing was sent.', { buttons: [] }); }
+    const d = JSON.parse(raw);
+    await e.answer('📢 Queued!');
+    await e.edit(`📢 Broadcast queued for **${d.total}** users.\nStarts within a minute — this message updates live.`, { buttons: [] });
+    await queueBroadcast({ kind: 'broadcast', mode: d.mode, text: d.text, from_chat: d.from_chat, msg_id: d.msg_id, exclude: e.uid, total: d.total, status_chat: e.chatId, status_msg: e.msgId });
+    await logAudit('BROADCAST', e.uid, `${d.mode} to ${d.total}`);
   });
   onCb(/^bc_stop_\d+$/, async e => {
     if (e.uid !== OWNER_ID) return e.answer('Owner only.', true);
@@ -2483,7 +2526,12 @@ Restore: reply to the file with \`/restore\`
       if (guard === ADMIN && !(await isAdmin(m.uid))) continue;
       await fn(m, g);
     }
-    if (m.isPrivate && !text.startsWith('/') && getUrl(text)) await handleMessage(m);
+    if (m.isPrivate && !text.startsWith('/') && getUrl(text)) {
+      // several links in one message: each one in turn (the first MAX_LINKS)
+      const urls = getUrls(text);
+      for (const url of urls.slice(0, MAX_LINKS)) await handleMessage(urls.length > 1 ? { ...m, text: url } : m);
+      if (urls.length > MAX_LINKS) await m.reply(`ℹ️ I took the first **${MAX_LINKS}** links. Send the other **${urls.length - MAX_LINKS}** in another message.`);
+    }
   }
 
   async function onCallback(q) {
