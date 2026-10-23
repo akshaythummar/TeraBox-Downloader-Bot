@@ -81,6 +81,8 @@ This loads the old 5 tables. Then run `schema.sql` and `migrate_v2.sql`, which c
 ```bash
 npx wrangler d1 execute terabox-bot --remote --file schema.sql
 npx wrangler d1 execute terabox-bot --remote --file migrate_v2.sql
+# once the bot runs fine on v2 (check the counts first), remove the old tables:
+npx wrangler d1 execute terabox-bot --remote --file drop_v1.sql
 ```
 
 ## 5. Free-tier limits and how this bot stays inside them

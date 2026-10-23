@@ -1,5 +1,5 @@
 -- One-time copy from the old Redis-style tables (kv, hashes, sets, sorted_sets, lists) into schema v2.
--- Run AFTER schema.sql. The old tables are left untouched (backup / rollback); drop them once v2 is proven.
+-- Run AFTER schema.sql. The old tables are left untouched (backup / rollback); drop them with drop_v1.sql once v2 is proven.
 --   npx wrangler d1 execute terabox-bot-eu --remote --file schema.sql
 --   npx wrangler d1 execute terabox-bot-eu --remote --file migrate_v2.sql
 -- Python stored numbers as "17.0", hence CAST(CAST(x AS REAL) AS INTEGER).
