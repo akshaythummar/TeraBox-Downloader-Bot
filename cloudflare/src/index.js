@@ -184,13 +184,14 @@ v.play().catch(() => {});
 // this IST hour (panel graph). A per-isolate memo skips D1 for someone already seen this hour, so most
 // messages cost no query at all; message counts go to the in-memory counters (db.bump).
 const seen = new Set();
+// returns true only when this is the user's very first update (their row was just created)
 async function trackActivity(db, uid) {
-  if (!uid) return;
+  if (!uid) return false;
   const ist = new Date(Date.now() + 5.5 * 3600e3).toISOString();
   const day = ist.slice(0, 10), hh = ist.slice(11, 13), hour = +ist.replace(/\D/g, '').slice(0, 10);
   db.bump(`msgs:${hh}`, 1, day);
   const k = `${hour}:${uid}`;
-  if (seen.has(k)) return;
+  if (seen.has(k)) return false;
   try {
     const [u, a] = await db.batch([
       db.q('INSERT INTO users (id, joined) VALUES (?, ?) ON CONFLICT (id) DO NOTHING', uid, day),
@@ -200,7 +201,8 @@ async function trackActivity(db, uid) {
     if (a.meta.changes) db.bump(`act:${hh}`, 1, day);
     if (seen.size > 5000) seen.clear();
     seen.add(k);
-  } catch (e) { console.log('trackActivity', e.message); }
+    return u.meta.changes > 0;
+  } catch (e) { console.log('trackActivity', e.message); return false; }
 }
 
 export default {
@@ -216,7 +218,8 @@ export default {
       // ack Telegram immediately so it never retries; finish the work in the background.
       // The user row exists before the handler runs (referrals, /start rely on it).
       ctx.waitUntil((async () => {
-        await trackActivity(db, (u.message || u.callback_query)?.from?.id);
+        const isNew = await trackActivity(db, (u.message || u.callback_query)?.from?.id);
+        if (isNew && u.message) u.message._newUser = true; // /start tells the admins only about these
         const work = u.message ? bot.onMessage(u.message) : u.callback_query ? bot.onCallback(u.callback_query) : u.my_chat_member ? bot.onChatMember(u.my_chat_member) : null;
         if (work) await work.catch(e => console.log('update failed', e.stack));
         await db.flush();

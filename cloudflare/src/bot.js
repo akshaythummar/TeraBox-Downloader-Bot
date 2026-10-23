@@ -750,7 +750,8 @@ export function createBot(env, api, db, origin) {
     // the shared video first (it handles the force-join prompt itself)
     if (vm) await handleMessage({ ...m, text: `https://www.terabox.com/s/${vm[1]}`, deep: arg }, null, vm[2]);
     const admins = await getAllAdmins();
-    if (!admins.includes(uid))
+    // only a user's very first /start (gift / shared-video links and their buttons send /start again)
+    if (m.raw._newUser && !admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${name}\nUsername: @${m.from.username || '-'}\nID: \`${uid}\``);
     if (!arg?.startsWith('gc_') && !vm) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
     if (refPending && !vm) await sendJoinPrompt(m.chatId, await missingChannels(uid));
