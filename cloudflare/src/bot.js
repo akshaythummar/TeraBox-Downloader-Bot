@@ -2436,8 +2436,10 @@ Choose your preferred language:
     async function pickVideos(n) {
       // a random point in md5 order, then the next n: random enough, and reads only ~n rows
       const start = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
-      // videos someone's app reported as broken (store app_bad:<md5>) are skipped
-      const ok = "file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM store WHERE key = 'app_bad:' || md5)";
+      // only the /videos pool (url set) — the table also keeps file_ids of files users sent the bot (their
+      // own TeraBox links, no url), which must never show up in someone else's feed. Videos someone's
+      // app reported as broken (store app_bad:<md5>) are skipped.
+      const ok = "url IS NOT NULL AND file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM store WHERE key = 'app_bad:' || md5)";
       let rows = await db.all(`SELECT md5, file_id FROM videos WHERE md5 >= ? AND ${ok} ORDER BY md5 LIMIT ?`, start, n);
       if (rows.length < n) rows = rows.concat(await db.all(`SELECT md5, file_id FROM videos WHERE ${ok} ORDER BY md5 LIMIT ?`, n - rows.length));
       return [...new Map(rows.map(r => [r.md5, r])).values()];
