@@ -271,7 +271,7 @@ var BOT = "__BOT__";
 if (window.Telegram && Telegram.WebApp && !tg) tgReady();
 // Telegram puts the signed login data in the URL hash: read it there so the feed starts at once
 var INIT = (tg && tg.initData) || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
-var feed = document.getElementById("feed"), muted = true, loading = false, ended = false, slides = [];
+var feed = document.getElementById("feed"), muted = true, loading = false, ended = false, slides = [], freeLeft = null;
 var me = 0, meName = ""; try { var u0 = JSON.parse(new URLSearchParams(INIT).get("user")); me = u0.id || 0; meName = u0.username ? "@" + u0.username : (u0.first_name || ""); } catch (e) {}
 document.getElementById("lid").textContent = me || "—"; document.getElementById("lname").textContent = meName;
 var okAt = 0, loginGone = false;
@@ -469,6 +469,8 @@ var io = new IntersectionObserver(function (es) {
       s._go = setTimeout(function () { if (current() !== s) return; prepare(i); if (!s._v) return; if (s._v.currentTime > 0.5) s._v.currentTime = 0; start(s); }, s._v && s._v.readyState >= 2 ? 0 : 250);
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
       if (i > 0) { seen++; document.getElementById("hint").hidden = true; }
+      // free users: the badge counts down, so the paywall after the last one is no surprise
+      if (freeLeft != null) document.getElementById("badge").textContent = "🎁 " + (slides.length - 1 - i + freeLeft) + " more free today";
       if (i >= slides.length - 5) more();
     } else if (s._on) { s._on = false; clearTimeout(s._go); s.classList.remove("tap"); if (s._v) { s._v.pause(); s._v.muted = true; } }
   });
@@ -496,6 +498,7 @@ function more() {
       if (!okAt) loginOk();
       var b = document.getElementById("badge"); b.hidden = false;
       b.textContent = d.unlimited ? "♾️ Unlimited" : "🎁 " + (d.left + d.videos.length) + " free today";
+      freeLeft = d.unlimited ? null : d.left;
       var firstBatch = !slides.length;
       d.videos.forEach(addVideo);
       if (firstBatch && slides.length) document.getElementById("hint").hidden = false;

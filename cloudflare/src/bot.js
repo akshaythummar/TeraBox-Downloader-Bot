@@ -116,7 +116,7 @@ export const ADMIN_HELP = [
   ['videos', '🎬 /videos & Plans', [
     ['videosfreemode', '/videos free for everyone: /videosfreemode on | off'],
     ['videosready', 'How many pre-uploaded videos are ready'],
-    ['app', 'Videos Mini App (beta: admins only until /configset VIDEOS_APP_PUBLIC 1)'],
+    ['app', 'Videos Mini App (beta: admins + APP_TESTERS only until /configset VIDEOS_APP_PUBLIC 1)'],
     ['setcooldown', '/videos cooldown: /setcooldown <seconds>', 1],
     ['setplan', 'Text shown above the /plan menu: /setplan <text>', 1],
   ]],
@@ -375,6 +375,7 @@ export function createBot(env, api, db, origin) {
       // /videos messages are deleted from the chat after this many hours (0 = never; Telegram allows ≤48)
       VIDEO_DELETE_HOURS: Math.min(int(o.VIDEO_DELETE_HOURS ?? env.VIDEO_DELETE_HOURS ?? 24), 47),
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
+      APP_TESTERS: csv(o.APP_TESTERS ?? env.APP_TESTERS), // user IDs who get the app before it's public — as normal users (free limit, paywall)
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
     };
@@ -1107,6 +1108,7 @@ Choose your preferred language:
     DAILY_FREE_VIDEOS: { section: 'Limits', kind: 'int', min: 0, max: 50 },
     VIDEO_DELETE_HOURS: { section: 'Limits', kind: 'int', min: 0, max: 47 },
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
+    APP_TESTERS: { section: 'Limits', kind: 'csv' },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
@@ -2484,7 +2486,7 @@ Choose your preferred language:
       return { ok: true };
     };
     on(/^\/app$/, async m => {
-      if (!(await appAllowed(m.uid))) return m.reply('🎬 Videos App is coming soon!');
+      if (!(await appAllowed(m.uid))) return; // not public yet: no reply, like any unknown command
       if (!m.isPrivate) return m.reply('Open the Videos App in a private chat with the bot.');
       await m.reply('🎬 **Videos App** (beta)\nSwipe up for the next video.', { buttons: [[Button.webapp('🎬 Open Videos App', `${origin}/app`)]] });
     });
@@ -2721,7 +2723,11 @@ Choose your preferred language:
     }
   }
 
-  // the Videos Mini App: admins only until /configset VIDEOS_APP_PUBLIC 1
-  const appAllowed = async uid => (await isAdmin(uid)) || (await runtime()).VIDEOS_APP_PUBLIC === 1;
+  // the Videos Mini App: admins + APP_TESTERS only until /configset VIDEOS_APP_PUBLIC 1
+  const appAllowed = async uid => {
+    if (await isAdmin(uid)) return true;
+    const rt = await runtime();
+    return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
+  };
   return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }) };
 }

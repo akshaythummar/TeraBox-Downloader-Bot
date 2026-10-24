@@ -19,6 +19,7 @@ VIDEOS_PAYMENT_API = "https://terabox-payment-d1.akshaythummar.workers.dev"
 VIDEOS_POOL_WORKER = "https://videosave.hoyakey802.workers.dev,https://videosave.vywyqyku.workers.dev"   # comma-separated; used in turn
 VIDEOS_TRIAL_SECONDS = "180"
 VIDEOS_COOLDOWN_SECONDS = "1"
+APP_TESTERS = "5106288122"   # Videos Mini App testers (normal users, before VIDEOS_APP_PUBLIC); also /configset APP_TESTERS
 VIDEOS_PROMO_URL = "https://mangoflix.xyz"
 VIDEOS_CHANNEL = ""   # empty = no pre-uploads. Was TeraBoxFastDown/1/2 (closed). Comma-separated channel IDs; bot must be admin
 
