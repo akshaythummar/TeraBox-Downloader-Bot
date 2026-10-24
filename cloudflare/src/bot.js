@@ -1984,7 +1984,7 @@ Choose your preferred language:
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
-  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null; // /videos payments: auto-verify + renew reminders (cron)
+  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -2463,8 +2463,21 @@ Choose your preferred language:
       if (ids.length && save.trial_n != null) await setState(uid, { ...save, trial_n: save.trial_n - n + ids.length });
       if (ids.length) funnel('app_videos', ids.length);
       const exp = Math.floor(nowS()) + 50 * 60; // Telegram keeps a file path valid ≥1h; the app asks for more as you swipe
-      const videos = await Promise.all(ok.map(async ([id, p]) => ({ id, src: p ? `/app/v/${id}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}:${p}`)}` : `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
+      const videos = await Promise.all(ok.map(async ([id, p]) => ({ id, d: await sign(env.WEBHOOK_SECRET, `dl:${uid}:${id}`), src: p ? `/app/v/${id}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}:${p}`)}` : `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
       return { ok: true, unlimited: access === true, left, videos };
+    };
+    // ⬇️ in the app: that video into the user's chat (by file_id, instant) — like /videos: spoiler,
+    // no forwarding, auto-deleted. The feed signed the id for this user (d), so only videos the app
+    // already gave them; not counted again.
+    appSend = async (uid, id) => {
+      const fid = (await db.one('SELECT file_id FROM videos WHERE md5 = ?', id))?.file_id;
+      if (!fid) return { ok: false };
+      const hours = (await runtime()).VIDEO_DELETE_HOURS;
+      const r = await api.call('sendVideo', { chat_id: uid, video: fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...(hours ? { caption: `⏳ Auto-deletes from this chat in ${hours}h` } : {}), ...readyMarkup });
+      if (!r.ok) return { ok: false };
+      funnel('app_dl');
+      if (hours) await setState(uid, trackMsg({ vmsgs: (await db.one('SELECT vmsgs FROM users WHERE id = ?', int(uid)))?.vmsgs }, uid, r));
+      return { ok: true };
     };
     on(/^\/app$/, async m => {
       if (!(await appAllowed(m.uid))) return m.reply('🎬 Videos App is coming soon!');
@@ -2706,5 +2719,5 @@ Choose your preferred language:
 
   // the Videos Mini App: admins only until /configset VIDEOS_APP_PUBLIC 1
   const appAllowed = async uid => (await isAdmin(uid)) || (await runtime()).VIDEOS_APP_PUBLIC === 1;
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }) };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }) };
 }

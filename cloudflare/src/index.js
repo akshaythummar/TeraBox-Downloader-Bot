@@ -196,14 +196,20 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 .slide video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 .slide.tall video{object-fit:cover}
 .shade{position:absolute;left:0;right:0;bottom:0;height:38%;background:linear-gradient(transparent,#000c);pointer-events:none}
-.info{position:absolute;left:14px;right:84px;bottom:calc(26px + env(safe-area-inset-bottom));pointer-events:none;text-shadow:0 1px 4px #000}
+.info{position:absolute;left:14px;right:84px;bottom:calc(46px + env(safe-area-inset-bottom));pointer-events:none;text-shadow:0 1px 4px #000}
 .info b{display:block;font-size:16px}.info span{font-size:13px;color:#ddd}
-.rail{position:absolute;right:10px;bottom:calc(30px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:18px;align-items:center}
+.rail{position:absolute;right:10px;bottom:calc(50px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:18px;align-items:center}
 .rail button{width:48px;height:48px;border:0;border-radius:50%;background:#0006;color:#fff;font-size:24px;display:grid;place-items:center;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);cursor:pointer}
 .rail button.on{color:#ff3b5c}
 .rail small{display:block;font-size:11px;text-align:center;margin-top:-12px;color:#eee;text-shadow:0 1px 3px #000}
-.bar{position:absolute;left:0;right:0;bottom:env(safe-area-inset-bottom);height:3px;background:#ffffff33}
-.bar i{display:block;height:100%;width:0;background:#fff}
+.seek{position:absolute;left:0;right:0;bottom:env(safe-area-inset-bottom);height:34px;touch-action:none;cursor:pointer}
+.bar{position:absolute;left:12px;right:12px;bottom:12px;height:3px;border-radius:2px;background:#ffffff40;transition:height .15s}
+.bar i{position:relative;display:block;height:100%;width:0;border-radius:2px;background:#fff}
+.bar i:after{content:"";position:absolute;right:-7px;top:50%;width:14px;height:14px;margin-top:-7px;border-radius:50%;background:#fff;transform:scale(0);transition:transform .15s}
+.seek.drag .bar{height:6px}.seek.drag .bar i:after{transform:scale(1)}
+.tm{position:absolute;left:14px;bottom:24px;font:600 12px ui-monospace,Consolas,monospace;color:#eee;text-shadow:0 1px 3px #000;pointer-events:none}
+.seek.drag .tm{font-size:15px}
+#toast{position:fixed;top:max(56px,calc(env(safe-area-inset-top) + 46px));left:50%;transform:translateX(-50%);z-index:6;transition:opacity .3s;white-space:nowrap}
 .load{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;opacity:0;transition:opacity .2s}
 .slide.wait .load{opacity:1}
 .slide.ready .poster{display:none}
@@ -256,6 +262,7 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
   <div class="ring" id="ring"><svg viewBox="0 0 64 64"><circle class="c" cx="32" cy="32" r="28"/><circle class="s" cx="32" cy="32" r="28"/><path class="k" d="M20 33l8 8 17-18"/></svg></div>
   <div class="sub" id="lsub">Verifying your Telegram account…</div>
 </div></div>
+<div id="toast" class="pill" hidden></div>
 <div id="hint" class="hint" hidden>⬆️ Swipe up for more</div>
 <script>
 var BOT = "__BOT__";
@@ -273,9 +280,35 @@ function hideLogin() { if (loginGone) return; loginGone = true; setTimeout(funct
 var liked = {}; try { liked = JSON.parse(localStorage.getItem("liked") || "{}"); } catch (e) {}
 function saveLikes() { try { localStorage.setItem("liked", JSON.stringify(liked)); } catch (e) {} }
 function go(u) { try { if (tg && tg.openTelegramLink) return tg.openTelegramLink(u); } catch (e) {} location.href = u; }
-function share() {
-  var link = "https://t.me/" + BOT + (me ? "?start=ref_AT-" + me : "");
-  go("https://t.me/share/url?url=" + encodeURIComponent(link) + "&text=" + encodeURIComponent("🎬 Unlimited short videos on Telegram — swipe like Reels 👇 (join with my link: +1 day Premium free)"));
+function toast(t) { var el = document.getElementById("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(function () { el.hidden = true; }, 2500); }
+function fmt(t) { t = Math.floor(t || 0); var m = Math.floor(t / 60), x = t % 60; return m + ":" + (x < 10 ? "0" : "") + x; }
+// ⬇️ = this video into the user's Telegram chat (the bot sends it; auto-deleted like /videos)
+function download(s, b) {
+  if (s._sent) return toast("✅ Already sent to your chat");
+  if (b.disabled) return;
+  b.disabled = true; b.textContent = "⏳";
+  fetch("/app/api/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id, d: s.dataset.d }) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (!d.ok) throw 0; s._sent = true; b.textContent = "✅"; toast("✅ Sent to your Telegram chat"); try { tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} })
+    .catch(function () { b.textContent = "⬇️"; toast("❌ Couldn't send — try again"); })
+    .then(function () { b.disabled = false; });
+}
+// the seek bar: tap or drag anywhere on it to jump; the time grows while dragging
+function seeker(s, vid) {
+  var sk = s.querySelector(".seek"), bar = s.querySelector(".bar"), fill = s.querySelector(".bar i"), tm = s.querySelector(".tm");
+  function show(t) { if (vid.duration) { fill.style.width = (100 * t / vid.duration) + "%"; tm.textContent = fmt(t) + " / " + fmt(vid.duration); } }
+  function at(e) { var r = bar.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * vid.duration; }
+  vid.addEventListener("timeupdate", function () { if (!s._drag) show(vid.currentTime); });
+  vid.addEventListener("loadedmetadata", function () { show(vid.currentTime); });
+  sk.addEventListener("pointerdown", function (e) {
+    e.stopPropagation(); if (!vid.duration) return;
+    s._drag = true; sk.classList.add("drag"); try { sk.setPointerCapture(e.pointerId); } catch (x) {}
+    show(at(e));
+  });
+  sk.addEventListener("pointermove", function (e) { if (s._drag) show(at(e)); });
+  function end(e) { if (!s._drag) return; s._drag = false; sk.classList.remove("drag"); var t = at(e); vid.currentTime = t; show(t); vid.play().catch(function () {}); }
+  sk.addEventListener("pointerup", function (e) { e.stopPropagation(); end(e); });
+  sk.addEventListener("pointercancel", end);
 }
 function wall(title, text, button, act) {
   var s = document.createElement("div"); s.className = "slide wall";
@@ -299,39 +332,38 @@ function addVideo(v) {
     '<div class="shade"></div><div class="load"><div class="spin"></div></div><div class="paused">⏸</div>' +
     '<div class="msg">⚠️ This one didn\'t load — skipping…</div>' +
     '<div class="info"><b>@' + BOT + '</b><span>🎬 Swipe up for the next video</span></div>' +
-    '<div class="rail"><button class="lk">🤍</button><small>Like</small><button class="sh">📤</button><small>Share</small><button class="snd">🔇</button><small>Sound</small></div>' +
-    '<div class="bar"><i></i></div>';
-  var vid = s.querySelector("video"), bar = s.querySelector(".bar i");
-  vid.muted = muted; vid.dataset.src = v.src; vid.oncontextmenu = function () { return false; };
+    '<div class="rail"><button class="lk">🤍</button><small>Like</small><button class="dl">⬇️</button><small>Download</small><button class="snd">🔇</button><small>Sound</small></div>' +
+    '<div class="seek"><span class="tm"></span><div class="bar"><i></i></div></div>';
+  var vid = s.querySelector("video");
+  s.dataset.d = v.d || ""; vid.muted = muted; vid.dataset.src = v.src; vid.oncontextmenu = function () { return false; };
   if (liked[v.id]) like(s, true);
   s.querySelector(".lk").onclick = function (e) { e.stopPropagation(); like(s); };
-  s.querySelector(".sh").onclick = function (e) { e.stopPropagation(); share(); };
+  s.querySelector(".dl").onclick = function (e) { e.stopPropagation(); download(s, this); };
   s.querySelector(".snd").onclick = function (e) { e.stopPropagation(); muted = !muted; setSound(); };
   s.querySelector(".snd").textContent = muted ? "🔇" : "🔊";
   // the spinner only if it's really slow (no flicker on fast starts)
   vid.addEventListener("loadstart", function () { clearTimeout(s._w); s._w = setTimeout(function () { if (!s.classList.contains("ready")) s.classList.add("wait"); }, 400); });
   vid.addEventListener("playing", function () { clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait"); if (okAt && current() === s) hideLogin(); });
   vid.addEventListener("waiting", function () { clearTimeout(s._w); s._w = setTimeout(function () { s.classList.add("wait"); }, 400); });
-  vid.addEventListener("timeupdate", function () { if (vid.duration) bar.style.width = (100 * vid.currentTime / vid.duration) + "%"; });
   vid.addEventListener("loadedmetadata", function () {
     if (!vid.videoWidth) return bad(s, true); // loads, but no picture: really broken → report it
     s.classList.toggle("tall", vid.videoHeight >= vid.videoWidth * 1.2);
   });
   vid.addEventListener("error", function () { if (vid.getAttribute("src")) bad(s, false); }); // network / expired link: skip, don't report
-  gestures(s, vid);
+  gestures(s, vid); seeker(s, vid);
   feed.appendChild(s); slides.push(s); io.observe(s);
 }
 // double-tap = like (with a heart), hold = pause, single tap = nothing
 function gestures(s, vid) {
   var last = 0, hold = null;
   s.addEventListener("pointerdown", function (e) {
-    if (e.target.closest(".rail")) return;
+    if (e.target.closest(".rail,.seek")) return;
     hold = setTimeout(function () { s.classList.add("held"); vid.pause(); }, 350);
   });
   function up(e) {
     clearTimeout(hold);
     if (s.classList.contains("held")) { s.classList.remove("held"); vid.play().catch(function () {}); return; }
-    if (e.type !== "pointerup" || e.target.closest(".rail")) return;
+    if (e.type !== "pointerup" || e.target.closest(".rail,.seek")) return;
     var now = Date.now();
     if (now - last < 300) {
       like(s, true); last = 0;
@@ -507,6 +539,16 @@ export default {
       if (!uid || !/^[0-9a-f]{32}$/.test(body.id || '')) return Response.json({ ok: false }, { status: 400 });
       await db.run('INSERT INTO store (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING', `app_bad:${body.id}`, String(uid));
       return Response.json({ ok: true });
+    }
+    if (url.pathname === '/app/api/send' && req.method === 'POST') {
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
+      if (!uid || !/^[0-9a-f]{32}$/.test(body.id || '') || body.d !== (await sign(env.WEBHOOK_SECRET, `dl:${uid}:${body.id}`))) return Response.json({ ok: false }, { status: 400 });
+      const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
+      if (!(await bot.appAllowed(uid))) return Response.json({ ok: false });
+      const res = await bot.appSend(uid, body.id);
+      ctx.waitUntil(db.flush());
+      return Response.json(res);
     }
     if (url.pathname === '/app/api/feed' && req.method === 'POST') {
       const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
