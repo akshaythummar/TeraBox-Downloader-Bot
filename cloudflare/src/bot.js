@@ -144,7 +144,7 @@ export const ADMIN_HELP = [
 // Telegram "/" menu for each admin: the user commands + the admin ones they may use. Shown only to
 // them (chat scope). Errors are ignored (Telegram refuses it for someone who never opened the bot).
 export const COMMANDS = [
-  ['start', 'Start the bot'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'], ['top', 'Top inviters'],
+  ['start', 'Start the bot'], ['app', '🎬 Videos App — swipe like Reels'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'], ['top', 'Top inviters'],
   ['redeem', 'Redeem a gift card'], ['ref', 'Invite friends, earn Premium'], ['mystats', 'Your statistics'],
   ['mystatus', 'Premium / tag / stats'], ['history', 'Your history'], ['search', 'Search the library'],
   ['videos', 'Videos'], ['lang', 'Language'],
@@ -626,8 +626,11 @@ export function createBot(env, api, db, origin) {
     await m.reply(`**Name:** ${m.from.first_name}\n**Username:** @${m.from.username || '-'}\n**User ID:** \`${uid}\`\n${tag ? `**Tag:** ${tag}\n` : ''}**Plan:** ${plan}`);
   });
 
-  const mainMenuButtons = uid => {
+  const appButton = async chatId => (chatId > 0 && origin && (await runtime()).VIDEOS_APP_PUBLIC === 1 ? [Button.webapp('🎬 Videos App — swipe like Reels', `${origin}/app`)] : null);
+  const mainMenuButtons = async (uid, chatId) => {
+    const app = await appButton(chatId);
     const rows = [
+      ...(app ? [app] : []),
       [Button.inline('👥 Invite Friends → Free Premium', 'menu_referral')],
       [Button.inline('📥 How to Use', 'menu_howto'), Button.inline('📋 My Info', 'menu_info')],
       [Button.inline('⭐ Premium', 'menu_premium'), Button.inline('🎁 Redeem Card', 'menu_redeem')],
@@ -642,7 +645,7 @@ export function createBot(env, api, db, origin) {
   };
   const welcome = name => WELCOME_TEXT.replace('{name}', name);
 
-  on(/^(\/cmds|\/help)/, m => m.reply(welcome(m.from.first_name), { buttons: mainMenuButtons(m.uid) }));
+  on(/^(\/cmds|\/help)/, async m => m.reply(welcome(m.from.first_name), { buttons: await mainMenuButtons(m.uid, m.chatId) }));
 
   on(/^\/ping/, async m => {
     const t0 = Date.now();
@@ -867,7 +870,7 @@ export function createBot(env, api, db, origin) {
     if (m.raw._newUser && !admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${userLink(uid, name)}\nUsername: @${escHtml(m.from.username || '-')}\nID: <code>${uid}</code>`, { html: true });
     const planArg = /^plan_\d+$/.test(arg || '');
-    if (!arg?.startsWith('gc_') && !vm && !planArg) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
+    if (!arg?.startsWith('gc_') && !vm && !planArg) await m.reply(welcome(name), { buttons: await mainMenuButtons(uid, m.chatId) });
     if (refPending && !vm) await sendJoinPrompt(m.chatId, await missingChannels(uid));
     else if (arg === 'plans' && planViewHook) await planViewHook(m.chatId, uid); // t.me/<bot>?start=plans
     else if (planArg && buyPlanHook) { await funnel('app_buy'); await buyPlanHook(m.chatId, uid, m.from, int(arg.slice(5))); }
@@ -1017,9 +1020,9 @@ Choose your preferred language:
     const code = e.data.replace('setlang_', '');
     await db.setUser(e.uid, { lang: code });
     await e.answer(`Language set to ${LANGUAGES[code] || 'English'}!`);
-    await e.edit(welcome(e.from.first_name), { buttons: mainMenuButtons(e.uid) });
+    await e.edit(welcome(e.from.first_name), { buttons: await mainMenuButtons(e.uid, e.chatId) });
   });
-  onCb(/^menu_main$/, e => e.edit(welcome(e.from.first_name), { buttons: mainMenuButtons(e.uid) }));
+  onCb(/^menu_main$/, async e => e.edit(welcome(e.from.first_name), { buttons: await mainMenuButtons(e.uid, e.chatId) }));
 
   // ==================== admin panel ====================
   const adminCb = (re, fn) => onCb(re, async e => ((await isAdmin(e.uid)) ? fn(e) : e.answer('Access denied!', true)));
@@ -2092,6 +2095,12 @@ Choose your preferred language:
     // random start (v_pos / v_start); once they've had them all, /videos falls back to their own
     // 200 links exactly as before.
     const readyMarkup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
+    // + "swipe more in the app" under each video in a private chat (when the app is public)
+    const videoMarkup = async chatId => {
+      const app = await appButton(chatId);
+      const rows = [...(app ? [[Button.webapp('🎬 Swipe more in Videos App', `${origin}/app`)]] : []), ...(readyMarkup.reply_markup?.inline_keyboard || [])];
+      return rows.length ? { reply_markup: { inline_keyboard: rows } } : {};
+    };
     // Everything /videos needs in ONE D1 round trip: the user's row (state, premium, admin), their
     // 200 links with the file_id of the next one, free mode, and their next pre-uploaded video.
     async function loadCtx(uid) {
@@ -2185,7 +2194,7 @@ Choose your preferred language:
       const track = r => (hours ? trackMsg(ctx.state, chatId, r) : {});
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
-        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
+        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...(await videoMarkup(chatId)) });
         const pos = { vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
         if (r.ok) { funnel('videos'); await setState(uid, { ...save, ...pos, ...track(r) }); return true; }
         await db.run('UPDATE videos SET ready = NULL WHERE md5 = ?', ctx.ready.md5); // unusable file_id
@@ -2197,7 +2206,7 @@ Choose your preferred language:
         nextVideo(uid, ctx),
       ]);
       if (!c) { if (Object.keys(save).length) await setState(uid, save); return target.reply('❌ No videos found, try again in a moment.'); }
-      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
+      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...(await videoMarkup(chatId)) });
       // the position moves on either way (a link that fails isn't retried forever)
       await setState(uid, { ...save, ...c.fields, ...(r.ok ? track(r) : {}) });
       if (!r.ok) { await target.reply('❌ Video error: server busy, please try again in a moment.'); return false; }
