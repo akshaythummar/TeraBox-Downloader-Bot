@@ -375,6 +375,7 @@ export function createBot(env, api, db, origin) {
       // /videos messages are deleted from the chat after this many hours (0 = never; Telegram allows ≤48)
       VIDEO_DELETE_HOURS: Math.min(int(o.VIDEO_DELETE_HOURS ?? env.VIDEO_DELETE_HOURS ?? 24), 47),
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
+      APP_LOG_CHAT: csv(o.APP_LOG_CHAT ?? env.APP_LOG_CHAT), // where the Videos App's live session log goes (default the owner; 0 = off)
       APP_TESTERS: csv(o.APP_TESTERS ?? env.APP_TESTERS), // user IDs who get the app before it's public — as normal users (free limit, paywall)
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
@@ -1114,6 +1115,7 @@ Choose your preferred language:
     VIDEO_DELETE_HOURS: { section: 'Limits', kind: 'int', min: 0, max: 47 },
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_TESTERS: { section: 'Limits', kind: 'csv' },
+    APP_LOG_CHAT: { section: 'Limits', kind: 'csv' },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
@@ -1565,7 +1567,7 @@ Choose your preferred language:
     const rows = await db.all(`SELECT day, name, n FROM counters WHERE day IN (${keys.map(() => '?').join(',')})`, ...keys);
     const by = {};
     for (const r of rows) (by[r.day] ??= {})[r.name] = r.n;
-    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue'];
+    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue', 'app_videos', 'app_wall', 'app_buy', 'app_dl'];
     const tot = Object.fromEntries(F.map(f => [f, keys.reduce((a, k) => a + (by[k]?.[f] || 0), 0)]));
     const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
     const lines = keys.map(k => {
@@ -1578,6 +1580,7 @@ Choose your preferred language:
       `🔗 Links streamed: **${tot.links}**\n` +
       `👥 Referrals: **${tot.referrals}**\n` +
       `🎬 /videos sent: **${tot.videos}**\n` +
+      `📱 Videos App: **${tot.app_videos}** videos served · 🔒 paywall ${tot.app_wall} · 💳 plan taps ${tot.app_buy} · ⬇️ downloads ${tot.app_dl}\n` +
       `🎁 Trials started: **${tot.trials}** (${pct(tot.trials, tot.new_users)} of new users)\n` +
       `📋 Plans shown: **${tot.plans_shown}**\n` +
       `🛒 Orders created: **${tot.orders}** (${pct(tot.orders, tot.plans_shown)} of plan views)\n` +
@@ -2748,11 +2751,31 @@ Choose your preferred language:
     }
   }
 
+  // The Videos App's live log: one silent message per app session to APP_LOG_CHAT (default the
+  // owner), edited as the user watches. The app keeps the message id (signed for that user) — nothing
+  // is stored. ponytail: a logged-in user could open many sessions = many messages; cap if abused.
+  const appLive = async (uid, user, b) => {
+    const chat = (await runtime()).APP_LOG_CHAT[0] ?? String(OWNER_ID);
+    if (!chat || chat === '0') return { ok: false };
+    const n = x => Math.max(0, Math.min(int(x), 1e6)), secs = n(b.secs), name = [user.first_name, user.last_name].filter(Boolean).join(' ');
+    const text = `🎬 <b>Videos App</b> — ${userLink(uid, name)}${user.username ? ` @${escHtml(user.username)}` : ''} <code>${int(uid)}</code>\n` +
+      `${b.plan === 'free' ? '🆓 Free' : '♾️ Unlimited'} · ${b.end ? '⚪ closed' : '🟢 watching now'}\n\n` +
+      `▶️ Videos watched: <b>${n(b.n)}</b>\n⏱ Time: ${Math.floor(secs / 60)}m ${secs % 60}s\n⬇️ Downloads: ${n(b.dl)} · ❤️ Likes: ${n(b.lk)}` +
+      (b.wall ? '\n🔒 Reached the paywall' : '') + (b.buy ? `\n💳 Tapped the ₹${n(b.buy)} plan → payment QR` : '');
+    const mid = int(b.mid);
+    if (mid && b.sig === (await sign(env.WEBHOOK_SECRET, `live:${uid}:${mid}`))) {
+      await api.call('editMessageText', { chat_id: chat, message_id: mid, text, parse_mode: 'HTML', disable_web_page_preview: true });
+      return { ok: true };
+    }
+    const r = await api.call('sendMessage', { chat_id: chat, text, parse_mode: 'HTML', disable_notification: true, disable_web_page_preview: true });
+    if (!r.ok) return { ok: false };
+    return { ok: true, mid: r.result.message_id, sig: await sign(env.WEBHOOK_SECRET, `live:${uid}:${r.result.message_id}`) };
+  };
   // the Videos Mini App: admins + APP_TESTERS only until /configset VIDEOS_APP_PUBLIC 1
   const appAllowed = async uid => {
     if (await isAdmin(uid)) return true;
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }) };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive };
 }

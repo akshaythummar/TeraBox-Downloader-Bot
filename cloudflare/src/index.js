@@ -295,6 +295,24 @@ var liked = {}; try { liked = JSON.parse(localStorage.getItem("liked") || "{}");
 function saveLikes() { try { localStorage.setItem("liked", JSON.stringify(liked)); } catch (e) {} }
 function go(u) { try { if (tg && tg.openTelegramLink) return tg.openTelegramLink(u); } catch (e) {} location.href = u; }
 function toast(t) { var el = document.getElementById("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(function () { el.hidden = true; }, 2500); }
+// the owner's live log: one silent message per session, edited as the user watches (≤ 1 call / 8 s;
+// closing the app sends the final state at once). Only counts — nothing is stored anywhere.
+var LV = { n: 0, dl: 0, lk: 0, wall: 0, buy: 0, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
+function live(end) {
+  if (!okAt) return;
+  clearTimeout(LV.tm);
+  var wait = 8000 - (Date.now() - LV.at);
+  if (LV.busy || (!end && wait > 0)) { LV.tm = setTimeout(function () { live(end); }, LV.busy ? 700 : wait); return; }
+  var body = { initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0 };
+  var key = JSON.stringify([body.n, body.dl, body.lk, body.wall, body.buy, body.end]);
+  if (key === LV.key) return;
+  body.secs = Math.round((Date.now() - LV.t0) / 1000);
+  LV.key = key; LV.at = Date.now(); LV.busy = true;
+  fetch("/app/api/live", { method: "POST", keepalive: true, headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+    .then(function (r) { return r.json(); }).then(function (d) { if (d.mid) { LV.mid = d.mid; LV.sig = d.sig; } })
+    .catch(function () {}).then(function () { LV.busy = false; });
+}
+document.addEventListener("visibilitychange", function () { live(document.hidden); });
 function fmt(t) { t = Math.floor(t || 0); var m = Math.floor(t / 60), x = t % 60; return m + ":" + (x < 10 ? "0" : "") + x; }
 // ⬇️ = this video into the user's Telegram chat (the bot sends it; auto-deleted like /videos)
 function download(s, b) {
@@ -303,7 +321,7 @@ function download(s, b) {
   b.disabled = true; b.textContent = "⏳";
   fetch("/app/api/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id, d: s.dataset.d }) })
     .then(function (r) { return r.json(); })
-    .then(function (d) { if (!d.ok) throw 0; s._sent = true; b.textContent = "✅"; toast("✅ Sent to your Telegram chat"); try { tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} })
+    .then(function (d) { if (!d.ok) throw 0; s._sent = true; LV.dl++; live(); b.textContent = "✅"; toast("✅ Sent to your Telegram chat"); try { tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} })
     .catch(function () { b.textContent = "⬇️"; toast("❌ Couldn't send — try again"); })
     .then(function () { b.disabled = false; });
 }
@@ -346,7 +364,7 @@ function paywall(w) {
     b.querySelector(".nm").textContent = (i === 0 ? "⚡ " : p.best ? "💎 " : "") + p.name;
     b.querySelector(".pr").textContent = "₹" + p.price;
     b.querySelector("small").textContent = p.days + (p.days === 1 ? " day" : " days") + " unlimited" + (i && p.save >= 10 ? " · save " + p.save + "%" : "");
-    b.onclick = function () { buy(p.id); };
+    b.onclick = function () { LV.buy = p.price; live(true); buy(p.id); };
     s.querySelector(".plans").appendChild(b);
   });
   s.querySelector(".all").onclick = openPlans;
@@ -363,7 +381,8 @@ function setSound() {
   document.querySelectorAll(".snd").forEach(function (b) { b.textContent = muted ? "🔇" : "🔊"; });
 }
 function like(s, on) {
-  var id = s.dataset.id; liked[id] = on === undefined ? !liked[id] : on; if (!liked[id]) delete liked[id]; saveLikes();
+  var id = s.dataset.id, was = !!liked[id]; liked[id] = on === undefined ? !liked[id] : on; if (!liked[id]) delete liked[id]; saveLikes();
+  if (!was && liked[id]) { LV.lk++; live(); }
   s.querySelector(".lk").classList.toggle("on", !!liked[id]); s.querySelector(".lk").textContent = liked[id] ? "❤️" : "🤍";
 }
 // Android's WebView lets a <video> element play with sound only after a tap asked it to play;
@@ -385,7 +404,7 @@ function makeVideo() {
   v.loop = true; v.muted = true; v.preload = "auto"; v.oncontextmenu = function () { return false; };
   // the spinner only if it's really slow (no flicker on fast starts)
   v.addEventListener("loadstart", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s._w = setTimeout(function () { if (v._s === s && !s.classList.contains("ready")) s.classList.add("wait"); }, 400); });
-  v.addEventListener("playing", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait", "tap"); if (current() === s) { if (okAt) hideLogin(); prepare(slides.indexOf(s)); } });
+  v.addEventListener("playing", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait", "tap"); if (current() === s) { if (okAt) hideLogin(); prepare(slides.indexOf(s)); if (!s._seen) { s._seen = true; LV.n++; live(); } } });
   v.addEventListener("waiting", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s._w = setTimeout(function () { if (v._s === s) s.classList.add("wait"); }, 400); });
   v.addEventListener("timeupdate", function () { var s = v._s; if (s && !s._drag) s._show(v.currentTime); });
   v.addEventListener("loadedmetadata", function () {
@@ -534,7 +553,7 @@ function more() {
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d.ok) { ended = true; return d.error === "soon" ? loginFail("Coming soon", "The Videos App opens for everyone soon.") : loginFail("Login failed", "Close and open the app again."); }
-      if (!okAt) loginOk();
+      if (!okAt) { loginOk(); live(); }
       var b = document.getElementById("badge"); b.hidden = false;
       b.textContent = d.unlimited ? "♾️ Unlimited" : "🎁 " + (d.left + d.videos.length) + " free today";
       freeLeft = d.unlimited ? null : d.left;
@@ -544,7 +563,8 @@ function more() {
       if (!d.unlimited && d.left === 0) {
         ended = true;
         if (!d.videos.length) hideLogin();
-        paywall(d.wall);
+        var pw = paywall(d.wall);
+        new IntersectionObserver(function (es) { if (es[0].isIntersecting && !LV.wall) { LV.wall = 1; live(); } }, { threshold: 0.6 }).observe(pw);
       }
     })
     .catch(function () { if (!okAt) loginFail("No connection", "Check your internet and open the app again."); else wall("⚠️ Network error", "Check your connection and reopen the app.", null); ended = true; })
@@ -652,6 +672,13 @@ export default {
       if (!uid || !/^[0-9a-f]{32}$/.test(body.id || '')) return Response.json({ ok: false }, { status: 400 });
       await db.run('INSERT INTO store (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING', `app_bad:${body.id}`, String(uid));
       return Response.json({ ok: true });
+    }
+    if (url.pathname === '/app/api/live' && req.method === 'POST') {
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
+      if (!uid) return Response.json({ ok: false }, { status: 401 });
+      let user = {}; try { user = JSON.parse(new URLSearchParams(body.initData).get('user')) || {}; } catch {}
+      return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).appLive(uid, user, body));
     }
     if (url.pathname === '/app/api/send' && req.method === 'POST') {
       const body = await req.json().catch(() => ({}));
