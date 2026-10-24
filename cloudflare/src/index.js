@@ -343,7 +343,7 @@ function addVideo(v) {
   s.querySelector(".snd").textContent = muted ? "🔇" : "🔊";
   // the spinner only if it's really slow (no flicker on fast starts)
   vid.addEventListener("loadstart", function () { clearTimeout(s._w); s._w = setTimeout(function () { if (!s.classList.contains("ready")) s.classList.add("wait"); }, 400); });
-  vid.addEventListener("playing", function () { clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait"); if (okAt && current() === s) hideLogin(); });
+  vid.addEventListener("playing", function () { clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait"); if (current() === s) { if (okAt) hideLogin(); prepare(slides.indexOf(s)); } });
   vid.addEventListener("waiting", function () { clearTimeout(s._w); s._w = setTimeout(function () { s.classList.add("wait"); }, 400); });
   vid.addEventListener("loadedmetadata", function () {
     if (!vid.videoWidth) return bad(s, true); // loads, but no picture: really broken → report it
@@ -382,7 +382,7 @@ function bad(s, report) {
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
 function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
-// Phones' in-app browsers ignore preload, so the next 2 videos are "warmed": started muted off-screen and
+// Phones' in-app browsers ignore preload, so the next video is "warmed" (and the one after once the current one plays, so it gets the bandwidth first): started muted off-screen and
 // paused as soon as they play — the browser has then really fetched and decoded their start, and a swipe
 // plays them at once. Videos more than 2 away are unloaded (memory, data).
 function warm(s) {
@@ -397,7 +397,7 @@ function prepare(i) {
   slides.forEach(function (s, j) {
     var v = s.querySelector("video"); if (!v || s.classList.contains("bad")) return;
     if (j === i) { v.preload = "auto"; if (!v.getAttribute("src")) v.src = v.dataset.src; s._warm = true; }
-    else if (j === i + 1 || j === i + 2) warm(s);
+    else if (j === i + 1 || (j === i + 2 && slides[i].classList.contains("ready"))) warm(s);
     else if (Math.abs(j - i) > 2 && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); s.classList.remove("ready"); s._warm = false; }
   });
 }
@@ -406,10 +406,13 @@ var io = new IntersectionObserver(function (es) {
   es.forEach(function (e) {
     var s = e.target, v = s.querySelector("video"); if (!v) return;
     if (e.isIntersecting && e.intersectionRatio > 0.6) {
-      var i = slides.indexOf(s); prepare(i); v.muted = muted; if (v.currentTime > 0.5) v.currentTime = 0; v.play().catch(function () {});
+      var i = slides.indexOf(s);
+      // a fast fling passes slides in ~0.2 s: only the one the user stops on starts loading
+      clearTimeout(s._go);
+      s._go = setTimeout(function () { if (current() !== s) return; prepare(i); v.muted = muted; if (v.currentTime > 0.5) v.currentTime = 0; v.play().catch(function () {}); }, v.readyState >= 2 ? 0 : 250);
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
       if (i > 0) { seen++; document.getElementById("hint").hidden = true; }
-      if (i >= slides.length - 3) more();
+      if (i >= slides.length - 5) more();
     } else v.pause();
   });
 }, { threshold: [0, 0.6, 1] });
