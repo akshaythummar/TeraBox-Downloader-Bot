@@ -195,6 +195,11 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 .slide video{width:100%;height:100%;object-fit:contain;background:#000}
 .slide .msg{position:absolute;inset:0;display:none;place-items:center;text-align:center;padding:24px;color:#bbb}
 .slide.bad .msg{display:grid}
+.load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#ccc;font-size:14px;pointer-events:none;background:#000}
+.slide.ready .load,.slide.bad .load{display:none}
+.slide.ready.wait .load{display:flex;background:transparent}
+.slide.ready.wait .load span{display:none}
+#status{color:#ccc;font-size:14px}
 .top{position:fixed;top:max(10px,env(safe-area-inset-top));left:10px;right:10px;display:flex;justify-content:space-between;gap:8px;z-index:5;pointer-events:none}
 .pill{pointer-events:auto;padding:7px 12px;border:0;border-radius:18px;background:#0008;color:#fff;font:600 13px system-ui;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
 .hint{position:fixed;bottom:calc(18px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);padding:8px 14px;border-radius:18px;background:#0009;font-size:13px;z-index:5;transition:opacity .4s;pointer-events:none}
@@ -206,8 +211,8 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 @keyframes r{to{transform:rotate(360deg)}}
 [hidden]{display:none!important}
 </style></head><body>
-<div class="top"><span id="badge" class="pill" hidden></span><button id="snd" class="pill">🔇 Tap for sound</button></div>
-<div id="feed"><div class="slide" id="first"><div class="spin"></div></div></div>
+<div class="top"><span id="badge" class="pill" hidden></span><button id="snd" class="pill">🔇 Sound off</button></div>
+<div id="feed"><div class="slide wall" id="first"><div class="spin"></div><div id="status">🔐 Logging in…</div></div></div>
 <div id="hint" class="hint">⬆️ Swipe up for the next video</div>
 <div id="fl" class="flash"></div>
 <script>
@@ -235,15 +240,31 @@ function addVideo(v) {
   vid.setAttribute("playsinline", ""); vid.setAttribute("loop", ""); vid.setAttribute("controlslist", "nodownload noplaybackrate");
   vid.disablePictureInPicture = true; vid.muted = true; vid.preload = "none"; vid.dataset.src = v.src;
   vid.oncontextmenu = function () { return false; };
-  vid.onerror = function () { if (vid.getAttribute("src")) s.classList.add("bad"); };
-  var m = document.createElement("div"); m.className = "msg"; m.textContent = "⚠️ This video isn't available — swipe up";
-  s.appendChild(vid); s.appendChild(m); feed.appendChild(s); slides.push(s); io.observe(s);
+  var ld = document.createElement("div"); ld.className = "load"; ld.innerHTML = '<div class="spin"></div><span>⏳ Loading video…</span>';
+  var m = document.createElement("div"); m.className = "msg"; m.textContent = "⚠️ Video not available — skipping…";
+  s.dataset.id = v.id;
+  vid.addEventListener("playing", function () { s.classList.add("ready"); s.classList.remove("wait"); });
+  vid.addEventListener("waiting", function () { s.classList.add("wait"); });
+  // a picture-less file (codec the phone can't decode) plays as a black screen: treat it as broken
+  vid.addEventListener("loadedmetadata", function () { if (!vid.videoWidth) bad(s); });
+  vid.addEventListener("error", function () { if (vid.getAttribute("src")) bad(s); });
+  s.appendChild(vid); s.appendChild(ld); s.appendChild(m); feed.appendChild(s); slides.push(s); io.observe(s);
 }
-// only the visible video and the next one get a src (saves data and requests); far ones are unloaded
+// broken video: say so, tell the server (it stops handing it out), and move on if it's on screen
+function bad(s) {
+  if (s.classList.contains("bad")) return;
+  s.classList.add("bad"); clearTimeout(s._stuck);
+  var v = s.querySelector("video"); v.pause(); v.removeAttribute("src"); v.load();
+  try { fetch("/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: tg.initData, id: s.dataset.id }) }); } catch (e) {}
+  if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 1200);
+}
+function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
+// only the visible video and the next two get a src (saves data and requests); far ones are unloaded
 function prepare(i) {
   slides.forEach(function (s, j) {
     var v = s.querySelector("video"); if (!v) return;
-    if (j === i || j === i + 1) { if (!v.getAttribute("src")) { v.src = v.dataset.src; v.preload = j === i ? "auto" : "metadata"; } }
+    // the next one buffers fully while this one plays (videos take ~2-8s to start), the one after only its header
+    if (j >= i && j <= i + 2) { v.preload = j <= i + 1 ? "auto" : "metadata"; if (!v.getAttribute("src")) v.src = v.dataset.src; }
     else if (Math.abs(j - i) > 2 && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); }
   });
 }
@@ -252,22 +273,25 @@ var io = new IntersectionObserver(function (es) {
     var v = e.target.querySelector("video"); if (!v) return;
     if (e.isIntersecting && e.intersectionRatio > 0.6) {
       var i = slides.indexOf(e.target); prepare(i); v.muted = muted; v.play().catch(function () {});
+      // slow (most files keep their index at the end: the player needs 2 round trips first) — say so, don't drop it
+      var s = e.target; clearTimeout(s._stuck);
+      if (!s.classList.contains("ready")) s._stuck = setTimeout(function () { var t = s.querySelector(".load span"); if (t && !s.classList.contains("ready")) t.textContent = "🐢 Slow connection — still loading… (swipe for the next one)"; }, 12000);
+      if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 800);
       if (i > 0) document.getElementById("hint").style.opacity = 0;
       if (i >= slides.length - 3) more();
     } else v.pause();
   });
 }, { threshold: [0, 0.6, 1] });
 
-feed.addEventListener("click", function (e) {
-  if (e.target.closest(".go")) return;
+document.getElementById("snd").onclick = function () {
   muted = !muted; document.querySelectorAll("video").forEach(function (v) { v.muted = muted; });
-  document.getElementById("snd").textContent = muted ? "🔇 Tap for sound" : "🔊 Sound on"; flash(muted ? "🔇" : "🔊");
-});
-document.getElementById("snd").onclick = function (e) { e.stopPropagation(); feed.click(); };
+  this.textContent = muted ? "🔇 Sound off" : "🔊 Sound on"; flash(muted ? "🔇" : "🔊");
+};
 
 function more() {
   if (loading || ended) return; loading = true;
-  if (!tg || !tg.initData) { document.getElementById("first").remove(); wall("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
+  if (!tg || !tg.initData) { var f0 = document.getElementById("first"); if (f0) f0.remove(); wall("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
+  var st = document.getElementById("status"); if (st) st.textContent = "🎬 Getting your videos…";
   fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: tg.initData }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
@@ -378,6 +402,15 @@ export default {
     if (url.pathname === '/watch') return watch(env, url);
     if (url.pathname === '/app') return appPage(env);
     if (url.pathname.startsWith('/app/v/')) return appVideo(env, db, req, url);
+    if (url.pathname === '/app/api/bad' && req.method === 'POST') {
+      // a video that played black / failed in someone's app: not handed out again
+      // ponytail: any logged-in app user can report; add a per-user cap if it gets abused
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
+      if (!uid || !/^[0-9a-f]{32}$/.test(body.id || '')) return Response.json({ ok: false }, { status: 400 });
+      await db.run('INSERT INTO store (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING', `app_bad:${body.id}`, String(uid));
+      return Response.json({ ok: true });
+    }
     if (url.pathname === '/app/api/feed' && req.method === 'POST') {
       const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
       if (!uid) return Response.json({ ok: false, error: 'login' }, { status: 401 });
