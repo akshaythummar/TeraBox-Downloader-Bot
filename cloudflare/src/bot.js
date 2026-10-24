@@ -2438,9 +2438,9 @@ Choose your preferred language:
       const start = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
       // videos someone's app reported as broken (store app_bad:<md5>) are skipped
       const ok = "file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM store WHERE key = 'app_bad:' || md5)";
-      let rows = await db.all(`SELECT md5 FROM videos WHERE md5 >= ? AND ${ok} ORDER BY md5 LIMIT ?`, start, n);
-      if (rows.length < n) rows = rows.concat(await db.all(`SELECT md5 FROM videos WHERE ${ok} ORDER BY md5 LIMIT ?`, n - rows.length));
-      return [...new Set(rows.map(r => r.md5))];
+      let rows = await db.all(`SELECT md5, file_id FROM videos WHERE md5 >= ? AND ${ok} ORDER BY md5 LIMIT ?`, start, n);
+      if (rows.length < n) rows = rows.concat(await db.all(`SELECT md5, file_id FROM videos WHERE ${ok} ORDER BY md5 LIMIT ?`, n - rows.length));
+      return [...new Map(rows.map(r => [r.md5, r])).values()];
     }
     appFeed = async uid => {
       const ctx = await loadCtx(uid), access = await hasAccess(uid, ctx), daily = (await runtime()).DAILY_FREE_VIDEOS;
@@ -2453,11 +2453,17 @@ Choose your preferred language:
         if (n) save = { trial_n: f.used + n, ...(f.daily ? { free_day: ymd() } : {}), ...(fresh ? { trial_start_time: nowS() } : {}) };
         if (n && fresh) funnel('trials');
       }
-      const ids = n ? await pickVideos(n) : [];
+      // The first 2 videos get their Telegram file path here and signed into the link, so the first
+      // video starts without the getFile round trip (~1.5 s). The rest look it up when requested —
+      // they load in the background while the user watches, and 10 getFiles at once were slow (~8 s).
+      const picked = n ? await pickVideos(n) : [];
+      const paths = await Promise.all(picked.slice(0, 2).map(v => api.call('getFile', { file_id: v.file_id }).then(g => (g.ok ? g.result.file_path : null), () => null)));
+      const ok = picked.map((v, i) => [v.md5, paths[i] ?? null]).filter(([, p], i) => i >= 2 || p);
+      const ids = ok.map(([id]) => id);
       if (ids.length && save.trial_n != null) await setState(uid, { ...save, trial_n: save.trial_n - n + ids.length });
       if (ids.length) funnel('app_videos', ids.length);
-      const exp = Math.floor(nowS()) + 3 * 3600; // links work for 3h (the app asks for more as you swipe)
-      const videos = await Promise.all(ids.map(async id => ({ id, src: `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
+      const exp = Math.floor(nowS()) + 50 * 60; // Telegram keeps a file path valid ≥1h; the app asks for more as you swipe
+      const videos = await Promise.all(ok.map(async ([id, p]) => ({ id, src: p ? `/app/v/${id}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}:${p}`)}` : `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
       return { ok: true, unlimited: access === true, left, videos };
     };
     on(/^\/app$/, async m => {
