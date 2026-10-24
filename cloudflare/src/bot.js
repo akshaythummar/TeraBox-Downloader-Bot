@@ -2453,12 +2453,14 @@ Choose your preferred language:
         if (n) save = { trial_n: f.used + n, ...(f.daily ? { free_day: ymd() } : {}), ...(fresh ? { trial_start_time: nowS() } : {}) };
         if (n && fresh) funnel('trials');
       }
-      // The first 2 videos get their Telegram file path here and signed into the link, so the first
-      // video starts without the getFile round trip (~1.5 s). The rest look it up when requested —
-      // they load in the background while the user watches, and 10 getFiles at once were slow (~8 s).
+      // getFile is slow the first time for a file (Telegram fetches it: 0.6–9 s) — and a video without
+      // its path waits for that when played. All are asked at once, for at most 3.5 s: the ready ones
+      // go first with the path signed into the link; the rest follow (Telegram keeps preparing them,
+      // so by the time they're played the lookup is quick).
       const picked = n ? await pickVideos(n) : [];
-      const paths = await Promise.all(picked.slice(0, 2).map(v => api.call('getFile', { file_id: v.file_id }).then(g => (g.ok ? g.result.file_path : null), () => null)));
-      const ok = picked.map((v, i) => [v.md5, paths[i] ?? null]).filter(([, p], i) => i >= 2 || p);
+      const cap = new Promise(r => setTimeout(r, 3500, null));
+      const paths = await Promise.all(picked.map(v => Promise.race([api.call('getFile', { file_id: v.file_id }).then(g => (g.ok ? g.result.file_path : null), () => null), cap])));
+      const ok = picked.map((v, i) => [v.md5, paths[i]]).sort((a, b) => !a[1] - !b[1]);
       const ids = ok.map(([id]) => id);
       if (ids.length && save.trial_n != null) await setState(uid, { ...save, trial_n: save.trial_n - n + ids.length });
       if (ids.length) funnel('app_videos', ids.length);

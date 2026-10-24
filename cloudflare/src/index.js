@@ -348,6 +348,7 @@ function addVideo(v) {
   vid.addEventListener("loadedmetadata", function () {
     if (!vid.videoWidth) return bad(s, true); // loads, but no picture: really broken → report it
     s.classList.toggle("tall", vid.videoHeight >= vid.videoWidth * 1.2);
+    if (current() === s) prepare(slides.indexOf(s));
   });
   vid.addEventListener("error", function () { if (vid.getAttribute("src")) bad(s, false); }); // network / expired link: skip, don't report
   gestures(s, vid); seeker(s, vid);
@@ -382,7 +383,7 @@ function bad(s, report) {
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
 function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
-// Phones' in-app browsers ignore preload, so the next video is "warmed" (and the one after once the current one plays, so it gets the bandwidth first): started muted off-screen and
+// Phones' in-app browsers ignore preload, so the next video is "warmed" once the current one has its metadata, the one after once it plays (what's on screen gets the bandwidth first): started muted off-screen and
 // paused as soon as they play — the browser has then really fetched and decoded their start, and a swipe
 // plays them at once. Videos more than 2 away are unloaded (memory, data).
 function warm(s) {
@@ -397,7 +398,7 @@ function prepare(i) {
   slides.forEach(function (s, j) {
     var v = s.querySelector("video"); if (!v || s.classList.contains("bad")) return;
     if (j === i) { v.preload = "auto"; if (!v.getAttribute("src")) v.src = v.dataset.src; s._warm = true; }
-    else if (j === i + 1 || (j === i + 2 && slides[i].classList.contains("ready"))) warm(s);
+    else if ((j === i + 1 && slides[i].querySelector("video").readyState >= 1) || (j === i + 2 && slides[i].classList.contains("ready"))) warm(s);
     else if (Math.abs(j - i) > 2 && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); s.classList.remove("ready"); s._warm = false; }
   });
 }
@@ -405,7 +406,10 @@ var seen = 0;
 var io = new IntersectionObserver(function (es) {
   es.forEach(function (e) {
     var s = e.target, v = s.querySelector("video"); if (!v) return;
+    // the observer fires several times per swipe (also when a swipe away starts): only a real
+    // arrival (s._on) restarts the video and only a real departure pauses it
     if (e.isIntersecting && e.intersectionRatio > 0.6) {
+      if (s._on) return; s._on = true;
       var i = slides.indexOf(s);
       // a fast fling passes slides in ~0.2 s: only the one the user stops on starts loading
       clearTimeout(s._go);
@@ -413,9 +417,17 @@ var io = new IntersectionObserver(function (es) {
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
       if (i > 0) { seen++; document.getElementById("hint").hidden = true; }
       if (i >= slides.length - 5) more();
-    } else v.pause();
+    } else if (s._on) { s._on = false; clearTimeout(s._go); v.pause(); }
   });
 }, { threshold: [0, 0.6, 1] });
+// A stream that stops mid-video (it played, then no progress for 2.5 s) is asked again from the
+// same spot — what users did by hand with the seek bar.
+setInterval(function () {
+  var s = current(), v = s && s.querySelector("video");
+  if (!v || !s._on || v.paused || !v.currentTime || s._drag) return;
+  if (v.currentTime !== s._lt) { s._lt = v.currentTime; s._lm = Date.now(); return; }
+  if (Date.now() - s._lm > 2500) { s._lm = Date.now(); s._kicks = (s._kicks || 0) + 1; v.currentTime = v.currentTime + 0.05; }
+}, 500);
 document.addEventListener("visibilitychange", function () { var s = current(); if (!s) return; var v = s.querySelector("video"); if (!v) return; if (document.hidden) v.pause(); else v.play().catch(function () {}); });
 
 function more() {
