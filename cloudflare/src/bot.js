@@ -371,6 +371,8 @@ export function createBot(env, api, db, origin) {
       VIDEOS_COOLDOWN_SECONDS: parseFloat(o.VIDEOS_COOLDOWN_SECONDS ?? env.VIDEOS_COOLDOWN_SECONDS ?? 1) || 0,
       FREE_HOURLY_LIMIT: int(o.FREE_HOURLY_LIMIT ?? 0),
       DAILY_FREE_VIDEOS: int(o.DAILY_FREE_VIDEOS ?? env.VIDEOS_DAILY_FREE ?? 5),
+      // /videos messages are deleted from the chat after this many hours (0 = never; Telegram allows ≤48)
+      VIDEO_DELETE_HOURS: Math.min(int(o.VIDEO_DELETE_HOURS ?? env.VIDEO_DELETE_HOURS ?? 24), 47),
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
     };
@@ -1101,6 +1103,7 @@ Choose your preferred language:
     VIDEOS_COOLDOWN_SECONDS: { section: 'Limits', kind: 'int', min: 0, max: 300 },
     FREE_HOURLY_LIMIT: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
     DAILY_FREE_VIDEOS: { section: 'Limits', kind: 'int', min: 0, max: 50 },
+    VIDEO_DELETE_HOURS: { section: 'Limits', kind: 'int', min: 0, max: 47 },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
@@ -1978,7 +1981,7 @@ Choose your preferred language:
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
-  let ordersTick = null, subReminders = null; // /videos payments: auto-verify + renew reminders (cron)
+  let ordersTick = null, subReminders = null, videoCleanTick = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -1994,7 +1997,7 @@ Choose your preferred language:
       } catch { return null; }
     };
     // /videos state lives in the users row; the code keeps the old video_state field names
-    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', trial_n: 'trial_n', free_day: 'free_day', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
+    const VCOL = { video_index: 'v_idx', last_video_time: 'v_last', vid_pos: 'v_pos', vid_start: 'v_start', trial_start_time: 'trial_at', trial_n: 'trial_n', free_day: 'free_day', vmsgs: 'vmsgs', vdel_at: 'vdel_at', sub_until: 'sub_until', sub_checked: 'sub_checked', registered: 'registered' };
     // One users-row write (+ video_lists when a new 200 is fetched). Never throws: if D1 refuses
     // writes (e.g. free daily write limit hit) the video is still sent — only position/cooldown isn't saved.
     const setState = async (uid, fields) => {
@@ -2046,7 +2049,8 @@ Choose your preferred language:
     const md5Of = u => (String(u).match(/\/file\/([0-9a-f]{32})/) || [])[1] || null;
     // The user's next link from their own 200 (old bot behaviour): sent as-is, no checks.
     // When the 200 are used up, a new 200 is fetched. save = other state written in the same row write.
-    async function nextVideo(uid, ctx, save = {}) {
+    // fields = what to save once it's sent (position, a new 200)
+    async function nextVideo(uid, ctx) {
       const state = ctx.state;
       let links = state.video_links ? JSON.parse(state.video_links) : [], idx = int(state.video_index), fresh = null;
       if (!links.length || idx >= links.length) {
@@ -2055,12 +2059,24 @@ Choose your preferred language:
         idx = 0;
         fresh = JSON.stringify(links);
       }
-      // write refused (D1 daily limit) → the position can't advance, so pick a random one of the 200
-      if (!(await setState(uid, { ...save, video_index: idx + 1, ...(fresh ? { video_links: fresh } : {}) }))) idx = Math.floor(Math.random() * links.length);
       const url = links[idx], md5 = md5Of(url);
       // loadCtx already looked up the file_id of the link at the saved position
       const fid = !fresh && idx === int(state.video_index) ? ctx.nextFid : md5 ? (await db.one('SELECT file_id FROM videos WHERE md5 = ?', md5))?.file_id : null;
-      return { url, md5, fid: fid || null };
+      return { url, md5, fid: fid || null, fields: { video_index: idx + 1, ...(fresh ? { video_links: fresh } : {}) } };
+    }
+    // Remembers a sent /videos message (users.vmsgs = [[chat, message_id, sent_at]…], vdel_at = the
+    // oldest) so the cron can delete it after VIDEO_DELETE_HOURS — saved in the same row write as the
+    // position. Entries older than 47h are dropped: Telegram lets a bot delete only for 48h.
+    function trackMsg(state, chatId, r) {
+      const id = r.result?.message_id;
+      if (!id) return {};
+      const now = Math.floor(nowS());
+      let list = [];
+      try { list = JSON.parse(state.vmsgs || '[]'); } catch {}
+      list = list.filter(m => m[2] > now - 47 * 3600);
+      list.push([chatId, id, now]);
+      state.vmsgs = JSON.stringify(list);
+      return { vmsgs: state.vmsgs, vdel_at: Math.min(...list.map(m => m[2])) };
     }
     // ---- pre-uploaded videos (instant /videos) ----
     // The cron uploads pool videos to VIDEOS_CHANNEL (the old storage channel) and keeps
@@ -2083,7 +2099,7 @@ Choose your preferred language:
       const u = ur.results[0] || {};
       const state = {
         video_links: u.links, video_index: u.v_idx, last_video_time: u.v_last, vid_pos: u.v_pos, vid_start: u.v_start,
-        trial_start_time: u.trial_at, trial_n: u.trial_n, free_day: u.free_day, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
+        trial_start_time: u.trial_at, trial_n: u.trial_n, free_day: u.free_day, vmsgs: u.vmsgs, sub_until: u.sub_until, sub_checked: u.sub_checked, registered: u.registered === 1 ? '1' : undefined,
       };
       // Each user starts at a random video (vid_start), walks to the end, wraps to the beginning and
       // stops just before vid_start — so users get different orders and nobody gets a repeat.
@@ -2155,22 +2171,27 @@ Choose your preferred language:
     // save = state fields to write in the same row write as the new position (e.g. last_video_time)
     async function serveVideo(chatId, uid, target, ctx = null, save = {}, caption = null) {
       ctx ||= await loadCtx(uid);
-      const cap = caption ? { caption } : {};
+      const hours = (await runtime()).VIDEO_DELETE_HOURS;
+      const text = [caption, hours ? `⏳ Auto-deletes from this chat in ${hours}h` : ''].filter(Boolean).join('\n');
+      const cap = text ? { caption: text } : {};
+      const track = r => (hours ? trackMsg(ctx.state, chatId, r) : {});
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
         const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
         const pos = { vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
-        if (r.ok) { funnel('videos'); return setState(uid, { ...save, ...pos }); }
+        if (r.ok) { funnel('videos'); await setState(uid, { ...save, ...pos, ...track(r) }); return true; }
         await db.run('UPDATE videos SET ready = NULL WHERE md5 = ?', ctx.ready.md5); // unusable file_id
         save = { ...save, ...pos };
       }
       // 2) otherwise the user's own 200 links, as before
       const [, c] = await Promise.all([
         api.call('sendChatAction', { chat_id: chatId, action: 'upload_video' }), // "sending video…" while Telegram fetches the link
-        nextVideo(uid, ctx, save),
+        nextVideo(uid, ctx),
       ]);
-      if (!c) return target.reply('❌ No videos found, try again in a moment.');
+      if (!c) { if (Object.keys(save).length) await setState(uid, save); return target.reply('❌ No videos found, try again in a moment.'); }
       const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
+      // the position moves on either way (a link that fails isn't retried forever)
+      await setState(uid, { ...save, ...c.fields, ...(r.ok ? track(r) : {}) });
       if (!r.ok) { await target.reply('❌ Video error: server busy, please try again in a moment.'); return false; }
       const fid = r.result?.video?.file_id;
       funnel('videos');
@@ -2377,6 +2398,35 @@ Choose your preferred language:
     // Every cron minute: open orders from the last 30 min are checked with the payment worker, so a
     // user who paid but never pressed Verify is activated anyway; one nudge after 3 min if still pending.
     // ponytail: 8 checks per minute — plenty for ~25 orders a day; raise if orders grow a lot.
+    // Every 5 min (cron): delete /videos messages older than VIDEO_DELETE_HOURS, and all of them for a
+    // user whose paid plan / Premium ended after they were sent (videos don't outlive the plan).
+    // ponytail: 12 users per run, one deleteMessages call per 100 messages; raise if it falls behind.
+    videoCleanTick = async () => {
+      const hours = (await runtime()).VIDEO_DELETE_HOURS;
+      if (!hours) return;
+      const now = Math.floor(nowS()), cut = now - hours * 3600;
+      const rows = await db.all(`SELECT id, vmsgs, vdel_at, sub_until, premium_until FROM users
+        WHERE vdel_at IS NOT NULL AND (vdel_at <= ?1 OR MAX(COALESCE(sub_until, 0), COALESCE(premium_until, 0)) BETWEEN vdel_at AND ?2)
+        ORDER BY vdel_at LIMIT 12`, cut, now);
+      const st = [];
+      let calls = 0;
+      for (const u of rows) {
+        let list = [];
+        try { list = JSON.parse(u.vmsgs || '[]'); } catch {}
+        const end = Math.max(int(u.sub_until), int(u.premium_until));
+        const ended = end > 0 && end <= now && end >= int(u.vdel_at);
+        const del = list.filter(m => ended || m[2] <= cut);
+        const keep = list.filter(m => !del.includes(m) && m[2] > now - 47 * 3600);
+        const byChat = new Map();
+        for (const [chat, id] of del) byChat.set(chat, [...(byChat.get(chat) || []), id]);
+        for (const [chat, ids] of byChat)
+          for (let i = 0; i < ids.length && calls < 20; i += 100, calls++) await api.call('deleteMessages', { chat_id: chat, message_ids: ids.slice(i, i + 100) });
+        st.push(db.q('UPDATE users SET vmsgs = ?, vdel_at = ? WHERE id = ?', keep.length ? JSON.stringify(keep) : null, keep.length ? Math.min(...keep.map(m => m[2])) : null, u.id));
+        if (calls >= 20) break;
+      }
+      if (st.length) await db.batch(st);
+    };
+
     ordersTick = async () => {
       const now = Math.floor(nowS());
       const rows = await db.all("SELECT key, value FROM store WHERE key GLOB 'vid_order:*' AND expires_at > ?", now);
@@ -2567,6 +2617,9 @@ Choose your preferred language:
       try { await uploadTick(); } catch (e) { console.log('uploadTick', e.message); }
     }
     // payments: every minute; renew reminders at :30 (away from the :00 premium reminders and cleanup)
+    if (videoCleanTick && !broadcasting && minute % 5 === 2) {
+      try { await videoCleanTick(); } catch (e) { console.log('videoCleanTick', e.message); }
+    }
     if (ordersTick && !broadcasting) {
       try { await ordersTick(); } catch (e) { console.log('ordersTick', e.message); }
     }
