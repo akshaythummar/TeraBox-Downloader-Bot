@@ -223,11 +223,39 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 .go{padding:14px 24px;border:0;border-radius:14px;font:700 16px system-ui;color:#fff;background:linear-gradient(135deg,#8a6bff,#22c3ee);cursor:pointer}
 .spin{width:42px;height:42px;border:4px solid #fff3;border-top-color:#fff;border-radius:50%;animation:r .8s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
-#status{color:#ccc;font-size:14px}
+#login{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:radial-gradient(circle at 50% 30%,#2a2340,#07060d 70%);transition:opacity .35s}
+#login.out{opacity:0;pointer-events:none}
+.card{width:min(86vw,340px);padding:26px 22px;border-radius:22px;background:#15131f;box-shadow:0 20px 60px #000a;text-align:center}
+.card .logo{width:62px;height:62px;margin:0 auto 12px;border-radius:18px;display:grid;place-items:center;font-size:32px;background:linear-gradient(135deg,#8a6bff,#22c3ee)}
+.card h3{margin:0 0 16px;font-size:19px}
+.card label{display:block;text-align:left;font-size:12px;color:#9a97ad;margin:0 0 6px 4px}
+.field{padding:12px 14px;border-radius:12px;background:#0d0c14;border:1px solid #2c2940;font:600 18px ui-monospace,Consolas,monospace;letter-spacing:.06em;text-align:left;display:flex;justify-content:space-between;align-items:center}
+.field small{font:500 12px system-ui;color:#9a97ad;letter-spacing:0}
+.ring{width:64px;height:64px;margin:20px auto 10px}
+.ring svg{width:100%;height:100%}
+.ring .c{fill:none;stroke:#ffffff22;stroke-width:4}
+.ring .s{fill:none;stroke:#8a6bff;stroke-width:4;stroke-linecap:round;stroke-dasharray:40 151;transform-origin:center;animation:r .9s linear infinite}
+.ring .k{fill:none;stroke:#fff;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:40;stroke-dashoffset:40}
+.ring.ok .c{fill:#1fb36b;stroke:#1fb36b;transition:fill .25s,stroke .25s}
+.ring.ok .s{display:none}
+.ring.ok .k{animation:tick .35s .15s ease-out forwards}
+.ring.ok{animation:boom .4s ease-out}
+.ring.no .c{fill:#e5484d;stroke:#e5484d}.ring.no .s{display:none}
+@keyframes tick{to{stroke-dashoffset:0}}
+@keyframes boom{50%{transform:scale(1.12)}}
+.card .sub{color:#b9b6c9;font-size:14px;min-height:20px}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="top"><span id="badge" class="pill" hidden></span></div>
-<div id="feed"><div class="slide wall" id="first"><div class="spin"></div><div id="status">🔐 Logging in…</div></div></div>
+<div id="feed"></div>
+<div id="login"><div class="card">
+  <div class="logo">🎬</div>
+  <h3 id="lt">Logging in…</h3>
+  <label>Telegram user ID</label>
+  <div class="field"><span id="lid">—</span><small id="lname"></small></div>
+  <div class="ring" id="ring"><svg viewBox="0 0 64 64"><circle class="c" cx="32" cy="32" r="28"/><circle class="s" cx="32" cy="32" r="28"/><path class="k" d="M20 33l8 8 17-18"/></svg></div>
+  <div class="sub" id="lsub">Verifying your Telegram account…</div>
+</div></div>
 <div id="hint" class="hint" hidden>⬆️ Swipe up for more</div>
 <script>
 var BOT = "__BOT__";
@@ -235,7 +263,13 @@ if (window.Telegram && Telegram.WebApp && !tg) tgReady();
 // Telegram puts the signed login data in the URL hash: read it there so the feed starts at once
 var INIT = (tg && tg.initData) || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
 var feed = document.getElementById("feed"), muted = true, loading = false, ended = false, slides = [];
-var me = 0; try { me = JSON.parse(new URLSearchParams(INIT).get("user")).id || 0; } catch (e) {}
+var me = 0, meName = ""; try { var u0 = JSON.parse(new URLSearchParams(INIT).get("user")); me = u0.id || 0; meName = u0.username ? "@" + u0.username : (u0.first_name || ""); } catch (e) {}
+document.getElementById("lid").textContent = me || "—"; document.getElementById("lname").textContent = meName;
+var okAt = 0, loginGone = false;
+// the tick stays at least 0.8 s, then the card fades once the first video plays (or after 7 s anyway)
+function loginOk() { okAt = Date.now(); document.getElementById("ring").classList.add("ok"); document.getElementById("lt").textContent = "Logged in"; document.getElementById("lsub").textContent = "Loading your videos…"; setTimeout(hideLogin, 7000); }
+function loginFail(title, text) { document.getElementById("ring").classList.add("no"); document.getElementById("lt").textContent = title; document.getElementById("lsub").textContent = text; }
+function hideLogin() { if (loginGone) return; loginGone = true; setTimeout(function () { document.getElementById("login").classList.add("out"); }, Math.max(0, 800 - (Date.now() - okAt))); }
 var liked = {}; try { liked = JSON.parse(localStorage.getItem("liked") || "{}"); } catch (e) {}
 function saveLikes() { try { localStorage.setItem("liked", JSON.stringify(liked)); } catch (e) {} }
 function go(u) { try { if (tg && tg.openTelegramLink) return tg.openTelegramLink(u); } catch (e) {} location.href = u; }
@@ -276,7 +310,7 @@ function addVideo(v) {
   s.querySelector(".snd").textContent = muted ? "🔇" : "🔊";
   // the spinner only if it's really slow (no flicker on fast starts)
   vid.addEventListener("loadstart", function () { clearTimeout(s._w); s._w = setTimeout(function () { if (!s.classList.contains("ready")) s.classList.add("wait"); }, 400); });
-  vid.addEventListener("playing", function () { clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait"); });
+  vid.addEventListener("playing", function () { clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait"); if (okAt && current() === s) hideLogin(); });
   vid.addEventListener("waiting", function () { clearTimeout(s._w); s._w = setTimeout(function () { s.classList.add("wait"); }, 400); });
   vid.addEventListener("timeupdate", function () { if (vid.duration) bar.style.width = (100 * vid.currentTime / vid.duration) + "%"; });
   vid.addEventListener("loadedmetadata", function () {
@@ -316,12 +350,23 @@ function bad(s, report) {
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
 function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
-// the visible video and the next one load fully, the one after only its header; far ones are unloaded
+// Phones' in-app browsers ignore preload, so the next 2 videos are "warmed": started muted off-screen and
+// paused as soon as they play — the browser has then really fetched and decoded their start, and a swipe
+// plays them at once. Videos more than 2 away are unloaded (memory, data).
+function warm(s) {
+  var v = s.querySelector("video");
+  if (s._warm || s.classList.contains("bad")) return;
+  s._warm = true; v.preload = "auto"; v.muted = true;
+  if (!v.getAttribute("src")) v.src = v.dataset.src;
+  v.addEventListener("playing", function stop() { v.removeEventListener("playing", stop); if (current() !== s) v.pause(); });
+  v.play().catch(function () {});
+}
 function prepare(i) {
   slides.forEach(function (s, j) {
     var v = s.querySelector("video"); if (!v || s.classList.contains("bad")) return;
-    if (j >= i && j <= i + 2) { v.preload = j <= i + 1 ? "auto" : "metadata"; if (!v.getAttribute("src")) v.src = v.dataset.src; }
-    else if (Math.abs(j - i) > 2 && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); s.classList.remove("ready"); }
+    if (j === i) { v.preload = "auto"; if (!v.getAttribute("src")) v.src = v.dataset.src; s._warm = true; }
+    else if (j === i + 1 || j === i + 2) warm(s);
+    else if (Math.abs(j - i) > 2 && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); s.classList.remove("ready"); s._warm = false; }
   });
 }
 var seen = 0;
@@ -329,7 +374,7 @@ var io = new IntersectionObserver(function (es) {
   es.forEach(function (e) {
     var s = e.target, v = s.querySelector("video"); if (!v) return;
     if (e.isIntersecting && e.intersectionRatio > 0.6) {
-      var i = slides.indexOf(s); prepare(i); v.muted = muted; v.currentTime = 0; v.play().catch(function () {});
+      var i = slides.indexOf(s); prepare(i); v.muted = muted; if (v.currentTime > 0.5) v.currentTime = 0; v.play().catch(function () {});
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
       if (i > 0) { seen++; document.getElementById("hint").hidden = true; }
       if (i >= slides.length - 3) more();
@@ -340,13 +385,12 @@ document.addEventListener("visibilitychange", function () { var s = current(); i
 
 function more() {
   if (loading || ended) return; loading = true;
-  if (!INIT) { var f0 = document.getElementById("first"); if (f0) f0.remove(); wall("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
-  var st = document.getElementById("status"); if (st) st.textContent = "🎬 Getting your videos…";
+  if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
   fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      var first = document.getElementById("first"); if (first) first.remove();
-      if (!d.ok) { ended = true; return wall(d.error === "soon" ? "🎬 Coming soon" : "⚠️ Couldn't load", d.error === "soon" ? "The Videos App opens for everyone soon." : "Close and open the app again.", null); }
+      if (!d.ok) { ended = true; return d.error === "soon" ? loginFail("Coming soon", "The Videos App opens for everyone soon.") : loginFail("Login failed", "Close and open the app again."); }
+      if (!okAt) loginOk();
       var b = document.getElementById("badge"); b.hidden = false;
       b.textContent = d.unlimited ? "♾️ Unlimited" : "🎁 " + (d.left + d.videos.length) + " free today";
       var firstBatch = !slides.length;
@@ -354,10 +398,11 @@ function more() {
       if (firstBatch && slides.length) document.getElementById("hint").hidden = false;
       if (!d.unlimited && d.left === 0) {
         ended = true;
+        if (!d.videos.length) hideLogin();
         wall("🔒 That's all your free videos for today", "Come back tomorrow for more — or unlock unlimited videos now.", "🔓 Unlock unlimited", openPlans);
       }
     })
-    .catch(function () { wall("⚠️ Network error", "Check your connection and reopen the app.", null); ended = true; })
+    .catch(function () { if (!okAt) loginFail("No connection", "Check your internet and open the app again."); else wall("⚠️ Network error", "Check your connection and reopen the app.", null); ended = true; })
     .then(function () { loading = false; });
 }
 more();
