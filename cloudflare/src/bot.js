@@ -116,6 +116,7 @@ export const ADMIN_HELP = [
   ['videos', '🎬 /videos & Plans', [
     ['videosfreemode', '/videos free for everyone: /videosfreemode on | off'],
     ['videosready', 'How many pre-uploaded videos are ready'],
+    ['app', 'Videos Mini App (beta: admins only until /configset VIDEOS_APP_PUBLIC 1)'],
     ['setcooldown', '/videos cooldown: /setcooldown <seconds>', 1],
     ['setplan', 'Text shown above the /plan menu: /setplan <text>', 1],
   ]],
@@ -373,6 +374,7 @@ export function createBot(env, api, db, origin) {
       DAILY_FREE_VIDEOS: int(o.DAILY_FREE_VIDEOS ?? env.VIDEOS_DAILY_FREE ?? 5),
       // /videos messages are deleted from the chat after this many hours (0 = never; Telegram allows ≤48)
       VIDEO_DELETE_HOURS: Math.min(int(o.VIDEO_DELETE_HOURS ?? env.VIDEO_DELETE_HOURS ?? 24), 47),
+      VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
     };
@@ -1104,6 +1106,7 @@ Choose your preferred language:
     FREE_HOURLY_LIMIT: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
     DAILY_FREE_VIDEOS: { section: 'Limits', kind: 'int', min: 0, max: 50 },
     VIDEO_DELETE_HOURS: { section: 'Limits', kind: 'int', min: 0, max: 47 },
+    VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
   };
@@ -1981,7 +1984,7 @@ Choose your preferred language:
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
-  let ordersTick = null, subReminders = null, videoCleanTick = null; // /videos payments: auto-verify + renew reminders (cron)
+  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -2427,6 +2430,40 @@ Choose your preferred language:
       if (st.length) await db.batch(st);
     };
 
+    // ---- Videos Mini App (/app): a swipe feed of the videos Telegram already has (videos.file_id) ----
+    // Same access rules as /videos: free mode / paid / Premium / admin = unlimited, everyone else the
+    // daily free videos (the trial starts on first open). Free videos are counted when handed out.
+    async function pickVideos(n) {
+      // a random point in md5 order, then the next n: random enough, and reads only ~n rows
+      const start = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+      let rows = await db.all('SELECT md5 FROM videos WHERE md5 >= ? AND file_id IS NOT NULL ORDER BY md5 LIMIT ?', start, n);
+      if (rows.length < n) rows = rows.concat(await db.all('SELECT md5 FROM videos WHERE file_id IS NOT NULL ORDER BY md5 LIMIT ?', n - rows.length));
+      return [...new Set(rows.map(r => r.md5))];
+    }
+    appFeed = async uid => {
+      const ctx = await loadCtx(uid), access = await hasAccess(uid, ctx), daily = (await runtime()).DAILY_FREE_VIDEOS;
+      let n = 10, left = null, save = {};
+      if (access !== true) {
+        const fresh = !ctx.state.trial_start_time;
+        const f = fresh ? (daily > 0 ? { limit: daily, used: 0, daily: true } : { limit: TRIAL, used: 0, daily: false }) : (ctx.freeInfo || freeInfo(ctx.state, daily));
+        n = Math.max(0, Math.min(10, f.limit - f.used));
+        left = f.limit - f.used - n;
+        if (n) save = { trial_n: f.used + n, ...(f.daily ? { free_day: ymd() } : {}), ...(fresh ? { trial_start_time: nowS() } : {}) };
+        if (n && fresh) funnel('trials');
+      }
+      const ids = n ? await pickVideos(n) : [];
+      if (ids.length && save.trial_n != null) await setState(uid, { ...save, trial_n: save.trial_n - n + ids.length });
+      if (ids.length) funnel('app_videos', ids.length);
+      const exp = Math.floor(nowS()) + 3 * 3600; // links work for 3h (the app asks for more as you swipe)
+      const videos = await Promise.all(ids.map(async id => ({ id, src: `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
+      return { ok: true, unlimited: access === true, left, videos };
+    };
+    on(/^\/app$/, async m => {
+      if (!(await appAllowed(m.uid))) return m.reply('🎬 Videos App is coming soon!');
+      if (!m.isPrivate) return m.reply('Open the Videos App in a private chat with the bot.');
+      await m.reply('🎬 **Videos App** (beta)\nSwipe up for the next video.', { buttons: [[Button.webapp('🎬 Open Videos App', `${origin}/app`)]] });
+    });
+
     ordersTick = async () => {
       const now = Math.floor(nowS());
       const rows = await db.all("SELECT key, value FROM store WHERE key GLOB 'vid_order:*' AND expires_at > ?", now);
@@ -2659,5 +2696,7 @@ Choose your preferred language:
     }
   }
 
-  return { onMessage, onCallback, onChatMember, cron, bootCard };
+  // the Videos Mini App: admins only until /configset VIDEOS_APP_PUBLIC 1
+  const appAllowed = async uid => (await isAdmin(uid)) || (await runtime()).VIDEOS_APP_PUBLIC === 1;
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }) };
 }

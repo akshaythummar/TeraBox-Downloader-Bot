@@ -180,6 +180,155 @@ v.play().catch(() => {});
   );
 }
 
+// ---------------- Videos Mini App (/app) ----------------
+// The page (a swipe feed), its feed API, and the video stream. Login = Telegram's signed initData
+// (checked with the bot token), so the user id can't be faked. Videos are the ones Telegram already
+// has (videos.file_id ≤20 MB): streamed through here so the bot token never reaches the browser.
+const APP_HTML = String.raw`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Videos</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden;overscroll-behavior:none}
+#feed{height:100dvh;overflow-y:scroll;scroll-snap-type:y mandatory;scrollbar-width:none}
+#feed::-webkit-scrollbar{display:none}
+.slide{position:relative;height:100dvh;scroll-snap-align:start;scroll-snap-stop:always;display:grid;place-items:center;background:#000}
+.slide video{width:100%;height:100%;object-fit:contain;background:#000}
+.slide .msg{position:absolute;inset:0;display:none;place-items:center;text-align:center;padding:24px;color:#bbb}
+.slide.bad .msg{display:grid}
+.top{position:fixed;top:max(10px,env(safe-area-inset-top));left:10px;right:10px;display:flex;justify-content:space-between;gap:8px;z-index:5;pointer-events:none}
+.pill{pointer-events:auto;padding:7px 12px;border:0;border-radius:18px;background:#0008;color:#fff;font:600 13px system-ui;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.hint{position:fixed;bottom:calc(18px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);padding:8px 14px;border-radius:18px;background:#0009;font-size:13px;z-index:5;transition:opacity .4s;pointer-events:none}
+.flash{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:46px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:6}
+.wall{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:28px;text-align:center}
+.wall h2{margin:0;font-size:22px}.wall p{margin:0;color:#bbb;line-height:1.5}
+.go{padding:14px 22px;border:0;border-radius:14px;font:700 16px system-ui;color:#fff;background:linear-gradient(135deg,#8a6bff,#22c3ee);cursor:pointer}
+.spin{width:40px;height:40px;border:4px solid #fff3;border-top-color:#fff;border-radius:50%;animation:r .8s linear infinite}
+@keyframes r{to{transform:rotate(360deg)}}
+[hidden]{display:none!important}
+</style></head><body>
+<div class="top"><span id="badge" class="pill" hidden></span><button id="snd" class="pill">🔇 Tap for sound</button></div>
+<div id="feed"><div class="slide" id="first"><div class="spin"></div></div></div>
+<div id="hint" class="hint">⬆️ Swipe up for the next video</div>
+<div id="fl" class="flash"></div>
+<script>
+var BOT = "__BOT__";
+var tg = window.Telegram && Telegram.WebApp;
+try { tg.ready(); tg.expand(); tg.setHeaderColor("#000000"); tg.setBackgroundColor("#000000"); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {}
+var feed = document.getElementById("feed"), muted = true, loading = false, ended = false, slides = [];
+
+function flash(t) { var f = document.getElementById("fl"); f.textContent = t; f.style.opacity = 1; setTimeout(function () { f.style.opacity = 0; }, 500); }
+function wall(title, text, button, act) {
+  var s = document.createElement("div"); s.className = "slide wall";
+  s.innerHTML = "<h2></h2><p></p>" + (button ? '<button class="go"></button>' : "");
+  s.querySelector("h2").textContent = title; s.querySelector("p").textContent = text;
+  if (button) { s.querySelector("button").textContent = button; s.querySelector("button").onclick = act; }
+  feed.appendChild(s); return s;
+}
+function openPlans() {
+  var u = "https://t.me/" + BOT + "?start=plans";
+  try { if (tg && tg.initData) { tg.openTelegramLink(u); return tg.close(); } } catch (e) {}
+  location.href = u;
+}
+function addVideo(v) {
+  var s = document.createElement("div"); s.className = "slide";
+  var vid = document.createElement("video");
+  vid.setAttribute("playsinline", ""); vid.setAttribute("loop", ""); vid.setAttribute("controlslist", "nodownload noplaybackrate");
+  vid.disablePictureInPicture = true; vid.muted = true; vid.preload = "none"; vid.dataset.src = v.src;
+  vid.oncontextmenu = function () { return false; };
+  vid.onerror = function () { if (vid.getAttribute("src")) s.classList.add("bad"); };
+  var m = document.createElement("div"); m.className = "msg"; m.textContent = "⚠️ This video isn't available — swipe up";
+  s.appendChild(vid); s.appendChild(m); feed.appendChild(s); slides.push(s); io.observe(s);
+}
+// only the visible video and the next one get a src (saves data and requests); far ones are unloaded
+function prepare(i) {
+  slides.forEach(function (s, j) {
+    var v = s.querySelector("video"); if (!v) return;
+    if (j === i || j === i + 1) { if (!v.getAttribute("src")) { v.src = v.dataset.src; v.preload = j === i ? "auto" : "metadata"; } }
+    else if (Math.abs(j - i) > 2 && v.getAttribute("src")) { v.pause(); v.removeAttribute("src"); v.load(); }
+  });
+}
+var io = new IntersectionObserver(function (es) {
+  es.forEach(function (e) {
+    var v = e.target.querySelector("video"); if (!v) return;
+    if (e.isIntersecting && e.intersectionRatio > 0.6) {
+      var i = slides.indexOf(e.target); prepare(i); v.muted = muted; v.play().catch(function () {});
+      if (i > 0) document.getElementById("hint").style.opacity = 0;
+      if (i >= slides.length - 3) more();
+    } else v.pause();
+  });
+}, { threshold: [0, 0.6, 1] });
+
+feed.addEventListener("click", function (e) {
+  if (e.target.closest(".go")) return;
+  muted = !muted; document.querySelectorAll("video").forEach(function (v) { v.muted = muted; });
+  document.getElementById("snd").textContent = muted ? "🔇 Tap for sound" : "🔊 Sound on"; flash(muted ? "🔇" : "🔊");
+});
+document.getElementById("snd").onclick = function (e) { e.stopPropagation(); feed.click(); };
+
+function more() {
+  if (loading || ended) return; loading = true;
+  if (!tg || !tg.initData) { document.getElementById("first").remove(); wall("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
+  fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: tg.initData }) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var first = document.getElementById("first"); if (first) first.remove();
+      if (!d.ok) { ended = true; return wall(d.error === "soon" ? "🎬 Coming soon" : "⚠️ Couldn't load", d.error === "soon" ? "The Videos App opens for everyone soon." : "Close and open the app again.", null); }
+      var b = document.getElementById("badge"); b.hidden = false;
+      b.textContent = d.unlimited ? "♾️ Unlimited" : "🎁 " + (d.left + d.videos.length) + " free left today";
+      d.videos.forEach(addVideo);
+      if (!d.unlimited && d.left === 0) {
+        ended = true;
+        wall("🔒 That's all your free videos for today", "Come back tomorrow for more — or unlock unlimited videos now.", "🔓 Unlock unlimited", openPlans);
+      }
+      if (slides.length === 1 && !d.videos.length) ended = true;
+    })
+    .catch(function () { wall("⚠️ Network error", "Check your connection and reopen the app.", null); ended = true; })
+    .then(function () { loading = false; });
+}
+more();
+</script></body></html>
+`;
+async function appPage(env) {
+  return new Response(APP_HTML.replace('__BOT__', (await botUsername(env)) || ''), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+}
+
+const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+const hmac = async (key, data) => crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), new TextEncoder().encode(data));
+// Telegram Web App initData → the user id, or null if the signature or its age (24h) is wrong
+async function webAppUser(initData, token) {
+  const p = new URLSearchParams(String(initData || ''));
+  const hash = p.get('hash');
+  if (!hash || !token) return null;
+  p.delete('hash');
+  const check = [...p].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join('\n');
+  const secret = await hmac(new TextEncoder().encode('WebAppData'), token);
+  if (hex(await hmac(secret, check)) !== hash) return null;
+  if (Date.now() / 1000 - Number(p.get('auth_date')) > 86400) return null;
+  try { return Number(JSON.parse(p.get('user')).id) || null; } catch { return null; }
+}
+
+// file_id → Telegram file path (valid ≥1h), cached per isolate
+const filePaths = new Map();
+async function appVideo(env, db, req, url) {
+  const id = url.pathname.slice(7), e = Number(url.searchParams.get('e')), t = url.searchParams.get('t') || '';
+  if (!/^[0-9a-f]{32}$/.test(id) || !(e > Date.now() / 1000) || t !== (await sign(env.WEBHOOK_SECRET, `app:${id}:${e}`))) return new Response('Bad link', { status: 403 });
+  let fp = filePaths.get(id);
+  if (!fp || fp[1] < Date.now()) {
+    const fid = (await db.one('SELECT file_id FROM videos WHERE md5 = ?', id))?.file_id;
+    if (!fid) return new Response('Not found', { status: 404 });
+    const g = await makeApi(env.BOT_TOKEN, env.TG_API).call('getFile', { file_id: fid });
+    if (!g.ok) return new Response('Not available', { status: 404 });
+    if (filePaths.size > 2000) filePaths.clear(); // ponytail: crude bound
+    filePaths.set(id, fp = [g.result.file_path, Date.now() + 50 * 60 * 1000]);
+  }
+  const range = req.headers.get('range');
+  const r = await fetch(`${env.TG_API || 'https://api.telegram.org'}/file/bot${env.BOT_TOKEN}/${fp[0]}`, { headers: range ? { Range: range } : {} });
+  if (!r.ok) { filePaths.delete(id); return new Response('Not available', { status: 502 }); }
+  const h = new Headers({ 'content-type': 'video/mp4', 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=3600' });
+  for (const k of ['content-length', 'content-range']) if (r.headers.get(k)) h.set(k, r.headers.get(k));
+  return new Response(r.body, { status: r.status, headers: h });
+}
+
 // Every update: make sure the sender has a users row (= the broadcast list) and mark them active in
 // this IST hour (panel graph). A per-isolate memo skips D1 for someone already seen this hour, so most
 // messages cost no query at all; message counts go to the in-memory counters (db.bump).
@@ -227,6 +376,17 @@ export default {
       return new Response('ok');
     }
     if (url.pathname === '/watch') return watch(env, url);
+    if (url.pathname === '/app') return appPage(env);
+    if (url.pathname.startsWith('/app/v/')) return appVideo(env, db, req, url);
+    if (url.pathname === '/app/api/feed' && req.method === 'POST') {
+      const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
+      if (!uid) return Response.json({ ok: false, error: 'login' }, { status: 401 });
+      const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
+      if (!(await bot.appAllowed(uid))) return Response.json({ ok: false, error: 'soon' });
+      const res = await bot.appFeed(uid);
+      ctx.waitUntil(db.flush());
+      return Response.json(res);
+    }
     if (url.pathname === '/m3u8') return m3u8(env, db, url);
     if (url.pathname.startsWith('/panel-api/')) return panelApi(req, env, db, url.pathname.slice(11));
     if (url.pathname === '/setup' && url.searchParams.get('key') === env.WEBHOOK_SECRET)
