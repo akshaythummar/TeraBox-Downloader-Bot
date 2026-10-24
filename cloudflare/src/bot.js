@@ -866,9 +866,11 @@ export function createBot(env, api, db, origin) {
     // only a user's very first /start (gift / shared-video links and their buttons send /start again)
     if (m.raw._newUser && !admins.includes(uid))
       for (const a of admins) await api.send(a, `👤 New user started bot:\nName: ${userLink(uid, name)}\nUsername: @${escHtml(m.from.username || '-')}\nID: <code>${uid}</code>`, { html: true });
-    if (!arg?.startsWith('gc_') && !vm) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
+    const planArg = /^plan_\d+$/.test(arg || '');
+    if (!arg?.startsWith('gc_') && !vm && !planArg) await m.reply(welcome(name), { buttons: mainMenuButtons(uid) });
     if (refPending && !vm) await sendJoinPrompt(m.chatId, await missingChannels(uid));
     else if (arg === 'plans' && planViewHook) await planViewHook(m.chatId, uid); // t.me/<bot>?start=plans
+    else if (planArg && buyPlanHook) { await funnel('app_buy'); await buyPlanHook(m.chatId, uid, m.from, int(arg.slice(5))); }
   });
 
   // ==================== menu callbacks ====================
@@ -1986,6 +1988,7 @@ Choose your preferred language:
   // ==================== commands/videos.py ====================
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
+  let buyPlanHook = null; // t.me/<bot>?start=plan_<id> (the Videos App's plan cards): straight to that plan's QR
   let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
@@ -2298,9 +2301,8 @@ Choose your preferred language:
       await trialVideo(e.chatId, e.uid, e, ctx, { trial_start_time: nowS() }, f);
     });
     // /purchase<N> from the old bot: create an order on the payment worker, show Pay + Verify.
-    onCb(/^vid_plan_(\d+)$/, async e => {
-      await e.answer();
-      const chatId = e.chatId, uid = e.uid, planId = int(e.data.slice(9));
+    onCb(/^vid_plan_(\d+)$/, async e => { await e.answer(); await buyPlan(e.chatId, e.uid, e.from, int(e.data.slice(9))); });
+    async function buyPlan(chatId, uid, from, planId) {
       const busyMsg = await api.send(chatId, '⏳ Creating payment request...');
       const done = async text => { await busyMsg?.delete(); return text ? api.send(chatId, text, { html: true }) : null; };
 
@@ -2312,7 +2314,7 @@ Choose your preferred language:
         return done(`✅ <b>Your plan is already active${until > nowS() ? ` till ${dmyHM(until)}` : ''}.</b>\nWe'll remind you when it ends so you can renew.`);
       }
       let token = status.user_token;
-      if (!token) token = (await getJ(`${pay}/api/telegram/register`, { telegram_id: uid, name: e.from.username || 'User' }))?.user_token;
+      if (!token) token = (await getJ(`${pay}/api/telegram/register`, { telegram_id: uid, name: from.username || 'User' }))?.user_token;
       if (!token) return done('❌ Error fetching user data. Please try again.');
 
       const plan = ((await getPlans())?.plans || []).find(p => int(p.id) === planId);
@@ -2337,7 +2339,7 @@ Choose your preferred language:
       if (!order?.status || !order.result?.payment_url) return done(`❌ Failed to create order: ${escHtml(order?.message || 'Unknown error')}`);
 
       await funnel('orders');
-      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId, at: Math.floor(nowS()), chat: chatId, first: e.from.first_name || '-', user: e.from.username || '-' }), { ex: 86400 });
+      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId, at: Math.floor(nowS()), chat: chatId, first: from.first_name || '-', user: from.username || '-' }), { ex: 86400 });
       await done();
       const buttons = [[Button.url(`💳 Pay ₹${plan.price}`, order.result.payment_url)], [Button.inline("✅ I've Paid - Verify", 'vid_verify')]];
       // the QR right in the chat (same QR as the Pay page — the payment worker keeps it fixed per order);
@@ -2351,7 +2353,8 @@ Choose your preferred language:
         `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${plan.price}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
         "<b>📱 How to Pay:</b>\n1️⃣ Scan QR or click Pay button\n2️⃣ Complete payment in UPI app\n3️⃣ Click 'I've Paid' below\n\n⏰ Payment link expires in 10 minutes",
         { html: true, buttons });
-    });
+    }
+    buyPlanHook = buyPlan;
 
     // /verifynew from the old bot: ask the payment worker whether the order was paid.
     async function paymentStatus(o, uid) {
@@ -2470,7 +2473,20 @@ Choose your preferred language:
       if (ids.length) funnel('app_videos', ids.length);
       const exp = Math.floor(nowS()) + 50 * 60; // Telegram keeps a file path valid ≥1h; the app asks for more as you swipe
       const videos = await Promise.all(ok.map(async ([id, p]) => ({ id, d: await sign(env.WEBHOOK_SECRET, `dl:${uid}:${id}`), src: p ? `/app/v/${id}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}:${p}`)}` : `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
-      return { ok: true, unlimited: access === true, left, videos };
+      // the paywall (shown after the last free video): the plans as on the bot's menu, and when the
+      // daily free videos come back (midnight in TZ)
+      let wall = null;
+      if (access !== true && left === 0) {
+        funnel('app_wall');
+        const plans = ((await getPlans())?.plans || []).filter(p => p.status === 'active').sort((x, y) => x.price - y.price);
+        const perDay = p => p.price / p.validity_days, best = plans.reduce((x, p) => (!x || perDay(p) < perDay(x) ? p : x), null);
+        const [h, mi, se] = ymdHMS().slice(11).split(':').map(Number);
+        wall = {
+          daily, resetIn: 86400 - (h * 3600 + mi * 60 + se),
+          plans: plans.map(p => ({ id: int(p.id), name: String(p.name), price: +p.price, days: int(p.validity_days), save: Math.round((1 - perDay(p) / perDay(plans[0])) * 100), best: plans.length > 1 && p === best })),
+        };
+      }
+      return { ok: true, unlimited: access === true, left, videos, wall };
     };
     // ⬇️ in the app: that video into the user's chat (by file_id, instant) — like /videos: spoiler,
     // no forwarding, auto-deleted. The feed signed the id for this user (d), so only videos the app

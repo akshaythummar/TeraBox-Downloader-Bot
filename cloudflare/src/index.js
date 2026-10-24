@@ -252,6 +252,18 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 @keyframes tick{to{stroke-dashoffset:0}}
 @keyframes boom{50%{transform:scale(1.12)}}
 .card .sub{color:#b9b6c9;font-size:14px;min-height:20px}
+.pay{gap:10px;padding:22px 18px calc(22px + env(safe-area-inset-bottom))}
+.pay .lock{font-size:44px;line-height:1}
+.pay .again{color:#ffd479;font-weight:600;font-size:15px}
+.plans{display:flex;flex-direction:column;gap:12px;width:min(100%,360px);margin:6px 0 2px}
+.plan{position:relative;display:grid;grid-template-columns:1fr auto;align-items:center;gap:3px 12px;padding:14px 16px;border-radius:16px;border:1px solid #2f2b45;background:#16131f;color:#fff;text-align:left;cursor:pointer;font:inherit}
+.plan .nm{font-weight:700;font-size:16px}.plan small{color:#a9a5bd;font-size:12.5px}
+.plan .pr{grid-column:2;grid-row:1/3;font-weight:800;font-size:21px}
+.plan.best{border-color:#8a6bff;background:linear-gradient(135deg,#251d45,#14202b);box-shadow:0 0 0 1px #8a6bff55,0 8px 24px #8a6bff33}
+.plan em{position:absolute;top:-9px;right:14px;font:800 10px system-ui;letter-spacing:.06em;font-style:normal;padding:3px 8px;border-radius:8px;background:linear-gradient(135deg,#8a6bff,#22c3ee)}
+.plan:active{transform:scale(.98)}
+.pay .perks{font-size:13px;color:#bbb}
+.pay .all{background:none;border:0;color:#9aa3c7;text-decoration:underline;font:500 14px system-ui;cursor:pointer;padding:6px}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="top"><span id="badge" class="pill" hidden></span></div>
@@ -318,6 +330,33 @@ function wall(title, text, button, act) {
   feed.appendChild(s); return s;
 }
 function openPlans() { go("https://t.me/" + BOT + "?start=plans"); try { tg.close(); } catch (e) {} }
+// a plan card: the bot opens straight on that plan's payment QR
+function buy(id) { go("https://t.me/" + BOT + "?start=plan_" + id); try { tg.close(); } catch (e) {} }
+// After the last free video: the plans right here (one tap → that plan's QR in the bot) and a live
+// countdown to tomorrow's free videos. Without plans (payment API down) the plain button as before.
+function paywall(w) {
+  var plans = (w && w.plans) || [];
+  if (!plans.length) return wall("🔒 That's all your free videos for today", "Come back tomorrow for more — or unlock unlimited videos now.", "🔓 Unlock unlimited", openPlans);
+  var s = document.createElement("div"); s.className = "slide wall pay";
+  s.innerHTML = '<div class="lock">🔒</div><h2>Today\'s free videos are done</h2><p class="again"></p><div class="plans"></div>' +
+    '<p class="perks">♾️ Unlimited videos · ⚡ No daily limit · 🎬 /videos too</p><button class="all">See all plans in the bot</button>';
+  plans.forEach(function (p, i) {
+    var b = document.createElement("button"); b.className = "plan" + (p.best ? " best" : "");
+    b.innerHTML = '<span class="nm"></span><span class="pr"></span><small></small>' + (p.best ? "<em>BEST VALUE</em>" : "");
+    b.querySelector(".nm").textContent = (i === 0 ? "⚡ " : p.best ? "💎 " : "") + p.name;
+    b.querySelector(".pr").textContent = "₹" + p.price;
+    b.querySelector("small").textContent = p.days + (p.days === 1 ? " day" : " days") + " unlimited" + (i && p.save >= 10 ? " · save " + p.save + "%" : "");
+    b.onclick = function () { buy(p.id); };
+    s.querySelector(".plans").appendChild(b);
+  });
+  s.querySelector(".all").onclick = openPlans;
+  var ag = s.querySelector(".again");
+  if (w.daily > 0) {
+    var end = Date.now() + w.resetIn * 1000;
+    (function tick() { var x = Math.max(0, Math.round((end - Date.now()) / 1000)); ag.textContent = "🎁 " + w.daily + " free videos again in " + Math.floor(x / 3600) + "h " + Math.floor(x % 3600 / 60) + "m"; if (x > 0) setTimeout(tick, 20000); })();
+  } else ag.textContent = "Pick a plan to keep watching 👇";
+  feed.appendChild(s); return s;
+}
 // only the on-screen video gets the sound setting; warming (off-screen) ones stay muted
 function setSound() {
   var s = current(); if (s && s._v) s._v.muted = muted;
@@ -470,7 +509,7 @@ var io = new IntersectionObserver(function (es) {
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
       if (i > 0) { seen++; document.getElementById("hint").hidden = true; }
       // free users: the badge counts down, so the paywall after the last one is no surprise
-      if (freeLeft != null) document.getElementById("badge").textContent = "🎁 " + (slides.length - 1 - i + freeLeft) + " more free today";
+      if (freeLeft != null) { var fl = slides.length - 1 - i + freeLeft; document.getElementById("badge").textContent = "🎁 " + fl + " more free today"; if (!fl && !s._last) { s._last = true; toast("🎁 Last free video for today"); } }
       if (i >= slides.length - 5) more();
     } else if (s._on) { s._on = false; clearTimeout(s._go); s.classList.remove("tap"); if (s._v) { s._v.pause(); s._v.muted = true; } }
   });
@@ -505,7 +544,7 @@ function more() {
       if (!d.unlimited && d.left === 0) {
         ended = true;
         if (!d.videos.length) hideLogin();
-        wall("🔒 That's all your free videos for today", "Come back tomorrow for more — or unlock unlimited videos now.", "🔓 Unlock unlimited", openPlans);
+        paywall(d.wall);
       }
     })
     .catch(function () { if (!okAt) loginFail("No connection", "Check your internet and open the app again."); else wall("⚠️ Network error", "Check your connection and reopen the app.", null); ended = true; })
