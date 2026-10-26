@@ -1,4 +1,4 @@
-// The "Watch Online" player (redesign, Reels-style like src/reels.js): the video full screen, one tap
+// The "Watch Online" player (/watch), Reels-style like src/reels.js: the video full screen, one tap
 // pauses / plays, a thin progress line at the bottom (thicker with the time while dragging), the
 // sound, speed and share in the header (top right), the file name bottom-left, the time above the line.
 // Double-tap left / right skips 10 s, hold = 2x. Same HLS stream (/m3u8) and resume as the old page.
