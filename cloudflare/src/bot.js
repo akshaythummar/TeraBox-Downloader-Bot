@@ -2510,8 +2510,9 @@ Choose your preferred language:
       const r = await api.call('sendVideo', { chat_id: uid, video: fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...(hours ? { caption: `⏳ Auto-deletes from this chat in ${hours}h` } : {}), ...readyMarkup });
       if (!r.ok) return { ok: false };
       funnel('app_dl');
-      if (hours) await setState(uid, trackMsg({ vmsgs: (await db.one('SELECT vmsgs FROM users WHERE id = ?', int(uid)))?.vmsgs }, uid, r));
-      return { ok: true };
+      // the app's spinner waits for this answer: the auto-delete bookkeeping (a D1 read + write) runs after it
+      const after = hours ? (async () => setState(uid, trackMsg({ vmsgs: (await db.one('SELECT vmsgs FROM users WHERE id = ?', int(uid)))?.vmsgs }, uid, r)))().catch(() => {}) : null;
+      return { ok: true, after };
     };
     // 🧪 /app2 (admins only, separate from /app): the pool's links played straight from TeraBox — 200
     // per fetch, cached in the phone. No file_id, no D1 reads or writes.

@@ -6,7 +6,7 @@ export const REELS_HTML = String.raw`<!doctype html><html><head><meta charset="u
 <script>var tg = null; function tgReady() { tg = window.Telegram && Telegram.WebApp; try { tg.ready(); tg.expand(); tg.setHeaderColor("#000000"); tg.setBackgroundColor("#000000"); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {} }</script>
 <script async src="https://telegram.org/js/telegram-web-app.js" onload="tgReady()"></script>
 <style>
-:root{--ig:linear-gradient(45deg,#feda75,#fa7e1e 25%,#d62976 50%,#962fbf 75%,#4f5bd5);--red:#ff3040;--sheet:#1c1c1e;--line:#ffffff26;--mute:#a8a8a8}
+:root{--sb:max(env(safe-area-inset-bottom),calc(var(--tg-safe-area-inset-bottom,0px) + var(--tg-content-safe-area-inset-bottom,0px)));--st:max(env(safe-area-inset-top),calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px)));--ig:linear-gradient(45deg,#feda75,#fa7e1e 25%,#d62976 50%,#962fbf 75%,#4f5bd5);--red:#ff3040;--sheet:#1c1c1e;--line:#ffffff26;--mute:#a8a8a8}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:#000;color:#fff;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 button{font:inherit;color:inherit}
@@ -20,12 +20,10 @@ svg{display:block}
 .slide.ready .poster{display:none}
 .shade{position:absolute;left:0;right:0;bottom:0;height:42%;background:linear-gradient(transparent,#0000004d 40%,#000000b3);pointer-events:none;transition:opacity .2s}
 /* top bar */
-.top{position:fixed;left:0;right:0;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;padding:calc(env(safe-area-inset-top) + 12px) 16px 18px;background:linear-gradient(#00000080,transparent);pointer-events:none;transition:opacity .2s}
-.top h1{margin:0;font-size:24px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:4px}
-.top h1 svg{width:18px;height:18px;margin-top:3px}
+.top{position:fixed;left:0;right:0;top:0;z-index:5;display:flex;align-items:center;justify-content:flex-end;padding:calc(var(--st) + 12px) 16px 18px;background:linear-gradient(#00000080,transparent);pointer-events:none;transition:opacity .2s}
 .pill{padding:6px 12px;border-radius:999px;background:#ffffff26;font-weight:600;font-size:13px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
 /* right action rail */
-.rail{position:absolute;right:8px;bottom:calc(env(safe-area-inset-bottom) + 22px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
+.rail{position:absolute;right:8px;bottom:calc(var(--sb) + 34px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
 .act{display:flex;flex-direction:column;align-items:center;gap:5px;border:0;background:none;padding:0;cursor:pointer;width:52px}
 .act svg{width:29px;height:29px;filter:drop-shadow(0 1px 2px #0006)}
 .act span{font-size:12px;font-weight:500;text-shadow:0 1px 2px #0009}
@@ -37,7 +35,7 @@ svg{display:block}
 .mute .snd .on,.snd .off{display:none}.mute .snd .off{display:block}
 .disc{width:30px;height:30px;border-radius:8px;border:2px solid #fff;background:var(--ig);display:grid;place-items:center;font-weight:800;font-size:13px}
 /* bottom-left info */
-.info{position:absolute;left:14px;right:76px;bottom:calc(env(safe-area-inset-bottom) + 22px);transition:opacity .2s}
+.info{position:absolute;left:14px;right:76px;bottom:calc(var(--sb) + 30px);transition:opacity .2s}
 .who{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .av{width:34px;height:34px;border-radius:50%;padding:2px;background:var(--ig);flex:none}
 .av i{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#000;border:2px solid #000;font-style:normal;font-weight:800;font-size:13px}
@@ -50,12 +48,12 @@ svg{display:block}
 .aud div{overflow:hidden;flex:1;-webkit-mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent)}
 @keyframes mq{to{transform:translateX(-100%)}}
 /* progress / seek: thin line at the very bottom, thicker with the time while dragging */
-.seek{position:absolute;left:0;right:0;bottom:0;height:22px;padding-bottom:env(safe-area-inset-bottom);touch-action:none;cursor:pointer}
-.bar{position:absolute;left:0;right:0;bottom:env(safe-area-inset-bottom);height:2px;background:#ffffff40;transition:height .15s}
-.bar i{position:relative;display:block;height:100%;width:0;background:#fff}
+.seek{position:absolute;left:0;right:0;bottom:0;height:calc(var(--sb) + 30px);touch-action:none;cursor:pointer}
+.bar{position:absolute;left:12px;right:12px;bottom:calc(var(--sb) + 10px);height:3px;border-radius:3px;background:#ffffff4d;transition:height .15s}
+.bar i{position:relative;display:block;height:100%;width:0;border-radius:3px;background:#fff}
 .bar i:after{content:"";position:absolute;right:-6px;top:50%;width:12px;height:12px;margin-top:-6px;border-radius:50%;background:#fff;transform:scale(0);transition:transform .15s}
-.seek.drag .bar{height:5px}.seek.drag .bar i:after{transform:scale(1)}
-.tm{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 90px);transform:translateX(-50%);font-size:26px;font-weight:700;letter-spacing:.5px;text-shadow:0 2px 8px #000a;opacity:0;transition:opacity .15s;pointer-events:none;font-variant-numeric:tabular-nums}
+.seek.drag .bar{height:6px}.seek.drag .bar i:after{transform:scale(1)}
+.tm{position:fixed;left:50%;bottom:calc(var(--sb) + 90px);transform:translateX(-50%);font-size:26px;font-weight:700;letter-spacing:.5px;text-shadow:0 2px 8px #000a;opacity:0;transition:opacity .15s;pointer-events:none;font-variant-numeric:tabular-nums}
 .seek.drag .tm{opacity:1}
 .slide.held .tm{opacity:1;font-size:16px}
 /* dragging / holding: only the video (and the time) */
@@ -68,7 +66,7 @@ body.held .top,body.seeking .top{opacity:0}
 @keyframes r{to{transform:rotate(360deg)}}
 .tp{position:absolute;top:50%;left:50%;width:76px;height:76px;margin:-38px 0 0 -38px;border-radius:50%;background:#0000008c;display:none;place-items:center;pointer-events:none}
 .tp svg{width:34px;height:34px;margin-left:5px}
-.slide.tap .tp{display:grid}
+.slide.tap .tp,.slide.up .tp{display:grid}
 .flash{position:absolute;top:50%;left:50%;width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;background:#0000008c;display:grid;place-items:center;pointer-events:none;animation:fl .7s ease forwards}
 .flash svg{width:30px;height:30px}
 @keyframes fl{0%{opacity:0;transform:scale(.7)}20%{opacity:1;transform:scale(1)}75%{opacity:1}100%{opacity:0}}
@@ -78,9 +76,9 @@ body.held .top,body.seeking .top{opacity:0}
 .msg{position:absolute;inset:0;display:none;place-items:center;text-align:center;padding:24px;color:var(--mute)}
 .slide.bad .msg{display:grid}.slide.bad .load{opacity:0}
 /* snackbar + first-time hint */
-#toast{position:fixed;left:16px;right:16px;bottom:calc(env(safe-area-inset-bottom) + 70px);z-index:8;padding:13px 16px;border-radius:12px;background:#262626;box-shadow:0 6px 24px #0008;font-size:14px;font-weight:500;animation:up .25s ease}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(var(--sb) + 70px);z-index:8;padding:13px 16px;border-radius:12px;background:#262626;box-shadow:0 6px 24px #0008;font-size:14px;font-weight:500;animation:up .25s ease}
 @keyframes up{from{opacity:0;transform:translateY(12px)}}
-.hint{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 130px);transform:translateX(-50%);z-index:5;display:flex;flex-direction:column;align-items:center;gap:2px;font-weight:600;text-shadow:0 1px 4px #000;pointer-events:none;animation:bob 1.4s ease-in-out infinite}
+.hint{position:fixed;left:50%;bottom:calc(var(--sb) + 130px);transform:translateX(-50%);z-index:5;display:flex;flex-direction:column;align-items:center;gap:2px;font-weight:600;text-shadow:0 1px 4px #000;pointer-events:none;animation:bob 1.4s ease-in-out infinite}
 .hint svg{width:30px;height:30px}
 @keyframes bob{50%{transform:translate(-50%,-8px)}}
 /* walls (paywall / errors) */
@@ -93,7 +91,7 @@ body.held .top,body.seeking .top{opacity:0}
 .pay .ring2 div{width:100%;height:100%;border-radius:50%;background:#000;display:grid;place-items:center}
 .pay .ring2 svg{width:36px;height:36px}
 .pay .again{color:#fff;font-weight:600;font-size:14px;padding:6px 12px;border-radius:999px;background:#ffffff1f}
-.sheet{width:100%;background:var(--sheet);border-radius:18px 18px 0 0;padding:10px 16px calc(env(safe-area-inset-bottom) + 16px)}
+.sheet{width:100%;background:var(--sheet);border-radius:18px 18px 0 0;padding:10px 16px calc(var(--sb) + 16px)}
 .sheet .grab{width:38px;height:4px;border-radius:2px;background:#ffffff40;margin:0 auto 14px}
 .sheet h3{margin:0 0 4px;font-size:17px;font-weight:700;text-align:left}
 .sheet .perks{margin:0 0 14px;color:var(--mute);font-size:13px;text-align:left}
@@ -130,7 +128,7 @@ body.held .top,body.seeking .top{opacity:0}
 .card .sub{color:var(--mute);font-size:14px;min-height:20px}
 [hidden]{display:none!important}
 </style></head><body>
-<div class="top"><h1>Reels <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></h1><span id="badge" class="pill" hidden></span></div>
+<div class="top"><span id="badge" class="pill" hidden></span></div>
 <div id="feed"></div>
 <div id="login"><div class="card">
   <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><rect x="2.5" y="2.5" width="19" height="19" rx="5"/><path d="M2.5 8h19M9 2.5l3 5.5M15 2.5l3 5.5"/><path d="M10 11.5v6l5-3z" fill="#fff"/></svg></div>
@@ -194,11 +192,12 @@ function download(s, b) {
   if (s._sent) return toast("Already sent to your Telegram chat");
   if (b.classList.contains("busy")) return;
   b.classList.add("busy"); haptic();
+  var guard = setTimeout(function () { if (b.classList.contains("busy")) { b.classList.remove("busy"); toast("Sending… check your Telegram chat"); } }, 12000);
   fetch("/app/api/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id, d: s.dataset.d }) })
     .then(function (r) { return r.json(); })
     .then(function (d) { if (!d.ok) throw 0; s._sent = true; LV.dl++; live(); b.classList.add("done"); toast("Sent to your Telegram chat"); try { tg.HapticFeedback.notificationOccurred("success"); } catch (e) {} })
     .catch(function () { toast("Couldn't send — try again"); })
-    .then(function () { b.classList.remove("busy"); });
+    .then(function () { clearTimeout(guard); b.classList.remove("busy"); });
 }
 // the seek bar: tap or drag anywhere on it to jump; the big time shows while dragging
 function seeker(s) {
@@ -211,7 +210,7 @@ function seeker(s) {
     s._show(at(e)); haptic();
   });
   sk.addEventListener("pointermove", function (e) { if (s._drag) s._show(at(e)); });
-  function end(e) { if (!s._drag) return; s._drag = false; sk.classList.remove("drag"); s.classList.remove("seeking"); document.body.classList.remove("seeking"); if (!s._v) return; var t = at(e); s._v.currentTime = t; s._show(t); start(s); }
+  function end(e) { if (!s._drag) return; s._drag = false; sk.classList.remove("drag"); s.classList.remove("seeking"); document.body.classList.remove("seeking"); if (!s._v) return; var t = at(e); s._v.currentTime = t; s._show(t); s._up = false; s.classList.remove("up"); start(s); }
   sk.addEventListener("pointerup", function (e) { e.stopPropagation(); end(e); });
   sk.addEventListener("pointercancel", end);
 }
@@ -345,13 +344,19 @@ function addVideo(v) {
   if (liked[v.id]) like(s, true);
   s.querySelector(".lk").onclick = function (e) { e.stopPropagation(); like(s); };
   s.querySelector(".dl").onclick = function (e) { e.stopPropagation(); download(s, this); };
-  s.querySelector(".snd").onclick = function (e) { e.stopPropagation(); muted = !muted; setSound(true); haptic(); if (s._v && s._v.paused) start(s); };
+  s.querySelector(".snd").onclick = function (e) { e.stopPropagation(); muted = !muted; setSound(true); haptic(); if (s._v && s._v.paused && !s._up) start(s); };
   var pr = s.querySelector(".prem"); if (pr) pr.onclick = function (e) { e.stopPropagation(); haptic("medium"); openPlans(); };
   gestures(s); seeker(s);
   feed.appendChild(s); slides.push(s); io.observe(s);
 }
-// double-tap = like (with the big heart), hold = pause (the UI hides, like Instagram), single tap =
-// nothing (or play, if the play button is shown)
+// one tap = pause / play, double-tap = like (with the big heart; the tap waits 280 ms to tell them
+// apart), hold = pause while held (the UI hides, like Instagram)
+function togglePause(s) {
+  if (!s._v) return;
+  if (s._up) { s._up = false; s.classList.remove("up"); start(s); }
+  else { s._up = true; s.classList.add("up"); s._v.pause(); }
+  haptic();
+}
 function gestures(s) {
   var last = 0, hold = null;
   s.addEventListener("pointerdown", function (e) {
@@ -365,13 +370,13 @@ function gestures(s) {
     if (s.classList.contains("tap")) { s.classList.remove("tap"); start(s); return; }
     var now = Date.now();
     if (now - last < 300) {
-      like(s, true); last = 0;
+      clearTimeout(s._st); like(s, true); last = 0;
       var h = document.createElement("div"); h.className = "heart";
       h.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="' + HEART + '"/></svg>';
       h.style.setProperty("--rot", (Math.random() * 30 - 15).toFixed(0) + "deg");
       var r = s.getBoundingClientRect(); h.style.left = (e.clientX - r.left) + "px"; h.style.top = (e.clientY - r.top) + "px";
       s.appendChild(h); setTimeout(function () { h.remove(); }, 950);
-    } else last = now;
+    } else { last = now; clearTimeout(s._st); s._st = setTimeout(function () { togglePause(s); }, 280); }
   }
   s.addEventListener("pointerup", up); s.addEventListener("pointercancel", up); s.addEventListener("pointerleave", up);
 }
@@ -416,7 +421,7 @@ var io = new IntersectionObserver(function (es) {
       // free users: the badge counts down, so the paywall after the last one is no surprise
       if (freeLeft != null) { var fl = slides.length - 1 - i + freeLeft; document.getElementById("badge").textContent = fl + " free left today"; if (!fl && !s._last) { s._last = true; toast("Last free reel for today"); } }
       if (i >= slides.length - 5) more();
-    } else if (s._on) { s._on = false; clearTimeout(s._go); s.classList.remove("tap", "held"); document.body.classList.remove("held"); if (s._v) { s._v.pause(); s._v.muted = true; } }
+    } else if (s._on) { s._on = false; s._up = false; clearTimeout(s._go); clearTimeout(s._st); s.classList.remove("tap", "held", "up"); document.body.classList.remove("held"); if (s._v) { s._v.pause(); s._v.muted = true; } }
   });
 }, { threshold: [0, 0.6, 1] });
 // Safety net, twice a second: the on-screen video must be playing — if it sits paused (not held, no
@@ -425,12 +430,12 @@ var io = new IntersectionObserver(function (es) {
 setInterval(function () {
   var s = current(), v = s && s._v;
   if (!v || !s._on || s._drag || document.hidden) return;
-  if (v.paused) { if (!s.classList.contains("held") && !s.classList.contains("tap") && v.readyState >= 2 && Date.now() - s._arr > 1200) start(s); return; }
+  if (v.paused) { if (!s._up && !s.classList.contains("held") && !s.classList.contains("tap") && v.readyState >= 2 && Date.now() - s._arr > 1200) start(s); return; }
   if (!v.currentTime) return;
   if (v.currentTime !== s._lt) { s._lt = v.currentTime; s._lm = Date.now(); return; }
   if (Date.now() - s._lm > 2500) { s._lm = Date.now(); v.currentTime = v.currentTime + 0.05; }
 }, 500);
-document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else start(s); });
+document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else if (!s._up) start(s); });
 
 function more() {
   if (loading || ended) return; loading = true;

@@ -723,8 +723,8 @@ export default {
       if (!uid || !/^[0-9a-f]{32}$/.test(body.id || '') || body.d !== (await sign(env.WEBHOOK_SECRET, `dl:${uid}:${body.id}`))) return Response.json({ ok: false }, { status: 400 });
       const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
       if (!(await bot.appAllowed(uid))) return Response.json({ ok: false });
-      const res = await bot.appSend(uid, body.id);
-      ctx.waitUntil(db.flush());
+      const { after, ...res } = await bot.appSend(uid, body.id);
+      ctx.waitUntil(Promise.resolve(after).then(() => db.flush()));
       return Response.json(res);
     }
     if (url.pathname === '/app/api/feed' && req.method === 'POST') {
