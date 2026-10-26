@@ -2516,6 +2516,11 @@ Choose your preferred language:
     // 🧪 /app2 (admins only, separate from /app): the pool's links played straight from TeraBox — 200
     // per fetch, cached in the phone. No file_id, no D1 reads or writes.
     appLinks = async () => (await getJ(`${pool()}/?random=200`))?.links || [];
+    // the Instagram-Reels redesign, admins only until it replaces /app
+    on(/^\/reels$/, async m => {
+      if (!m.isPrivate) return;
+      await m.reply('🎬 **Reels** — new design (admins only, testing)\nSame videos and rules as /app.', { buttons: [[Button.webapp('🎬 Open Reels', `${origin}/reels`)]] });
+    }, ADMIN);
     on(/^\/app2$/, async m => {
       if (!m.isPrivate) return;
       await m.reply('🧪 **Videos App — links test** (admins only)\nVideos play straight from the pool\'s TeraBox links; nothing is saved.', { buttons: [[Button.webapp('🧪 Open links test', `${origin}/app2`)]] });

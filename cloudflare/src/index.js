@@ -5,6 +5,7 @@ import { DB } from './db.js';
 import { makeApi } from './tg.js';
 import { createBot, sign, teraboxCfg, resolveCached, streamUrl } from './bot.js';
 import { panelApi, botToken, setupWebhook } from './panel.js';
+import { REELS_HTML } from './reels.js';
 
 function params(url) {
   const g = k => url.searchParams.get(k) || '';
@@ -600,8 +601,8 @@ function moreLinks() {
 more();
 </script></body></html>
 `;
-async function appPage(env, mode = 'feed') {
-  return new Response(APP_HTML.replace('__BOT__', (await botUsername(env)) || '').replace('__MODE__', mode), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+async function appPage(env, mode = 'feed', html = APP_HTML) {
+  return new Response(html.replace('__BOT__', (await botUsername(env)) || '').replace('__MODE__', mode), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
 }
 
 const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -691,6 +692,7 @@ export default {
     if (url.pathname === '/watch') return watch(env, url);
     if (url.pathname === '/app') return appPage(env);
     if (url.pathname === '/app2') return appPage(env, 'links');
+    if (url.pathname === '/reels') return appPage(env, 'feed', REELS_HTML); // the Instagram-style redesign, opened by admins' /reels
     if (url.pathname === '/app/api/links' && req.method === 'POST') {
       const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
       if (!uid) return Response.json({ ok: false }, { status: 401 });
