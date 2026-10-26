@@ -1995,7 +1995,7 @@ Choose your preferred language:
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
   let buyPlanHook = null; // t.me/<bot>?start=plan_<id> (the Videos App's plan cards): straight to that plan's QR
-  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null; // /videos payments: auto-verify + renew reminders (cron)
+  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null, appLinks = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -2513,6 +2513,13 @@ Choose your preferred language:
       if (hours) await setState(uid, trackMsg({ vmsgs: (await db.one('SELECT vmsgs FROM users WHERE id = ?', int(uid)))?.vmsgs }, uid, r));
       return { ok: true };
     };
+    // 🧪 /app2 (admins only, separate from /app): the pool's links played straight from TeraBox — 200
+    // per fetch, cached in the phone. No file_id, no D1 reads or writes.
+    appLinks = async () => (await getJ(`${pool()}/?random=200`))?.links || [];
+    on(/^\/app2$/, async m => {
+      if (!m.isPrivate) return;
+      await m.reply('🧪 **Videos App — links test** (admins only)\nVideos play straight from the pool\'s TeraBox links; nothing is saved.', { buttons: [[Button.webapp('🧪 Open links test', `${origin}/app2`)]] });
+    }, ADMIN);
     on(/^\/app$/, async m => {
       if (!(await appAllowed(m.uid))) return; // not public yet: no reply, like any unknown command
       if (!m.isPrivate) return m.reply('Open the Videos App in a private chat with the bot.');
@@ -2761,6 +2768,7 @@ Choose your preferred language:
     const text = `🎬 <b>Videos App</b> — ${userLink(uid, name)}${user.username ? ` @${escHtml(user.username)}` : ''} <code>${int(uid)}</code>\n` +
       `${b.plan === 'free' ? '🆓 Free' : '♾️ Unlimited'} · ${b.end ? '⚪ closed' : '🟢 watching now'}\n\n` +
       `▶️ Videos watched: <b>${n(b.n)}</b>\n⏱ Time: ${Math.floor(secs / 60)}m ${secs % 60}s\n⬇️ Downloads: ${n(b.dl)} · ❤️ Likes: ${n(b.lk)}` +
+      (b.mode === 'links' ? `\n❌ Didn't load: <b>${n(b.fail)}</b> · 🧪 links test` : '') +
       (b.wall ? '\n🔒 Reached the paywall' : '') + (b.buy ? `\n💳 Tapped the ₹${n(b.buy)} plan → payment QR` : '');
     const mid = int(b.mid);
     if (mid && b.sig === (await sign(env.WEBHOOK_SECRET, `live:${uid}:${mid}`))) {
@@ -2777,5 +2785,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, isAdmin, appLinks: () => (appLinks ? appLinks() : []) };
 }

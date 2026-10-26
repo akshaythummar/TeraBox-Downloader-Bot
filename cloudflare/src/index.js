@@ -252,6 +252,7 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 @keyframes tick{to{stroke-dashoffset:0}}
 @keyframes boom{50%{transform:scale(1.12)}}
 .card .sub{color:#b9b6c9;font-size:14px;min-height:20px}
+.links .dl,.links .dl+small{display:none}
 .pay{gap:10px;padding:22px 18px calc(22px + env(safe-area-inset-bottom))}
 .pay .lock{font-size:44px;line-height:1}
 .pay .again{color:#ffd479;font-weight:600;font-size:15px}
@@ -279,7 +280,8 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font:15px system-ui,-a
 <div id="toast" class="pill" hidden></div>
 <div id="hint" class="hint" hidden>⬆️ Swipe up for more</div>
 <script>
-var BOT = "__BOT__";
+var BOT = "__BOT__", MODE = "__MODE__"; // MODE "links" = /app2, the pool's links straight from TeraBox (test)
+if (MODE === "links") document.documentElement.className = "links";
 if (window.Telegram && Telegram.WebApp && !tg) tgReady();
 // Telegram puts the signed login data in the URL hash: read it there so the feed starts at once
 var INIT = (tg && tg.initData) || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
@@ -297,14 +299,14 @@ function go(u) { try { if (tg && tg.openTelegramLink) return tg.openTelegramLink
 function toast(t) { var el = document.getElementById("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(function () { el.hidden = true; }, 2500); }
 // the owner's live log: one silent message per session, edited as the user watches (≤ 1 call / 8 s;
 // closing the app sends the final state at once). Only counts — nothing is stored anywhere.
-var LV = { n: 0, dl: 0, lk: 0, wall: 0, buy: 0, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
+var LV = { fail: 0, n: 0, dl: 0, lk: 0, wall: 0, buy: 0, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
 function live(end) {
   if (!okAt) return;
   clearTimeout(LV.tm);
   var wait = 8000 - (Date.now() - LV.at);
   if (LV.busy || (!end && wait > 0)) { LV.tm = setTimeout(function () { live(end); }, LV.busy ? 700 : wait); return; }
-  var body = { initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0 };
-  var key = JSON.stringify([body.n, body.dl, body.lk, body.wall, body.buy, body.end]);
+  var body = { mode: MODE, fail: LV.fail, initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0 };
+  var key = JSON.stringify([body.fail, body.n, body.dl, body.lk, body.wall, body.buy, body.end]);
   if (key === LV.key) return;
   body.secs = Math.round((Date.now() - LV.t0) / 1000);
   LV.key = key; LV.at = Date.now(); LV.busy = true;
@@ -489,9 +491,9 @@ function gestures(s) {
 }
 function bad(s, report) {
   if (s.classList.contains("bad")) return;
-  s.classList.add("bad");
+  s.classList.add("bad"); LV.fail++; live();
   if (s._v) detach(s._v);
-  if (report) try { fetch("/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
+  if (report && MODE !== "links") try { fetch("/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
 function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
@@ -547,6 +549,7 @@ setInterval(function () {
 document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else start(s); });
 
 function more() {
+  if (MODE === "links") return moreLinks();
   if (loading || ended) return; loading = true;
   if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
   fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT }) })
@@ -570,11 +573,35 @@ function more() {
     .catch(function () { if (!okAt) loginFail("No connection", "Check your internet and open the app again."); else wall("⚠️ Network error", "Check your connection and reopen the app.", null); ended = true; })
     .then(function () { loading = false; });
 }
+// /app2: 200 links per fetch, kept in the phone (localStorage) and shown 10 at a time
+function moreLinks() {
+  if (loading || ended) return; loading = true;
+  if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
+  var c = null; try { c = JSON.parse(localStorage.getItem("links200") || "null"); } catch (e) {}
+  function take(c) {
+    var batch = c.links.slice(c.i, c.i + 10); c.i += batch.length;
+    try { localStorage.setItem("links200", JSON.stringify(c)); } catch (e) {}
+    if (!okAt) { loginOk(); live(); }
+    var b = document.getElementById("badge"); b.hidden = false; b.textContent = "🧪 Links test · " + c.i + "/" + c.links.length;
+    var firstBatch = !slides.length;
+    batch.forEach(function (u) { addVideo({ id: (String(u).match(/file\/([0-9a-f]{32})/) || [])[1] || "x", src: u, d: "" }); });
+    if (firstBatch && slides.length) document.getElementById("hint").hidden = false;
+    loading = false;
+  }
+  if (c && c.links && c.i < c.links.length && Date.now() - c.at < 6 * 3600e3) return take(c);
+  fetch("/app/api/links", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT }) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.ok || !d.links.length) { ended = true; loading = false; return loginFail(d.error === "admin" ? "Admins only" : "No links", d.error === "admin" ? "This test is for admins." : "The pool returned no links — try again."); }
+      take({ links: d.links, i: 0, at: Date.now() });
+    })
+    .catch(function () { loading = false; if (!okAt) loginFail("No connection", "Check your internet and open the app again."); });
+}
 more();
 </script></body></html>
 `;
-async function appPage(env) {
-  return new Response(APP_HTML.replace('__BOT__', (await botUsername(env)) || ''), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+async function appPage(env, mode = 'feed') {
+  return new Response(APP_HTML.replace('__BOT__', (await botUsername(env)) || '').replace('__MODE__', mode), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
 }
 
 const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -663,6 +690,14 @@ export default {
     }
     if (url.pathname === '/watch') return watch(env, url);
     if (url.pathname === '/app') return appPage(env);
+    if (url.pathname === '/app2') return appPage(env, 'links');
+    if (url.pathname === '/app/api/links' && req.method === 'POST') {
+      const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
+      if (!uid) return Response.json({ ok: false }, { status: 401 });
+      const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
+      if (!(await bot.isAdmin(uid))) return Response.json({ ok: false, error: 'admin' });
+      return Response.json({ ok: true, links: await bot.appLinks() });
+    }
     if (url.pathname.startsWith('/app/v/')) return appVideo(env, db, req, url);
     if (url.pathname === '/app/api/bad' && req.method === 'POST') {
       // a video that played black / failed in someone's app: not handed out again
