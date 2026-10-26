@@ -1,6 +1,6 @@
 // The "Watch Online" player (redesign, Reels-style like src/reels.js): the video full screen, one tap
 // pauses / plays, a thin progress line at the bottom (thicker with the time while dragging), the
-// actions on the right (sound, speed, share), bot + file name bottom-left, the time above the line.
+// sound, speed and share in the header (top right), the file name bottom-left, the time above the line.
 // Double-tap left / right skips 10 s, hold = 2x. Same HLS stream (/m3u8) and resume as the old page.
 // No fullscreen: inside Telegram's Mini App the page already fills the screen and the API refuses it. Values come in as JSON; the client code uses no template syntax.
 export function playerHtml({ src, key, open, bot, name }) {
@@ -19,20 +19,15 @@ svg{display:block}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 .shade{position:absolute;left:0;right:0;bottom:0;height:38%;background:linear-gradient(transparent,#0000004d 40%,#000000b3);pointer-events:none;transition:opacity .2s}
 /* right action rail */
-.rail{position:absolute;right:8px;bottom:calc(var(--sb) + 54px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
-.act{display:flex;flex-direction:column;align-items:center;gap:5px;width:52px}
-.act svg{width:28px;height:28px;filter:drop-shadow(0 1px 2px #0006)}
-.act span{font-size:12px;font-weight:500;text-shadow:0 1px 2px #0009}
-.act:active svg{transform:scale(.88)}
-.act b{display:grid;place-items:center;height:28px;font-size:16px;font-weight:800;text-shadow:0 1px 2px #0009}
+.top{position:absolute;left:0;right:0;top:0;height:calc(var(--st) + 80px);background:linear-gradient(#00000080,transparent);pointer-events:none;transition:opacity .2s}
+.rail{position:absolute;right:6px;top:calc(var(--st) + 8px);display:flex;align-items:center;gap:2px;transition:opacity .2s}
+.act{display:grid;place-items:center;width:44px;height:44px;border-radius:50%}
+.act:active{background:#ffffff26}
+.act svg{width:26px;height:26px;filter:drop-shadow(0 1px 2px #0006)}
+.act b{font-size:15px;font-weight:800;text-shadow:0 1px 2px #0009}
 .mute .snd .on,.snd .off{display:none}.mute .snd .off{display:block}
 /* bottom-left: bot, file name, length */
-.info{position:absolute;left:14px;right:76px;bottom:calc(var(--sb) + 50px);transition:opacity .2s}
-.who{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.av{width:34px;height:34px;border-radius:50%;padding:2px;background:var(--ig);flex:none}
-.av i{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#000;border:2px solid #000;font-style:normal;font-weight:800;font-size:13px}
-.who b{font-size:14px;font-weight:600;text-shadow:0 1px 2px #0009;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.open{border:1px solid #ffffffcc;border-radius:8px;padding:4px 10px;font-size:13px;font-weight:600;white-space:nowrap}
+.info{position:absolute;left:14px;right:14px;bottom:calc(var(--sb) + 50px);transition:opacity .2s}
 .cap{font-size:14px;line-height:1.35;text-shadow:0 1px 2px #0009;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
 /* progress line at the very bottom; thicker with the big time while dragging */
 .seek{position:absolute;left:0;right:0;bottom:0;height:calc(var(--sb) + 38px);touch-action:none;cursor:pointer}
@@ -46,7 +41,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;backgr
 .time{position:absolute;left:14px;right:14px;bottom:calc(var(--sb) + 26px);display:flex;justify-content:space-between;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000c;pointer-events:none;transition:opacity .2s}
 .time span{color:#ddd}
 /* while dragging only the video and the time */
-.drag .rail,.drag .info,.drag .shade,.drag .time{opacity:0}
+.drag .rail,.drag .info,.drag .shade,.drag .top,.drag .time{opacity:0}
 /* centre: Reels' play icon while paused, the spinner while loading */
 .tp{position:absolute;top:50%;left:50%;width:80px;height:80px;margin:-40px 0 0 -40px;display:none;place-items:center;pointer-events:none;filter:drop-shadow(0 2px 10px #00000080)}
 .tp svg{width:80px;height:80px;margin-left:6px}
@@ -70,17 +65,16 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;backgr
 </head><body class="wait mute">
 <div id="wrap">
 <video id="v" autoplay muted playsinline preload="auto"></video>
-<div class="shade"></div>
+<div class="shade"></div><div class="top"></div>
 <div class="spin"></div>
 <div class="tp"><svg viewBox="0 0 24 24" fill="#ffffffe6"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg></div>
 <div class="info">
-  <div class="who"><span class="av"><i>${(bot || 'B').charAt(0).toUpperCase()}</i></span><b>${bot || ''}</b>${open ? '<button class="open" id="more">Open</button>' : ''}</div>
   <div class="cap" id="cap"></div>
 </div>
 <div class="rail">
-  <button class="act snd" id="snd"><span class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></span><span class="off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6M16 9l6 6"/></svg></span><span>Sound</span></button>
-  <button class="act" id="spd"><b id="rate">1x</b><span>Speed</span></button>
-  ${open ? '<button class="act" id="shr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 3 9.2 10.1M22 3l-7.4 18-4.2-8.5L2 9.1z"/></svg><span>Share</span></button>' : ''}
+  <button class="act snd" id="snd"><span class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></span><span class="off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6M16 9l6 6"/></svg></span></button>
+  <button class="act" id="spd"><b id="rate">1x</b></button>
+  ${open ? '<button class="act" id="shr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 3 9.2 10.1M22 3l-7.4 18-4.2-8.5L2 9.1z"/></svg></button>' : ''}
 </div>
 <div class="time"><b id="cur">0:00 / 0:00</b><span id="left"></span></div>
 <div class="seek" id="seek"><span class="tm" id="tm"></span><div class="bar"><i class="buf" id="buf"></i><i class="done" id="done"></i></div></div>
@@ -162,7 +156,6 @@ var SHARE_TEXT = "🎬 Watch this video in 1 tap — no download needed 👇";
 function go(u) { try { if (tg && tg.initData && tg.openTelegramLink) return tg.openTelegramLink(u); } catch (x) {} if (!window.open(u, "_blank")) location.href = u; }
 if (OPEN) {
   $("shr").onclick = function (e) { e.stopPropagation(); haptic(); if (!(tg && tg.initData) && navigator.share) return navigator.share({ text: SHARE_TEXT, url: OPEN }).catch(function () {}); go("https://t.me/share/url?url=" + encodeURIComponent(OPEN) + "&text=" + encodeURIComponent(SHARE_TEXT)); };
-  $("more").onclick = function (e) { e.stopPropagation(); go(OPEN); };
 }
 
 // resume where you left off
