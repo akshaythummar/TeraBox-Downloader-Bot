@@ -1,8 +1,8 @@
 // The "Watch Online" player (redesign, Reels-style like src/reels.js): the video full screen, one tap
 // pauses / plays, a thin progress line at the bottom (thicker with the time while dragging), the
-// actions on the right (sound, speed, fullscreen, share), bot + file name bottom-left. Double-tap
-// left / right skips 10 s, hold = 2x. Same HLS stream (/m3u8), resume and landscape = fullscreen
-// as the old page. Values come in as JSON; the client code uses no template syntax.
+// actions on the right (sound, speed, share), bot + file name bottom-left, the time next to the line.
+// Double-tap left / right skips 10 s, hold = 2x. Same HLS stream (/m3u8) and resume as the old page.
+// No fullscreen: inside Telegram's Mini App the page already fills the screen and the API refuses it. Values come in as JSON; the client code uses no template syntax.
 export function playerHtml({ src, key, open, bot, name }) {
   const J = x => JSON.stringify(x).replace(/</g, '\\u003c'); // a file name can't close the <script>
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
@@ -19,16 +19,15 @@ svg{display:block}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 .shade{position:absolute;left:0;right:0;bottom:0;height:38%;background:linear-gradient(transparent,#0000004d 40%,#000000b3);pointer-events:none;transition:opacity .2s}
 /* right action rail */
-.rail{position:absolute;right:8px;bottom:calc(var(--sb) + 34px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
+.rail{position:absolute;right:8px;bottom:calc(var(--sb) + 46px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
 .act{display:flex;flex-direction:column;align-items:center;gap:5px;width:52px}
 .act svg{width:28px;height:28px;filter:drop-shadow(0 1px 2px #0006)}
 .act span{font-size:12px;font-weight:500;text-shadow:0 1px 2px #0009}
 .act:active svg{transform:scale(.88)}
 .act b{display:grid;place-items:center;height:28px;font-size:16px;font-weight:800;text-shadow:0 1px 2px #0009}
 .mute .snd .on,.snd .off{display:none}.mute .snd .off{display:block}
-.fs .full .in,.full .out{display:none}.fs .full .out{display:block}
 /* bottom-left: bot, file name, length */
-.info{position:absolute;left:14px;right:76px;bottom:calc(var(--sb) + 30px);transition:opacity .2s}
+.info{position:absolute;left:14px;right:76px;bottom:calc(var(--sb) + 42px);transition:opacity .2s}
 .who{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .av{width:34px;height:34px;border-radius:50%;padding:2px;background:var(--ig);flex:none}
 .av i{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#000;border:2px solid #000;font-style:normal;font-weight:800;font-size:13px}
@@ -46,9 +45,10 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;backgr
 .seek.drag .bar{height:6px}.seek.drag .bar .done:after{transform:scale(1)}
 .tm{position:absolute;left:50%;bottom:calc(var(--sb) + 90px);transform:translateX(-50%);font-size:26px;font-weight:700;letter-spacing:.5px;text-shadow:0 2px 8px #000a;opacity:0;transition:opacity .15s;pointer-events:none;font-variant-numeric:tabular-nums;white-space:nowrap}
 .drag .tm{opacity:1}
-.paused .tm{opacity:1;font-size:16px}
+.time{position:absolute;left:14px;right:14px;bottom:calc(var(--sb) + 18px);display:flex;justify-content:space-between;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000c;pointer-events:none;transition:opacity .2s}
+.time span{color:#ddd}
 /* while dragging only the video and the time */
-.drag .rail,.drag .info,.drag .shade{opacity:0}
+.drag .rail,.drag .info,.drag .shade,.drag .time{opacity:0}
 /* centre: Reels' play icon while paused, the spinner while loading */
 .tp{position:absolute;top:50%;left:50%;width:80px;height:80px;margin:-40px 0 0 -40px;display:none;place-items:center;pointer-events:none;filter:drop-shadow(0 2px 10px #00000080)}
 .tp svg{width:80px;height:80px;margin-left:6px}
@@ -83,9 +83,9 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;backgr
 <div class="rail">
   <button class="act snd" id="snd"><span class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></span><span class="off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6M16 9l6 6"/></svg></span><span>Sound</span></button>
   <button class="act" id="spd"><b id="rate">1x</b><span>Speed</span></button>
-  <button class="act full" id="full"><svg class="in" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg><svg class="out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg><span>Full</span></button>
   ${open ? '<button class="act" id="shr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 3 9.2 10.1M22 3l-7.4 18-4.2-8.5L2 9.1z"/></svg><span>Share</span></button>' : ''}
 </div>
+<div class="time"><b id="cur">0:00 / 0:00</b><span id="left"></span></div>
 <div class="seek" id="seek"><span class="tm" id="tm"></span><div class="bar"><i class="buf" id="buf"></i><i class="done" id="done"></i></div></div>
 <div id="toast" hidden></div>
 <div id="err"><b>Video couldn't play</b><p id="em"></p><button onclick="location.reload()">Try again</button></div>
@@ -147,6 +147,7 @@ function tick() {
   if (!v.duration) return;
   $("len").textContent = fmt(v.duration);
   if (!seek.classList.contains("drag")) show(v.currentTime);
+  $("cur").textContent = fmt(v.currentTime) + " / " + fmt(v.duration); $("left").textContent = "-" + fmt(v.duration - v.currentTime);
   for (var i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 0.5 && v.buffered.end(i) >= v.currentTime) $("buf").style.width = (100 * v.buffered.end(i) / v.duration) + "%";
 }
 v.addEventListener("timeupdate", tick); v.addEventListener("progress", tick); v.addEventListener("loadedmetadata", tick);
@@ -161,16 +162,6 @@ v.addEventListener("playing", function () { if (v.muted && !hinted) { hinted = t
 // speed
 var SPEEDS = [1, 1.25, 1.5, 2, 0.75];
 $("spd").onclick = function (e) { e.stopPropagation(); rate = SPEEDS[(SPEEDS.indexOf(rate) + 1) % SPEEDS.length]; v.playbackRate = rate; $("rate").textContent = rate + "x"; haptic(); };
-
-// fullscreen (also when the phone turns sideways)
-function inFs() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
-function goFs() { var el = $("wrap"); try { if (el.requestFullscreen) return el.requestFullscreen().then(function () { try { screen.orientation.lock("landscape").catch(function () {}); } catch (x) {} }).catch(function () {}); if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); } catch (x) {} }
-function exitFs() { try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (x) {} }
-$("full").onclick = function (e) { e.stopPropagation(); inFs() ? exitFs() : goFs(); haptic(); };
-document.addEventListener("fullscreenchange", function () { B.classList.toggle("fs", inFs()); });
-function landscape() { return ((screen.orientation && screen.orientation.type) || "").indexOf("landscape") === 0 || Math.abs(window.orientation || 0) === 90; }
-function onTurn() { if (landscape() && !inFs() && v.currentTime) goFs(); else if (!landscape() && inFs()) exitFs(); }
-if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener("change", onTurn); else addEventListener("orientationchange", onTurn);
 
 // share / open the bot (inside Telegram through the Mini App API, in a browser as a normal link)
 var SHARE_TEXT = "🎬 Watch this video in 1 tap — no download needed 👇";
@@ -197,7 +188,6 @@ addEventListener("keydown", function (e) {
   else if (e.key === "ArrowLeft" || e.key === "j") skip(-10, 18);
   else if (e.key === "ArrowRight" || e.key === "l") skip(10, 82);
   else if (e.key === "m") v.muted = !v.muted;
-  else if (e.key === "f") inFs() ? exitFs() : goFs();
 });
 
 // the stream
