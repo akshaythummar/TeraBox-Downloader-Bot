@@ -64,9 +64,10 @@ body.held .top,body.seeking .top{opacity:0}
 .slide.wait .load{opacity:1}
 .spin{width:34px;height:34px;border:3px solid #ffffff33;border-top-color:#fff;border-radius:50%;animation:r .7s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
-.tp{position:absolute;top:50%;left:50%;width:76px;height:76px;margin:-38px 0 0 -38px;border-radius:50%;background:#0000008c;display:none;place-items:center;pointer-events:none}
-.tp svg{width:34px;height:34px;margin-left:5px}
-.slide.tap .tp,.slide.up .tp{display:grid}
+.tp{position:absolute;top:50%;left:50%;width:80px;height:80px;margin:-40px 0 0 -40px;display:none;place-items:center;pointer-events:none;opacity:.9;filter:drop-shadow(0 2px 12px #00000080)}
+.tp svg{width:80px;height:80px}
+.slide.tap .tp,.slide.up .tp{display:grid;animation:tpin .2s ease-out}
+@keyframes tpin{from{opacity:0;transform:scale(1.35)}to{opacity:.9;transform:scale(1)}}
 .flash{position:absolute;top:50%;left:50%;width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;background:#0000008c;display:grid;place-items:center;pointer-events:none;animation:fl .7s ease forwards}
 .flash svg{width:30px;height:30px}
 @keyframes fl{0%{opacity:0;transform:scale(.7)}20%{opacity:1;transform:scale(1)}75%{opacity:1}100%{opacity:0}}
@@ -154,7 +155,7 @@ var HEART = "M16.79 3.9A4.99 4.99 0 0 1 21.5 9.12c0 3.07-2.65 4.96-5.2 7.22-2.51
 var IC = {
   speakerOn: SVG("0 0 24 24", '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
   speakerOff: SVG("0 0 24 24", '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6M16 9l6 6"/>'),
-  play: '<svg viewBox="0 0 24 24" fill="#fff"><path d="M7 4.5v15l13-7.5z"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="#fff"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l11.03-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14z"/></svg>',
   lock: SVG("0 0 24 24", '<rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>'),
   music: '<svg viewBox="0 0 24 24" fill="#fff"><path d="M9 18.5a2.5 2.5 0 1 1-2.5-2.5c.53 0 1.02.16 1.43.44V5.5l11-2v12a2.5 2.5 0 1 1-2.5-2.5c.53 0 1.02.16 1.43.44V7.06l-8.86 1.6z"/></svg>'
 };
