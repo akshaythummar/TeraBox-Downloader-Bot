@@ -6,6 +6,7 @@ import { makeApi } from './tg.js';
 import { createBot, sign, teraboxCfg, resolveCached, streamUrl } from './bot.js';
 import { panelApi, botToken, setupWebhook } from './panel.js';
 import { REELS_HTML } from './reels.js';
+import { playerHtml } from './player.js';
 
 function params(url) {
   const g = k => url.searchParams.get(k) || '';
@@ -57,6 +58,9 @@ async function watch(env, url) {
   let start = `v_${p.s}_${p.f}_${r}`;
   if (start.length > 64) start = `v_${p.s}_${p.f}_0`;
   const open = bot && start.length <= 64 ? `https://t.me/${bot}?start=${start}` : null;
+  // the redesigned player (admins' links carry ui=2 while it's tried; n = the file name, display only)
+  if (url.searchParams.get('ui') === '2')
+    return new Response(playerHtml({ src, key: `${p.s}:${p.f}`, open, bot, name: (url.searchParams.get('n') || '').slice(0, 120) }), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>TeraBox Player</title>

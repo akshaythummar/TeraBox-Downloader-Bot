@@ -555,7 +555,8 @@ export function createBot(env, api, db, origin) {
   // that CDN, Telegram error) the normal stream post goes out instead, so the user always gets one.
   // sharer = the user the post is for: the Share button carries their referral credit
   async function sendStream(chatId, isPrivate, f, caption, q, userThumb, tryVideo = true, sharer = 0) {
-    const href = await watchUrl(f.code, f.fid, q, sharer);
+    // admins get the redesigned player (ui=2, with the file name as its title) while it's tried
+    const href = (await watchUrl(f.code, f.fid, q, sharer)) + (ADMINS.includes(int(chatId)) ? `&ui=2&n=${encodeURIComponent(String(f.file_name || '').slice(0, 80))}` : '');
     const share = await videoShare(f.code, f.fid, sharer);
     const buttons = [[isPrivate ? Button.webapp('▶️ Watch Online', href) : Button.url('▶️ Watch Online', href)], [Button.url('🌐 Open in Browser', href)], ...(share ? [[Button.url('📤 Share this video', share)]] : [])];
     if (tryVideo && f.md5 && f.sizebytes > 0 && f.sizebytes <= VIDEO_URL_MAX) {
