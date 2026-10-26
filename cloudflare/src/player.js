@@ -1,6 +1,6 @@
 // The "Watch Online" player (redesign, Reels-style like src/reels.js): the video full screen, one tap
 // pauses / plays, a thin progress line at the bottom (thicker with the time while dragging), the
-// actions on the right (sound, speed, share), bot + file name bottom-left, the time next to the line.
+// actions on the right (sound, speed, share), bot + file name bottom-left, the time above the line.
 // Double-tap left / right skips 10 s, hold = 2x. Same HLS stream (/m3u8) and resume as the old page.
 // No fullscreen: inside Telegram's Mini App the page already fills the screen and the API refuses it. Values come in as JSON; the client code uses no template syntax.
 export function playerHtml({ src, key, open, bot, name }) {
@@ -19,7 +19,7 @@ svg{display:block}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 .shade{position:absolute;left:0;right:0;bottom:0;height:38%;background:linear-gradient(transparent,#0000004d 40%,#000000b3);pointer-events:none;transition:opacity .2s}
 /* right action rail */
-.rail{position:absolute;right:8px;bottom:calc(var(--sb) + 46px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
+.rail{position:absolute;right:8px;bottom:calc(var(--sb) + 54px);display:flex;flex-direction:column;align-items:center;gap:20px;transition:opacity .2s}
 .act{display:flex;flex-direction:column;align-items:center;gap:5px;width:52px}
 .act svg{width:28px;height:28px;filter:drop-shadow(0 1px 2px #0006)}
 .act span{font-size:12px;font-weight:500;text-shadow:0 1px 2px #0009}
@@ -27,25 +27,23 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;backgr
 .act b{display:grid;place-items:center;height:28px;font-size:16px;font-weight:800;text-shadow:0 1px 2px #0009}
 .mute .snd .on,.snd .off{display:none}.mute .snd .off{display:block}
 /* bottom-left: bot, file name, length */
-.info{position:absolute;left:14px;right:76px;bottom:calc(var(--sb) + 42px);transition:opacity .2s}
+.info{position:absolute;left:14px;right:76px;bottom:calc(var(--sb) + 50px);transition:opacity .2s}
 .who{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .av{width:34px;height:34px;border-radius:50%;padding:2px;background:var(--ig);flex:none}
 .av i{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#000;border:2px solid #000;font-style:normal;font-weight:800;font-size:13px}
 .who b{font-size:14px;font-weight:600;text-shadow:0 1px 2px #0009;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .open{border:1px solid #ffffffcc;border-radius:8px;padding:4px 10px;font-size:13px;font-weight:600;white-space:nowrap}
 .cap{font-size:14px;line-height:1.35;text-shadow:0 1px 2px #0009;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
-.len{margin-top:8px;font-size:13px;color:#ddd;display:flex;align-items:center;gap:6px;text-shadow:0 1px 2px #0009}
-.len svg{width:14px;height:14px}
 /* progress line at the very bottom; thicker with the big time while dragging */
-.seek{position:absolute;left:0;right:0;bottom:0;height:calc(var(--sb) + 30px);touch-action:none;cursor:pointer}
-.bar{position:absolute;left:12px;right:12px;bottom:calc(var(--sb) + 10px);height:3px;border-radius:3px;background:#ffffff40;transition:height .15s}
+.seek{position:absolute;left:0;right:0;bottom:0;height:calc(var(--sb) + 38px);touch-action:none;cursor:pointer}
+.bar{position:absolute;left:12px;right:12px;bottom:calc(var(--sb) + 18px);height:3px;border-radius:3px;background:#ffffff40;transition:height .15s}
 .bar .buf,.bar .done{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:3px}
 .bar .buf{background:#ffffff4d}.bar .done{background:#fff}
 .bar .done:after{content:"";position:absolute;right:-6px;top:50%;width:12px;height:12px;margin-top:-6px;border-radius:50%;background:#fff;transform:scale(0);transition:transform .15s}
 .seek.drag .bar{height:6px}.seek.drag .bar .done:after{transform:scale(1)}
 .tm{position:absolute;left:50%;bottom:calc(var(--sb) + 90px);transform:translateX(-50%);font-size:26px;font-weight:700;letter-spacing:.5px;text-shadow:0 2px 8px #000a;opacity:0;transition:opacity .15s;pointer-events:none;font-variant-numeric:tabular-nums;white-space:nowrap}
 .drag .tm{opacity:1}
-.time{position:absolute;left:14px;right:14px;bottom:calc(var(--sb) + 18px);display:flex;justify-content:space-between;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000c;pointer-events:none;transition:opacity .2s}
+.time{position:absolute;left:14px;right:14px;bottom:calc(var(--sb) + 26px);display:flex;justify-content:space-between;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000c;pointer-events:none;transition:opacity .2s}
 .time span{color:#ddd}
 /* while dragging only the video and the time */
 .drag .rail,.drag .info,.drag .shade,.drag .time{opacity:0}
@@ -78,7 +76,6 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;backgr
 <div class="info">
   <div class="who"><span class="av"><i>${(bot || 'B').charAt(0).toUpperCase()}</i></span><b>${bot || ''}</b>${open ? '<button class="open" id="more">Open</button>' : ''}</div>
   <div class="cap" id="cap"></div>
-  <div class="len"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span id="len">—</span></div>
 </div>
 <div class="rail">
   <button class="act snd" id="snd"><span class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></span><span class="off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6M16 9l6 6"/></svg></span><span>Sound</span></button>
@@ -145,7 +142,6 @@ seek.addEventListener("pointerup", function (e) { e.stopPropagation(); drop(e); 
 seek.addEventListener("pointercancel", drop);
 function tick() {
   if (!v.duration) return;
-  $("len").textContent = fmt(v.duration);
   if (!seek.classList.contains("drag")) show(v.currentTime);
   $("cur").textContent = fmt(v.currentTime) + " / " + fmt(v.duration); $("left").textContent = "-" + fmt(v.duration - v.currentTime);
   for (var i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 0.5 && v.buffered.end(i) >= v.currentTime) $("buf").style.width = (100 * v.buffered.end(i) / v.duration) + "%";
@@ -156,8 +152,6 @@ v.addEventListener("timeupdate", tick); v.addEventListener("progress", tick); v.
 function syncMute() { B.classList.toggle("mute", v.muted); }
 v.addEventListener("volumechange", syncMute);
 $("snd").onclick = function (e) { e.stopPropagation(); v.muted = !v.muted; if (!v.muted && v.volume === 0) v.volume = 1; if (v.paused) v.play().catch(function () {}); flash(v.muted ? IC.off : IC.on); haptic(); };
-var hinted = false;
-v.addEventListener("playing", function () { if (v.muted && !hinted) { hinted = true; setTimeout(function () { if (v.muted) toast("Tap Sound on the right to unmute"); }, 1200); } });
 
 // speed
 var SPEEDS = [1, 1.25, 1.5, 2, 0.75];
@@ -175,7 +169,7 @@ if (OPEN) {
 var resumed = false;
 v.addEventListener("loadedmetadata", function () {
   var at = store.get();
-  if (!resumed && at > 5 && at < v.duration - 15) { v.currentTime = at; toast("Resumed from " + fmt(at)); }
+  if (!resumed && at > 5 && at < v.duration - 15) { v.currentTime = at; }
   resumed = true;
 });
 var saved = 0;
