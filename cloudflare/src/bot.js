@@ -2098,12 +2098,6 @@ Choose your preferred language:
     // random start (v_pos / v_start); once they've had them all, /videos falls back to their own
     // 200 links exactly as before.
     const readyMarkup = promo ? { reply_markup: { inline_keyboard: [[Button.url('Watch All Movies 🎬🍿', promo)]] } } : {};
-    // + "swipe more in the app" under each video in a private chat (when the app is public)
-    const videoMarkup = async chatId => {
-      const app = await appButton(chatId);
-      const rows = [...(app ? [[Button.webapp('🎬 Swipe more in Reels', `${origin}/reels`)]] : []), ...(readyMarkup.reply_markup?.inline_keyboard || [])];
-      return rows.length ? { reply_markup: { inline_keyboard: rows } } : {};
-    };
     // Everything /videos needs in ONE D1 round trip: the user's row (state, premium, admin), their
     // 200 links with the file_id of the next one, free mode, and their next pre-uploaded video.
     async function loadCtx(uid) {
@@ -2197,7 +2191,7 @@ Choose your preferred language:
       const track = r => (hours ? trackMsg(ctx.state, chatId, r) : {});
       // 1) a pre-uploaded video (file_id) this user hasn't had yet → instant; state is saved after it's sent
       if (ctx.ready) {
-        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...(await videoMarkup(chatId)) });
+        const r = await api.call('sendVideo', { chat_id: chatId, video: ctx.ready.fid, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
         const pos = { vid_pos: ctx.ready.pos, ...(ctx.ready.start != null ? { vid_start: ctx.ready.start } : {}) };
         if (r.ok) { funnel('videos'); await setState(uid, { ...save, ...pos, ...track(r) }); return true; }
         await db.run('UPDATE videos SET ready = NULL WHERE md5 = ?', ctx.ready.md5); // unusable file_id
@@ -2209,7 +2203,7 @@ Choose your preferred language:
         nextVideo(uid, ctx),
       ]);
       if (!c) { if (Object.keys(save).length) await setState(uid, save); return target.reply('❌ No videos found, try again in a moment.'); }
-      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...(await videoMarkup(chatId)) });
+      const r = await api.call('sendVideo', { chat_id: chatId, video: c.fid || c.url, has_spoiler: true, protect_content: true, supports_streaming: true, ...cap, ...readyMarkup });
       // the position moves on either way (a link that fails isn't retried forever)
       await setState(uid, { ...save, ...c.fields, ...(r.ok ? track(r) : {}) });
       if (!r.ok) { await target.reply('❌ Video error: server busy, please try again in a moment.'); return false; }
@@ -2232,7 +2226,7 @@ Choose your preferred language:
       }
     }
 
-    on(/^\/videos$/, async m => {
+    on(/^\/videos?$/, async m => { // /video too (a common typo)
       const ctx = await loadCtx(m.uid), state = ctx.state;
       if (state.last_video_time) {
         const pending = (await runtime()).VIDEOS_COOLDOWN_SECONDS - (nowS() - parseFloat(state.last_video_time));
