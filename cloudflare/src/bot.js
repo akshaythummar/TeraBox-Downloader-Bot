@@ -116,7 +116,7 @@ export const ADMIN_HELP = [
   ['videos', '🎬 /videos & Plans', [
     ['videosfreemode', '/videos free for everyone: /videosfreemode on | off'],
     ['videosready', 'How many pre-uploaded videos are ready'],
-    ['app', 'Videos Mini App (beta: admins + APP_TESTERS only until /configset VIDEOS_APP_PUBLIC 1)'],
+    ['reels', 'Reels (Videos Mini App) — public with VIDEOS_APP_PUBLIC 1, else admins + APP_TESTERS'],
     ['setcooldown', '/videos cooldown: /setcooldown <seconds>', 1],
     ['setplan', 'Text shown above the /plan menu: /setplan <text>', 1],
   ]],
@@ -144,7 +144,7 @@ export const ADMIN_HELP = [
 // Telegram "/" menu for each admin: the user commands + the admin ones they may use. Shown only to
 // them (chat scope). Errors are ignored (Telegram refuses it for someone who never opened the bot).
 export const COMMANDS = [
-  ['start', 'Start the bot'], ['app', '🎬 Videos App — swipe like Reels'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'], ['top', 'Top inviters'],
+  ['start', 'Start the bot'], ['reels', '🎬 Reels — swipe videos'], ['help', 'Main menu'], ['info', 'Your info & plan'], ['plan', 'Buy Premium / plans'], ['top', 'Top inviters'],
   ['redeem', 'Redeem a gift card'], ['ref', 'Invite friends, earn Premium'], ['mystats', 'Your statistics'],
   ['mystatus', 'Premium / tag / stats'], ['history', 'Your history'], ['search', 'Search the library'],
   ['videos', 'Videos'], ['lang', 'Language'],
@@ -627,7 +627,7 @@ export function createBot(env, api, db, origin) {
     await m.reply(`**Name:** ${m.from.first_name}\n**Username:** @${m.from.username || '-'}\n**User ID:** \`${uid}\`\n${tag ? `**Tag:** ${tag}\n` : ''}**Plan:** ${plan}`);
   });
 
-  const appButton = async chatId => (chatId > 0 && origin && (await runtime()).VIDEOS_APP_PUBLIC === 1 ? [Button.webapp('🎬 Videos App — swipe like Reels', `${origin}/app`)] : null);
+  const appButton = async chatId => (chatId > 0 && origin && (await runtime()).VIDEOS_APP_PUBLIC === 1 ? [Button.webapp('🎬 Reels — swipe videos', `${origin}/reels`)] : null);
   const mainMenuButtons = async (uid, chatId) => {
     const app = await appButton(chatId);
     const rows = [
@@ -1995,7 +1995,7 @@ Choose your preferred language:
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
   let buyPlanHook = null; // t.me/<bot>?start=plan_<id> (the Videos App's plan cards): straight to that plan's QR
-  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null, appLinks = null; // /videos payments: auto-verify + renew reminders (cron)
+  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -2101,7 +2101,7 @@ Choose your preferred language:
     // + "swipe more in the app" under each video in a private chat (when the app is public)
     const videoMarkup = async chatId => {
       const app = await appButton(chatId);
-      const rows = [...(app ? [[Button.webapp('🎬 Swipe more in Videos App', `${origin}/app`)]] : []), ...(readyMarkup.reply_markup?.inline_keyboard || [])];
+      const rows = [...(app ? [[Button.webapp('🎬 Swipe more in Reels', `${origin}/reels`)]] : []), ...(readyMarkup.reply_markup?.inline_keyboard || [])];
       return rows.length ? { reply_markup: { inline_keyboard: rows } } : {};
     };
     // Everything /videos needs in ONE D1 round trip: the user's row (state, premium, admin), their
@@ -2514,22 +2514,13 @@ Choose your preferred language:
       const after = hours ? (async () => setState(uid, trackMsg({ vmsgs: (await db.one('SELECT vmsgs FROM users WHERE id = ?', int(uid)))?.vmsgs }, uid, r)))().catch(() => {}) : null;
       return { ok: true, after };
     };
-    // 🧪 /app2 (admins only, separate from /app): the pool's links played straight from TeraBox — 200
-    // per fetch, cached in the phone. No file_id, no D1 reads or writes.
-    appLinks = async () => (await getJ(`${pool()}/?random=200`))?.links || [];
-    // the Instagram-Reels redesign, admins only until it replaces /app
-    on(/^\/reels$/, async m => {
-      if (!m.isPrivate) return;
-      await m.reply('🎬 **Reels** — new design (admins only, testing)\nSame videos and rules as /app.', { buttons: [[Button.webapp('🎬 Open Reels', `${origin}/reels`)]] });
-    }, ADMIN);
-    on(/^\/app2$/, async m => {
-      if (!m.isPrivate) return;
-      await m.reply('🧪 **Videos App — links test** (admins only)\nVideos play straight from the pool\'s TeraBox links; nothing is saved.', { buttons: [[Button.webapp('🧪 Open links test', `${origin}/app2`)]] });
-    }, ADMIN);
-    on(/^\/app$/, async m => {
+    // /reels: the Videos Mini App. /app was its old name — users who still send it are told about /reels
+    on(/^\/(reels|app)$/, async (m, g) => {
       if (!(await appAllowed(m.uid))) return; // not public yet: no reply, like any unknown command
-      if (!m.isPrivate) return m.reply('Open the Videos App in a private chat with the bot.');
-      await m.reply('🎬 **Videos App** (beta)\nSwipe up for the next video.', { buttons: [[Button.webapp('🎬 Open Videos App', `${origin}/app`)]] });
+      if (!m.isPrivate) return m.reply('Open Reels in a private chat with the bot: /reels');
+      await m.reply(g[1] === 'app'
+        ? '🎬 **Videos App is now Reels!**\nNew look, same videos. Next time just send /reels 👇'
+        : '🎬 **Reels** — swipe up for the next video.', { buttons: [[Button.webapp('🎬 Open Reels', `${origin}/reels`)]] });
     });
 
     ordersTick = async () => {
@@ -2771,10 +2762,9 @@ Choose your preferred language:
     const chat = (await runtime()).APP_LOG_CHAT[0] ?? String(OWNER_ID);
     if (!chat || chat === '0') return { ok: false };
     const n = x => Math.max(0, Math.min(int(x), 1e6)), secs = n(b.secs), name = [user.first_name, user.last_name].filter(Boolean).join(' ');
-    const text = `🎬 <b>Videos App</b> — ${userLink(uid, name)}${user.username ? ` @${escHtml(user.username)}` : ''} <code>${int(uid)}</code>\n` +
+    const text = `🎬 <b>Reels</b> — ${userLink(uid, name)}${user.username ? ` @${escHtml(user.username)}` : ''} <code>${int(uid)}</code>\n` +
       `${b.plan === 'free' ? '🆓 Free' : '♾️ Unlimited'} · ${b.end ? '⚪ closed' : '🟢 watching now'}\n\n` +
       `▶️ Videos watched: <b>${n(b.n)}</b>\n⏱ Time: ${Math.floor(secs / 60)}m ${secs % 60}s\n⬇️ Downloads: ${n(b.dl)} · ❤️ Likes: ${n(b.lk)}` +
-      (b.mode === 'links' ? `\n❌ Didn't load: <b>${n(b.fail)}</b> · 🧪 links test` : '') +
       (b.wall ? '\n🔒 Reached the paywall' : '') + (b.buy ? `\n💳 Tapped the ₹${n(b.buy)} plan → payment QR` : '');
     const mid = int(b.mid);
     if (mid && b.sig === (await sign(env.WEBHOOK_SECRET, `live:${uid}:${mid}`))) {
@@ -2791,5 +2781,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, isAdmin, appLinks: () => (appLinks ? appLinks() : []) };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive };
 }

@@ -1,5 +1,5 @@
-// The Videos App, Instagram-Reels style (/reels, admins only while it's being tried; /app keeps the
-// old look). Same APIs and player logic as APP_HTML in index.js: __BOT__ is replaced when served.
+// The Videos Mini App, Instagram-Reels style: served at /reels (and /app, its old name) by index.js,
+// with __BOT__ replaced. APIs: /app/api/feed, /app/v/*, /app/api/send, /app/api/bad, /app/api/live.
 // No backticks or dollar-brace inside (String.raw template).
 export const REELS_HTML = String.raw`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Reels</title>
