@@ -174,16 +174,23 @@ function haptic(k) { try { tg.HapticFeedback.impactOccurred(k || "light"); } cat
 function toast(t) { var el = document.getElementById("toast"); el.textContent = t; el.hidden = true; void el.offsetWidth; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(function () { el.hidden = true; }, 2600); }
 // the owner's live log: one silent message per session, edited as the user watches (≤ 1 call / 8 s;
 // closing the app sends the final state at once). Only counts — nothing is stored anywhere.
-var LV = { fail: 0, n: 0, dl: 0, lk: 0, wall: 0, buy: 0, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
+// loading A/B test: odd user ids (b) get the new loading (next 2 warmed at once, next batch earlier),
+// even ids (a) the old one; both report how fast videos start — numbers only (st = started, ms = total
+// wait, stall = stopped to load after starting, skip = swiped away before it started)
+var AB = me % 2 ? "b" : "a";
+var LV = { fail: 0, n: 0, dl: 0, lk: 0, wall: 0, buy: 0, st: 0, ms: 0, stall: 0, skip: 0, sent: { st: 0, ms: 0, stall: 0, skip: 0 }, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
 function live(end) {
   if (!okAt) return;
   clearTimeout(LV.tm);
   var wait = 8000 - (Date.now() - LV.at);
   if (LV.busy || (!end && wait > 0)) { LV.tm = setTimeout(function () { live(end); }, LV.busy ? 700 : wait); return; }
-  var body = { mode: MODE, fail: LV.fail, initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0 };
-  var key = JSON.stringify([body.fail, body.n, body.dl, body.lk, body.wall, body.buy, body.end]);
+  var body = { mode: MODE, fail: LV.fail, initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0, g: AB, st: LV.st, ms: LV.ms, stall: LV.stall, skip: LV.skip };
+  var key = JSON.stringify([body.fail, body.n, body.dl, body.lk, body.wall, body.buy, body.end, body.st, body.stall, body.skip]);
   if (key === LV.key) return;
   body.secs = Math.round((Date.now() - LV.t0) / 1000);
+  // what's new since the last report (the server adds these to the daily counters)
+  body.d = { st: LV.st - LV.sent.st, ms: LV.ms - LV.sent.ms, stall: LV.stall - LV.sent.stall, skip: LV.skip - LV.sent.skip };
+  LV.sent = { st: LV.st, ms: LV.ms, stall: LV.stall, skip: LV.skip };
   LV.key = key; LV.at = Date.now(); LV.busy = true;
   fetch("/app/api/live", { method: "POST", keepalive: true, headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
     .then(function (r) { return r.json(); }).then(function (d) { if (d.mid) { LV.mid = d.mid; LV.sig = d.sig; } })
@@ -214,7 +221,7 @@ function seeker(s) {
     s._show(at(e)); haptic();
   });
   sk.addEventListener("pointermove", function (e) { if (s._drag) s._show(at(e)); });
-  function end(e) { if (!s._drag) return; s._drag = false; sk.classList.remove("drag"); s.classList.remove("seeking"); document.body.classList.remove("seeking"); if (!s._v) return; var t = at(e); s._v.currentTime = t; s._show(t); s._up = false; s.classList.remove("up"); start(s); }
+  function end(e) { if (!s._drag) return; s._drag = false; sk.classList.remove("drag"); s.classList.remove("seeking"); document.body.classList.remove("seeking"); if (!s._v) return; var t = at(e); s._sk = Date.now(); s._v.currentTime = t; s._show(t); s._up = false; s.classList.remove("up"); start(s); }
   sk.addEventListener("pointerup", function (e) { e.stopPropagation(); end(e); });
   sk.addEventListener("pointercancel", end);
 }
@@ -291,8 +298,8 @@ function makeVideo() {
   v.loop = true; v.muted = true; v.preload = "auto"; v.oncontextmenu = function () { return false; };
   // the spinner only if it's really slow (no flicker on fast starts)
   v.addEventListener("loadstart", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s._w = setTimeout(function () { if (v._s === s && !s.classList.contains("ready")) s.classList.add("wait"); }, 400); });
-  v.addEventListener("playing", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait", "tap"); if (current() === s) { if (okAt) hideLogin(); prepare(slides.indexOf(s)); if (!s._seen) { s._seen = true; LV.n++; live(); } } });
-  v.addEventListener("waiting", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s._w = setTimeout(function () { if (v._s === s) s.classList.add("wait"); }, 400); });
+  v.addEventListener("playing", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s.classList.add("ready"); s.classList.remove("wait", "tap"); if (current() === s) { if (okAt) hideLogin(); prepare(slides.indexOf(s)); if (!s._seen) { s._seen = true; LV.n++; if (s._arr) { LV.st++; LV.ms += Math.min(30000, Date.now() - s._arr); } live(); } } });
+  v.addEventListener("waiting", function () { var s = v._s; if (!s) return; clearTimeout(s._w); s._w = setTimeout(function () { if (v._s !== s) return; s.classList.add("wait"); if (s._seen && current() === s && !s._drag && Date.now() - (s._sk || 0) > 1500) { LV.stall++; live(); } }, 400); });
   v.addEventListener("timeupdate", function () { var s = v._s; if (s && !s._drag) s._show(v.currentTime); });
   v.addEventListener("loadedmetadata", function () {
     var s = v._s; if (!s) return;
@@ -415,8 +422,8 @@ function prepare(i) {
   var cur = slides[i]; if (!cur) return;
   var v = attach(cur, i); if (!v) return;
   cur._warm = true;
-  if (slides[i + 1] && v.readyState >= 1) warm(slides[i + 1], i);
-  if (slides[i + 2] && cur.classList.contains("ready")) warm(slides[i + 2], i);
+  if (slides[i + 1] && (AB === "b" || v.readyState >= 1)) warm(slides[i + 1], i);
+  if (slides[i + 2] && (AB === "b" ? v.readyState >= 1 : cur.classList.contains("ready"))) warm(slides[i + 2], i);
 }
 var io = new IntersectionObserver(function (es) {
   es.forEach(function (e) {
@@ -433,8 +440,8 @@ var io = new IntersectionObserver(function (es) {
       if (i > 0) document.getElementById("hint").hidden = true;
       // free users: the badge counts down, so the paywall after the last one is no surprise
       if (freeLeft != null) { var fl = slides.length - 1 - i + freeLeft; document.getElementById("badge").textContent = fl + " free left today"; if (!fl && !s._last) { s._last = true; toast("Last free reel for today"); } }
-      if (i >= slides.length - 5) more();
-    } else if (s._on) { s._on = false; s._up = false; clearTimeout(s._go); clearTimeout(s._st); s.classList.remove("tap", "held", "up"); document.body.classList.remove("held"); if (s._v) { s._v.pause(); s._v.muted = true; } }
+      if (i >= slides.length - (AB === "b" ? 7 : 5)) more();
+    } else if (s._on) { if (!s._seen && s._arr && Date.now() - s._arr > 1000 && !s.classList.contains("bad")) { LV.skip++; live(); } s._on = false; s._up = false; clearTimeout(s._go); clearTimeout(s._st); s.classList.remove("tap", "held", "up"); document.body.classList.remove("held"); if (s._v) { s._v.pause(); s._v.muted = true; } }
   });
 }, { threshold: [0, 0.6, 1] });
 // Safety net, twice a second: the on-screen video must be playing — if it sits paused (not held, no

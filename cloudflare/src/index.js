@@ -171,7 +171,9 @@ export default {
       const uid = await webAppUser(body.initData, env.BOT_TOKEN);
       if (!uid) return Response.json({ ok: false }, { status: 401 });
       let user = {}; try { user = JSON.parse(new URLSearchParams(body.initData).get('user')) || {}; } catch {}
-      return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).appLive(uid, user, body));
+      const res = await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).appLive(uid, user, body);
+      ctx.waitUntil(db.flush()); // the loading counters (written at most every 2 min)
+      return Response.json(res);
     }
     if (url.pathname === '/app/api/send' && req.method === 'POST') {
       const body = await req.json().catch(() => ({}));

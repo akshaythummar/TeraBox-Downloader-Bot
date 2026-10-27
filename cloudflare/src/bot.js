@@ -1576,7 +1576,7 @@ Choose your preferred language:
     const rows = await db.all(`SELECT day, name, n FROM counters WHERE day IN (${keys.map(() => '?').join(',')})`, ...keys);
     const by = {};
     for (const r of rows) (by[r.day] ??= {})[r.name] = r.n;
-    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue', 'app_videos', 'app_wall', 'app_buy', 'app_dl', 'offer_first', 'offer_first_paid', 'offer_back', 'offer_back_paid'];
+    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue', 'app_videos', 'app_wall', 'app_buy', 'app_dl', 'offer_first', 'offer_first_paid', 'offer_back', 'offer_back_paid', 'rl_st_a', 'rl_ms_a', 'rl_stall_a', 'rl_skip_a', 'rl_st_b', 'rl_ms_b', 'rl_stall_b', 'rl_skip_b'];
     const tot = Object.fromEntries(F.map(f => [f, keys.reduce((a, k) => a + (by[k]?.[f] || 0), 0)]));
     const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
     const lines = keys.map(k => {
@@ -1590,6 +1590,7 @@ Choose your preferred language:
       `👥 Referrals: **${tot.referrals}**\n` +
       `🎬 /videos sent: **${tot.videos}**\n` +
       `🎁 Offers: first-time ${tot.offer_first} orders → ${tot.offer_first_paid} paid · welcome-back ${tot.offer_back} orders → ${tot.offer_back_paid} paid\n` +
+      `⚡ Reels loading (old / new): start ${['a', 'b'].map(g => (tot[`rl_st_${g}`] ? `${(tot[`rl_ms_${g}`] / tot[`rl_st_${g}`] / 1000).toFixed(2)}s` : '–')).join(' / ')} avg · stalls per 100 ${['a', 'b'].map(g => (tot[`rl_st_${g}`] ? Math.round((100 * tot[`rl_stall_${g}`]) / tot[`rl_st_${g}`]) : '–')).join(' / ')} · skipped ${tot.rl_skip_a} / ${tot.rl_skip_b} (${tot.rl_st_a} / ${tot.rl_st_b} starts)\n` +
       `📱 Videos App: **${tot.app_videos}** videos served · 🔒 paywall ${tot.app_wall} · 💳 plan taps ${tot.app_buy} · ⬇️ downloads ${tot.app_dl}\n` +
       `🎁 Trials started: **${tot.trials}** (${pct(tot.trials, tot.new_users)} of new users)\n` +
       `📋 Plans shown: **${tot.plans_shown}**\n` +
@@ -2821,12 +2822,16 @@ Choose your preferred language:
   // owner), edited as the user watches. The app keeps the message id (signed for that user) — nothing
   // is stored. ponytail: a logged-in user could open many sessions = many messages; cap if abused.
   const appLive = async (uid, user, b) => {
+    const n = x => Math.max(0, Math.min(int(x), 1e6)), secs = n(b.secs), name = [user.first_name, user.last_name].filter(Boolean).join(' ');
+    // Reels loading A/B (a = old loading, b = new): the session's new numbers into the daily counters
+    const g = b.g === 'b' ? 'b' : 'a', d = b.d || {};
+    for (const k of ['st', 'ms', 'stall', 'skip']) funnel(`rl_${k}_${g}`, Math.min(n(d[k]), k === 'ms' ? 300000 : 50));
     const chat = (await runtime()).APP_LOG_CHAT[0] ?? String(OWNER_ID);
     if (!chat || chat === '0') return { ok: false };
-    const n = x => Math.max(0, Math.min(int(x), 1e6)), secs = n(b.secs), name = [user.first_name, user.last_name].filter(Boolean).join(' ');
     const text = `🎬 <b>Reels</b> — ${userLink(uid, name)}${user.username ? ` @${escHtml(user.username)}` : ''} <code>${int(uid)}</code>\n` +
       `${b.plan === 'free' ? '🆓 Free' : '♾️ Unlimited'} · ${b.end ? '⚪ closed' : '🟢 watching now'}\n\n` +
       `▶️ Videos watched: <b>${n(b.n)}</b>\n⏱ Time: ${Math.floor(secs / 60)}m ${secs % 60}s\n⬇️ Downloads: ${n(b.dl)} · ❤️ Likes: ${n(b.lk)}` +
+      `\n⚡ Start: ${n(b.st) ? `${(n(b.ms) / n(b.st) / 1000).toFixed(1)}s avg` : '–'} · stalls ${n(b.stall)} · skipped while loading ${n(b.skip)} · ${g === 'b' ? 'new' : 'old'} loading` +
       (b.wall ? '\n🔒 Reached the paywall' : '') + (b.buy ? `\n💳 Tapped the ₹${n(b.buy)} plan → payment QR` : '');
     const mid = int(b.mid);
     if (mid && b.sig === (await sign(env.WEBHOOK_SECRET, `live:${uid}:${mid}`))) {
