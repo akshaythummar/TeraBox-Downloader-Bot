@@ -2849,11 +2849,12 @@ Choose your preferred language:
     if (!r.ok) return { ok: false };
     return { ok: true, mid: r.result.message_id, sig: await sign(env.WEBHOOK_SECRET, `live:${uid}:${r.result.message_id}`) };
   };
-  // 🧪 /str (admins): Reels-style test page playing TeraBox HLS streams (/m3u8) instead of Telegram files,
-  // from the streams table (every link whose stream post went out). "/str <links>" adds up to 10 more.
+  // 🧪 /str (admins + APP_TESTERS): Reels-style test page playing TeraBox HLS streams (/m3u8) instead of
+  // Telegram files, from the streams table (every link whose stream post went out). "/str <links>" adds up to 10 more.
   const STR_MAX = 10; // ponytail: each new link is a TeraBox resolve (~3 calls of the 50 per run)
+  const strAllowed = async uid => (await isAdmin(uid)) || (await runtime()).APP_TESTERS.includes(String(uid));
   on(/^\/str(?:\s+([\s\S]+))?$/, async (m, g) => {
-    if (!m.isPrivate) return;
+    if (!m.isPrivate || !(await strAllowed(m.uid))) return; // others: no reply, like any unknown command
     const open = { buttons: [[Button.webapp('🧪 Open stream test', `${origin}/str`)]] };
     if (!g[1]) {
       const c = await db.one('SELECT COUNT(*) n, SUM(fails >= 3) dead FROM streams');
@@ -2872,12 +2873,12 @@ Choose your preferred language:
     await busy?.delete();
     if (!items.length) return m.reply('❌ None of these links had a video I could read.');
     await m.reply(`✅ Added **${items.length}** video(s) to the stream test${bad.length ? ` (${bad.length} link(s) skipped: no video / couldn't read)` : ''}.`, open);
-  }, ADMIN);
+  });
   // the /str page's feed: 10 random rows (a random point in code order, then the next 10 — reads ~10
   // rows) as signed /m3u8 streams (the Watch Online stream); videos that failed 3 times are left out
   const STR_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz';
   const strFeed = async uid => {
-    if (!(await isAdmin(uid))) return { ok: false, error: 'admin' };
+    if (!(await strAllowed(uid))) return { ok: false, error: 'admin' };
     const start = '1' + STR_CHARS[Math.floor(Math.random() * STR_CHARS.length)];
     let rows = await db.all('SELECT code, fid, name FROM streams WHERE code >= ? AND fails < 3 ORDER BY code, fid LIMIT 10', start);
     if (rows.length < 10) rows = rows.concat(await db.all('SELECT code, fid, name FROM streams WHERE fails < 3 ORDER BY code, fid LIMIT ?', 10 - rows.length));
@@ -2890,7 +2891,7 @@ Choose your preferred language:
   // a video that didn't play in /str: one more fail (3 = left out of the feed)
   const strBad = async (uid, id) => {
     const m = /^([\w-]+):(\d+)$/.exec(String(id || ''));
-    if (!m || !(await isAdmin(uid))) return { ok: false };
+    if (!m || !(await strAllowed(uid))) return { ok: false };
     await db.run('UPDATE streams SET fails = fails + 1 WHERE code = ? AND fid = ?', m[1], m[2]);
     return { ok: true };
   };
