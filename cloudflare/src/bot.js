@@ -2824,14 +2824,14 @@ Choose your preferred language:
   const appLive = async (uid, user, b) => {
     const n = x => Math.max(0, Math.min(int(x), 1e6)), secs = n(b.secs), name = [user.first_name, user.last_name].filter(Boolean).join(' ');
     // Reels loading A/B (a = old loading, b = new): the session's new numbers into the daily counters
-    const g = b.g === 'b' ? 'b' : 'a', d = b.d || {};
-    for (const k of ['st', 'ms', 'stall', 'skip']) funnel(`rl_${k}_${g}`, Math.min(n(d[k]), k === 'ms' ? 300000 : 50));
+    const g = b.g === 'b' || b.g === 's' ? b.g : 'a', d = b.d || {};
+    if (g !== 's') for (const k of ['st', 'ms', 'stall', 'skip']) funnel(`rl_${k}_${g}`, Math.min(n(d[k]), k === 'ms' ? 300000 : 50));
     const chat = (await runtime()).APP_LOG_CHAT[0] ?? String(OWNER_ID);
     if (!chat || chat === '0') return { ok: false };
     const text = `🎬 <b>Reels</b> — ${userLink(uid, name)}${user.username ? ` @${escHtml(user.username)}` : ''} <code>${int(uid)}</code>\n` +
       `${b.plan === 'free' ? '🆓 Free' : '♾️ Unlimited'} · ${b.end ? '⚪ closed' : '🟢 watching now'}\n\n` +
       `▶️ Videos watched: <b>${n(b.n)}</b>\n⏱ Time: ${Math.floor(secs / 60)}m ${secs % 60}s\n⬇️ Downloads: ${n(b.dl)} · ❤️ Likes: ${n(b.lk)}` +
-      `\n⚡ Start: ${n(b.st) ? `${(n(b.ms) / n(b.st) / 1000).toFixed(1)}s avg` : '–'} · stalls ${n(b.stall)} · skipped while loading ${n(b.skip)} · ${g === 'b' ? 'new' : 'old'} loading` +
+      `\n⚡ Start: ${n(b.st) ? `${(n(b.ms) / n(b.st) / 1000).toFixed(1)}s avg` : '–'} · stalls ${n(b.stall)} · skipped while loading ${n(b.skip)} · ${g === 's' ? '🧪 stream test' : g === 'b' ? 'new loading' : 'old loading'}` +
       (b.wall ? '\n🔒 Reached the paywall' : '') + (b.buy ? `\n💳 Tapped the ₹${n(b.buy)} plan → payment QR` : '');
     const mid = int(b.mid);
     if (mid && b.sig === (await sign(env.WEBHOOK_SECRET, `live:${uid}:${mid}`))) {
@@ -2842,11 +2842,44 @@ Choose your preferred language:
     if (!r.ok) return { ok: false };
     return { ok: true, mid: r.result.message_id, sig: await sign(env.WEBHOOK_SECRET, `live:${uid}:${r.result.message_id}`) };
   };
+  // 🧪 /str (admins): Reels-style test page playing TeraBox HLS streams (/m3u8) instead of Telegram files.
+  // "/str <links>" saves up to 10 links (the first video of each) in store str_items; "/str" opens it.
+  const STR_MAX = 10; // ponytail: each new link is a TeraBox resolve (~3 calls of the 50 per run)
+  on(/^\/str(?:\s+([\s\S]+))?$/, async (m, g) => {
+    if (!m.isPrivate) return;
+    const open = { buttons: [[Button.webapp('🧪 Open stream test', `${origin}/str`)]] };
+    if (!g[1]) {
+      const items = JSON.parse((await db.get('str_items')) || '[]');
+      return items.length ? m.reply(`🧪 **Stream test** — ${items.length} saved video(s).\nSend \`/str <links>\` to replace them.`, open) : m.reply(`🧪 **Stream test**\nSend \`/str <TeraBox links>\` (up to ${STR_MAX}) to try them as a Reels-style HLS feed.`);
+    }
+    const codes = [...new Set((g[1].match(/https?:\/\/\S+/g) || []).map(shareCode).filter(Boolean))].slice(0, STR_MAX);
+    if (!codes.length) return m.reply('No TeraBox links found.');
+    const busy = await m.reply(`⏳ Reading ${codes.length} link(s)…`);
+    const items = [], bad = [];
+    for (const code of codes) {
+      const d = await resolveCached(env, db, code).catch(() => null);
+      const f = d?.list?.find(x => VIDEO_EXTENSIONS.has(extOf(x.server_filename || '')));
+      if (f) items.push({ s: code, f: String(f.fs_id), n: String(f.server_filename || '').slice(0, 80) }); else bad.push(code);
+    }
+    await busy?.delete();
+    if (!items.length) return m.reply('❌ None of these links had a video I could read.');
+    await db.set('str_items', JSON.stringify(items));
+    await m.reply(`✅ Saved **${items.length}** video(s) for the stream test${bad.length ? ` (${bad.length} link(s) skipped: no video / couldn't read)` : ''}.`, open);
+  }, ADMIN);
+  // the /str page's feed: the saved items as signed /m3u8 streams (the Watch Online stream)
+  const strFeed = async uid => {
+    if (!(await isAdmin(uid))) return { ok: false, error: 'admin' };
+    const items = JSON.parse((await db.get('str_items')) || '[]');
+    if (!items.length) return { ok: false, error: 'empty' };
+    const q = DEFAULT_QUALITY;
+    const videos = await Promise.all(items.map(async (it, i) => ({ id: `str${i}`, src: `/m3u8?s=${it.s}&f=${it.f}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${it.s}:${it.f}:${q}`)}`, d: '' })));
+    return { ok: true, unlimited: true, left: null, videos };
+  };
   // the Videos Mini App: admins + APP_TESTERS only until /configset VIDEOS_APP_PUBLIC 1
   const appAllowed = async uid => {
     if (await isAdmin(uid)) return true;
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed };
 }

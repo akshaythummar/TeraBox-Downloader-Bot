@@ -7,6 +7,7 @@ import { createBot, sign, teraboxCfg, resolveCached, streamUrl } from './bot.js'
 import { panelApi, botToken, setupWebhook } from './panel.js';
 import { REELS_HTML } from './reels.js';
 import { playerHtml } from './player.js';
+import { STR_HTML } from './str.js';
 
 function params(url) {
   const g = k => url.searchParams.get(k) || '';
@@ -156,6 +157,13 @@ export default {
     }
     if (url.pathname === '/watch') return watch(env, url);
     if (url.pathname === '/reels' || url.pathname === '/app') return appPage(env); // /app: buttons sent before the rename
+    // 🧪 /str: the stream test (admins; its own page and feed, the /m3u8 stream)
+    if (url.pathname === '/str') return new Response(STR_HTML.replace('__BOT__', (await botUsername(env)) || ''), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+    if (url.pathname === '/str/api/feed' && req.method === 'POST') {
+      const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
+      if (!uid) return Response.json({ ok: false, error: 'login' }, { status: 401 });
+      return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).strFeed(uid));
+    }
     if (url.pathname.startsWith('/app/v/')) return appVideo(env, db, req, url);
     if (url.pathname === '/app/api/bad' && req.method === 'POST') {
       // a video that played black / failed in someone's app: not handed out again
