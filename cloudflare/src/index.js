@@ -160,9 +160,10 @@ export default {
     // 🧪 /str: the stream test (admins; its own page and feed, the /m3u8 stream)
     if (url.pathname === '/str') return new Response(STR_HTML.replace('__BOT__', (await botUsername(env)) || ''), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
     if (url.pathname === '/str/api/feed' && req.method === 'POST') {
-      const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
       if (!uid) return Response.json({ ok: false, error: 'login' }, { status: 401 });
-      return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).strFeed(uid));
+      return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).strFeed(uid, body.after));
     }
     if (url.pathname === '/str/api/bad' && req.method === 'POST') {
       const body = await req.json().catch(() => ({}));

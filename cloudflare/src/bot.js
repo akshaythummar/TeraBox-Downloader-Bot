@@ -2877,10 +2877,16 @@ Choose your preferred language:
   // the /str page's feed: 10 random rows (a random point in code order, then the next 10 — reads ~10
   // rows) as signed /m3u8 streams (the Watch Online stream); videos that failed 3 times are left out
   const STR_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz';
-  const strFeed = async uid => {
+  // after = "code:fid" the phone last watched: the next 10 after it in (code, fid) order, so reopening
+  // the app goes on where the user stopped and nothing repeats until the whole list has been seen.
+  // No after (first time): a random point. Either way ~10 rows read, no writes.
+  const strFeed = async (uid, after) => {
     if (!(await strAllowed(uid))) return { ok: false, error: 'admin' };
-    const start = '1' + STR_CHARS[Math.floor(Math.random() * STR_CHARS.length)];
-    let rows = await db.all('SELECT code, fid, name FROM streams WHERE code >= ? AND fails < 3 ORDER BY code, fid LIMIT 10', start);
+    const a = /^([\w-]+):(\d+)$/.exec(String(after || ''));
+    let rows = a
+      ? await db.all('SELECT code, fid, name FROM streams WHERE (code > ? OR (code = ? AND fid > ?)) AND fails < 3 ORDER BY code, fid LIMIT 10', a[1], a[1], a[2])
+      : await db.all('SELECT code, fid, name FROM streams WHERE code >= ? AND fails < 3 ORDER BY code, fid LIMIT 10', '1' + STR_CHARS[Math.floor(Math.random() * STR_CHARS.length)]);
+    // the end of the list: wrap to the start
     if (rows.length < 10) rows = rows.concat(await db.all('SELECT code, fid, name FROM streams WHERE fails < 3 ORDER BY code, fid LIMIT ?', 10 - rows.length));
     rows = [...new Map(rows.map(r => [`${r.code}:${r.fid}`, r])).values()];
     if (!rows.length) return { ok: false, error: 'empty' };

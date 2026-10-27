@@ -457,6 +457,8 @@ var io = new IntersectionObserver(function (es) {
       s._go = setTimeout(function () { if (current() !== s) return; prepare(i); if (!s._v) return; if (s._v.currentTime > 0.5) s._v.currentTime = 0; start(s); }, s._v && s._v.readyState >= 2 ? 0 : 250);
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
       if (i > 0) document.getElementById("hint").hidden = true;
+      // remember the furthest reel watched: the next time the app opens, the feed goes on after it
+      if (i > maxI) { maxI = i; try { localStorage.setItem("str_after", s.dataset.id); } catch (e) {} }
       // free users: the badge counts down, so the paywall after the last one is no surprise
       if (freeLeft != null) { var fl = slides.length - 1 - i + freeLeft; document.getElementById("badge").textContent = fl + " free left today"; if (!fl && !s._last) { s._last = true; toast("Last free reel for today"); } }
       if (i >= slides.length - (AB === "b" ? 7 : 5)) more();
@@ -476,11 +478,13 @@ setInterval(function () {
 }, 500);
 document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else if (!s._up) start(s); });
 
-var shown = {}, dry = 0;
+var shown = {}, dry = 0, maxI = -1;
+// where the feed goes on: after the last reel loaded in this session, else where the user stopped last time
+function after() { if (slides.length) return slides[slides.length - 1].dataset.id; try { return localStorage.getItem("str_after") || ""; } catch (e) { return ""; } }
 function more() {
   if (loading || ended) return; loading = true;
   if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
-  fetch("/str/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT }) })
+  fetch("/str/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, after: after() }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d.ok) { ended = true; if (okAt) return; return d.error === "admin" ? loginFail("Admins only", "This stream test is for admins.") : d.error === "empty" ? loginFail("No videos yet", "Send /str with TeraBox links first.") : loginFail("Login failed", "Close and open the app again."); }
