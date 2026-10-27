@@ -2279,6 +2279,10 @@ Choose your preferred language:
       const v = o.kind === 'first' ? (int(p.validity_days) === o.days ? o.price : null) : Math.max(1, Math.round(p.price * (100 - o.pct) / 100));
       return v != null && v < p.price ? v : null;
     };
+    // inline buttons can't be formatted: Unicode does it — a combining stroke over the old price,
+    // mathematical bold digits for the new one ("₹̶2̶9̶ → ₹𝟭𝟵")
+    const struck = t => [...String(t)].map(c => c + '̶').join('');
+    const boldNum = t => String(t).replace(/\d/g, d => String.fromCodePoint(0x1d7ec + +d));
     const offerLine = (o, plans) => {
       if (!o) return '';
       if (o.kind === 'back') return `🎁 <b>Welcome back: ${o.pct}% off every plan</b> — only till ${dmyHM(o.until)}`;
@@ -2301,7 +2305,7 @@ Choose your preferred language:
       const offer = chatId > 0 ? await offerFor(chatId, (await urow(chatId)).sub_until || null) : null;
       const buttons = plans.map((p, i) => {
         const off = offerPrice(p, offer);
-        if (off != null) return [Button.inline(`${offer.kind === 'first' ? '🔥' : '🎁'} ${p.name} - ₹${off} (${p.validity_days} days) • was ₹${p.price}`, `vid_plan_${p.id}`)];
+        if (off != null) return [Button.inline(`${offer.kind === 'first' ? '🔥' : '🎁'} ${p.name} • ${struck(`₹${p.price}`)} → ₹${boldNum(off)} (${p.validity_days} days)`, `vid_plan_${p.id}`)];
         return [Button.inline(`${i === 0 ? '⚡ ' : p === best ? '💎 ' : ''}${p.name} - ₹${p.price} (${p.validity_days} days)${i && save(p) >= 10 ? ` • save ${save(p)}%` : ''}`, `vid_plan_${p.id}`)];
       });
       await funnel('plans_shown');
@@ -2402,11 +2406,11 @@ Choose your preferred language:
       const qr = order.result.qr_url || String(order.result.payment_url).replace('/instant-pay/', '/qr/');
       const sent = await api.call('sendPhoto', { chat_id: chatId, photo: qr, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
         caption: `💳 <b>Pay ₹${price} for ${escHtml(plan.name)}</b> (${plan.validity_days} days)\n` +
-          (off != null ? `${offer.kind === 'first' ? '🔥 First-time price' : `🎁 Welcome back: ${offer.pct}% off`} (was ₹${plan.price})\n` : '') + '\n' +
+          (off != null ? `${offer.kind === 'first' ? '🔥 First-time price' : `🎁 Welcome back: ${offer.pct}% off`} — <s>₹${plan.price}</s> → <b>₹${price}</b>\n` : '') + '\n' +
           '<b>📱 How to pay:</b>\n1️⃣ Scan this QR in any UPI app — or save it and use <i>Scan from gallery</i> in GPay / PhonePe / Paytm\n' +
           "2️⃣ Or tap <b>Pay</b> below for the payment page\n3️⃣ Done — it activates automatically (or tap <b>I've Paid</b>)\n\n⏰ This QR expires in 10 minutes" });
       if (!sent.ok) await api.send(chatId,
-        `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${price}${off != null ? ` (was ₹${plan.price})` : ''}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
+        `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ${off != null ? `<s>₹${plan.price}</s> ` : ''}<b>₹${price}</b>\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
         "<b>📱 How to Pay:</b>\n1️⃣ Scan QR or click Pay button\n2️⃣ Complete payment in UPI app\n3️⃣ Click 'I've Paid' below\n\n⏰ Payment link expires in 10 minutes",
         { html: true, buttons });
     }
