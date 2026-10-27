@@ -367,7 +367,7 @@ function addVideo(v) {
     '<div class="load"><div class="spin"></div></div><div class="tp">' + IC.play + '</div>' +
     '<div class="msg">This reel didn\'t load — skipping…</div>' +
     '<div class="info"><div class="who"><span class="av"><i>' + initial + '</i></span><b>' + BOT + '</b>' + (freeLeft != null ? '<button class="prem">Go unlimited</button>' : "") + '</div>' +
-      '<div class="cap">Swipe up for the next reel 🔥</div>' +
+      '<div class="cap"></div>' +
       '<div class="aud">' + IC.music + '<div><span>' + BOT + ' · Original audio<b class="len"></b></span></div></div></div>' +
     '<div class="rail">' +
       '<button class="act lk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path class="o" d="' + HEART + '"/></svg><svg class="f" viewBox="0 0 24 24" fill="currentColor"><path d="' + HEART + '"/></svg><span>Like</span></button>' +
@@ -378,6 +378,7 @@ function addVideo(v) {
       '<div class="disc">' + initial + '</div>' +
     '</div>' +
     '<div class="seek"><span class="tm"></span><div class="bar"><i></i></div></div>';
+  s.querySelector(".cap").textContent = v.name || "Swipe up for the next reel 🔥";
   if (liked[v.id]) like(s, true);
   s.querySelector(".lk").onclick = function (e) { e.stopPropagation(); like(s); };
   s.querySelector(".dl").onclick = function (e) { e.stopPropagation(); download(s, this); };
@@ -421,7 +422,8 @@ function bad(s, report) {
   if (s.classList.contains("bad")) return;
   s.classList.add("bad"); LV.fail++; live();
   if (s._v) detach(s._v);
-  if (false) try { fetch("/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
+  // a stream that didn't play counts towards leaving it out of /str (network blips: 3 strikes)
+  if (s.dataset.id) try { fetch("/str/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
 function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
@@ -474,20 +476,22 @@ setInterval(function () {
 }, 500);
 document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else if (!s._up) start(s); });
 
+var shown = {}, dry = 0;
 function more() {
   if (loading || ended) return; loading = true;
   if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
   fetch("/str/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      if (!d.ok) { ended = true; return d.error === "admin" ? loginFail("Admins only", "This stream test is for admins.") : d.error === "empty" ? loginFail("No links saved", "Send /str with TeraBox links first.") : loginFail("Login failed", "Close and open the app again."); }
-      ended = true; // the saved list, once
+      if (!d.ok) { ended = true; if (okAt) return; return d.error === "admin" ? loginFail("Admins only", "This stream test is for admins.") : d.error === "empty" ? loginFail("No videos yet", "Send /str with TeraBox links first.") : loginFail("Login failed", "Close and open the app again."); }
       if (!okAt) { loginOk(); live(); }
       var b = document.getElementById("badge"); b.hidden = false;
-      b.textContent = "🧪 Stream test · " + d.videos.length;
+      b.textContent = "🧪 Stream test";
       freeLeft = d.unlimited ? null : d.left;
       var firstBatch = !slides.length;
-      d.videos.forEach(addVideo);
+      var fresh = d.videos.filter(function (v) { return !shown[v.id]; });
+      fresh.forEach(function (v) { shown[v.id] = 1; addVideo(v); });
+      if (!fresh.length && ++dry >= 3) ended = true;
       if (firstBatch && slides.length) document.getElementById("hint").hidden = false;
       if (!d.unlimited && d.left === 0) {
         ended = true;

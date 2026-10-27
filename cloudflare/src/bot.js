@@ -560,6 +560,13 @@ export function createBot(env, api, db, origin) {
   // that CDN, Telegram error) the normal stream post goes out instead, so the user always gets one.
   // sharer = the user the post is for: the Share button carries their referral credit
   async function sendStream(chatId, isPrivate, f, caption, q, userThumb, tryVideo = true, sharer = 0) {
+    const ok = await sendStreamPost(chatId, isPrivate, f, caption, q, userThumb, tryVideo, sharer);
+    if (ok && f.code && f.fid) await saveStream(f.code, f.fid, f.file_name);
+    return ok;
+  }
+  // /str's list: share code + fs_id (the stream URL itself expires); ON CONFLICT DO NOTHING writes nothing
+  const saveStream = (code, fid, name) => db.run('INSERT INTO streams (code, fid, name) VALUES (?, ?, ?) ON CONFLICT (code, fid) DO NOTHING', String(code), String(fid), String(name || '').slice(0, 80)).catch(() => {});
+  async function sendStreamPost(chatId, isPrivate, f, caption, q, userThumb, tryVideo, sharer) {
     // n = the file name: the player's title
     const href = `${await watchUrl(f.code, f.fid, q, sharer)}&n=${encodeURIComponent(String(f.file_name || '').slice(0, 80))}`;
     const share = await videoShare(f.code, f.fid, sharer);
@@ -2842,15 +2849,15 @@ Choose your preferred language:
     if (!r.ok) return { ok: false };
     return { ok: true, mid: r.result.message_id, sig: await sign(env.WEBHOOK_SECRET, `live:${uid}:${r.result.message_id}`) };
   };
-  // 🧪 /str (admins): Reels-style test page playing TeraBox HLS streams (/m3u8) instead of Telegram files.
-  // "/str <links>" saves up to 10 links (the first video of each) in store str_items; "/str" opens it.
+  // 🧪 /str (admins): Reels-style test page playing TeraBox HLS streams (/m3u8) instead of Telegram files,
+  // from the streams table (every link whose stream post went out). "/str <links>" adds up to 10 more.
   const STR_MAX = 10; // ponytail: each new link is a TeraBox resolve (~3 calls of the 50 per run)
   on(/^\/str(?:\s+([\s\S]+))?$/, async (m, g) => {
     if (!m.isPrivate) return;
     const open = { buttons: [[Button.webapp('🧪 Open stream test', `${origin}/str`)]] };
     if (!g[1]) {
-      const items = JSON.parse((await db.get('str_items')) || '[]');
-      return items.length ? m.reply(`🧪 **Stream test** — ${items.length} saved video(s).\nSend \`/str <links>\` to replace them.`, open) : m.reply(`🧪 **Stream test**\nSend \`/str <TeraBox links>\` (up to ${STR_MAX}) to try them as a Reels-style HLS feed.`);
+      const c = await db.one('SELECT COUNT(*) n, SUM(fails >= 3) dead FROM streams');
+      return c.n ? m.reply(`🧪 **Stream test** — ${c.n - (c.dead || 0)} video(s) (${c.dead || 0} left out after 3 failed plays).\nSend \`/str <links>\` to add more.`, open) : m.reply(`🧪 **Stream test**\nNo videos yet. They're added as links get their stream, or send \`/str <TeraBox links>\` (up to ${STR_MAX}).`);
     }
     const codes = [...new Set((g[1].match(/https?:\/\/\S+/g) || []).map(shareCode).filter(Boolean))].slice(0, STR_MAX);
     if (!codes.length) return m.reply('No TeraBox links found.');
@@ -2859,21 +2866,33 @@ Choose your preferred language:
     for (const code of codes) {
       const d = await resolveCached(env, db, code).catch(() => null);
       const f = d?.list?.find(x => VIDEO_EXTENSIONS.has(extOf(x.server_filename || '')));
-      if (f) items.push({ s: code, f: String(f.fs_id), n: String(f.server_filename || '').slice(0, 80) }); else bad.push(code);
+      if (f) items.push(f); else bad.push(code);
+      if (f) await saveStream(code, f.fs_id, f.server_filename);
     }
     await busy?.delete();
     if (!items.length) return m.reply('❌ None of these links had a video I could read.');
-    await db.set('str_items', JSON.stringify(items));
-    await m.reply(`✅ Saved **${items.length}** video(s) for the stream test${bad.length ? ` (${bad.length} link(s) skipped: no video / couldn't read)` : ''}.`, open);
+    await m.reply(`✅ Added **${items.length}** video(s) to the stream test${bad.length ? ` (${bad.length} link(s) skipped: no video / couldn't read)` : ''}.`, open);
   }, ADMIN);
-  // the /str page's feed: the saved items as signed /m3u8 streams (the Watch Online stream)
+  // the /str page's feed: 10 random rows (a random point in code order, then the next 10 — reads ~10
+  // rows) as signed /m3u8 streams (the Watch Online stream); videos that failed 3 times are left out
+  const STR_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz';
   const strFeed = async uid => {
     if (!(await isAdmin(uid))) return { ok: false, error: 'admin' };
-    const items = JSON.parse((await db.get('str_items')) || '[]');
-    if (!items.length) return { ok: false, error: 'empty' };
+    const start = '1' + STR_CHARS[Math.floor(Math.random() * STR_CHARS.length)];
+    let rows = await db.all('SELECT code, fid, name FROM streams WHERE code >= ? AND fails < 3 ORDER BY code, fid LIMIT 10', start);
+    if (rows.length < 10) rows = rows.concat(await db.all('SELECT code, fid, name FROM streams WHERE fails < 3 ORDER BY code, fid LIMIT ?', 10 - rows.length));
+    rows = [...new Map(rows.map(r => [`${r.code}:${r.fid}`, r])).values()];
+    if (!rows.length) return { ok: false, error: 'empty' };
     const q = DEFAULT_QUALITY;
-    const videos = await Promise.all(items.map(async (it, i) => ({ id: `str${i}`, src: `/m3u8?s=${it.s}&f=${it.f}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${it.s}:${it.f}:${q}`)}`, d: '' })));
+    const videos = await Promise.all(rows.map(async r => ({ id: `${r.code}:${r.fid}`, name: r.name || '', src: `/m3u8?s=${r.code}&f=${r.fid}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${r.code}:${r.fid}:${q}`)}`, d: '' })));
     return { ok: true, unlimited: true, left: null, videos };
+  };
+  // a video that didn't play in /str: one more fail (3 = left out of the feed)
+  const strBad = async (uid, id) => {
+    const m = /^([\w-]+):(\d+)$/.exec(String(id || ''));
+    if (!m || !(await isAdmin(uid))) return { ok: false };
+    await db.run('UPDATE streams SET fails = fails + 1 WHERE code = ? AND fid = ?', m[1], m[2]);
+    return { ok: true };
   };
   // the Videos Mini App: admins + APP_TESTERS only until /configset VIDEOS_APP_PUBLIC 1
   const appAllowed = async uid => {
@@ -2881,5 +2900,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad };
 }

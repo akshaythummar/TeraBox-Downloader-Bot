@@ -164,6 +164,12 @@ export default {
       if (!uid) return Response.json({ ok: false, error: 'login' }, { status: 401 });
       return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).strFeed(uid));
     }
+    if (url.pathname === '/str/api/bad' && req.method === 'POST') {
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
+      if (!uid) return Response.json({ ok: false }, { status: 401 });
+      return Response.json(await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).strBad(uid, body.id));
+    }
     if (url.pathname.startsWith('/app/v/')) return appVideo(env, db, req, url);
     if (url.pathname === '/app/api/bad' && req.method === 'POST') {
       // a video that played black / failed in someone's app: not handed out again

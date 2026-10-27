@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS video_lists (id INTEGER PRIMARY KEY, links TEXT NOT N
 CREATE TABLE IF NOT EXISTS videos (md5 TEXT PRIMARY KEY, url TEXT, file_id TEXT, ready REAL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS videos_ready ON videos (ready) WHERE ready IS NOT NULL;
 
+-- Videos whose stream (Watch Online / HLS) was made: the /str stream test's feed (code + fs_id, not
+-- the stream URL, which expires). fails = didn't play in /str; 3 = left out.
+CREATE TABLE IF NOT EXISTS streams (code TEXT NOT NULL, fid TEXT NOT NULL, name TEXT, fails INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (code, fid)) WITHOUT ROWID;
+
 -- /search library: normalized file name -> up to 5 {s, f, name, size, bytes}
 CREATE TABLE IF NOT EXISTS library (name TEXT PRIMARY KEY, entries TEXT NOT NULL) WITHOUT ROWID;
 
