@@ -372,6 +372,11 @@ export function createBot(env, api, db, origin) {
       VIDEOS_COOLDOWN_SECONDS: parseFloat(o.VIDEOS_COOLDOWN_SECONDS ?? env.VIDEOS_COOLDOWN_SECONDS ?? 1) || 0,
       FREE_HOURLY_LIMIT: int(o.FREE_HOURLY_LIMIT ?? 0),
       DAILY_FREE_VIDEOS: int(o.DAILY_FREE_VIDEOS ?? env.VIDEOS_DAILY_FREE ?? 5),
+      // offers on the /videos plans: first purchase = the OFFER_FIRST_DAYS-day plan at OFFER_FIRST_PRICE;
+      // a plan that just ended = OFFER_BACK_PCT % off every plan for 24 h (once per 30 days). 0 = off
+      OFFER_FIRST_PRICE: int(o.OFFER_FIRST_PRICE ?? 19),
+      OFFER_FIRST_DAYS: int(o.OFFER_FIRST_DAYS ?? 7),
+      OFFER_BACK_PCT: int(o.OFFER_BACK_PCT ?? 20),
       // /videos messages are deleted from the chat after this many hours (0 = never; Telegram allows ≤48)
       VIDEO_DELETE_HOURS: Math.min(int(o.VIDEO_DELETE_HOURS ?? env.VIDEO_DELETE_HOURS ?? 24), 47),
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
@@ -1113,6 +1118,9 @@ Choose your preferred language:
     VIDEOS_COOLDOWN_SECONDS: { section: 'Limits', kind: 'int', min: 0, max: 300 },
     FREE_HOURLY_LIMIT: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
     DAILY_FREE_VIDEOS: { section: 'Limits', kind: 'int', min: 0, max: 50 },
+    OFFER_FIRST_PRICE: { section: 'Limits', kind: 'int', min: 0, max: 1000 },
+    OFFER_FIRST_DAYS: { section: 'Limits', kind: 'int', min: 1, max: 365 },
+    OFFER_BACK_PCT: { section: 'Limits', kind: 'int', min: 0, max: 90 },
     VIDEO_DELETE_HOURS: { section: 'Limits', kind: 'int', min: 0, max: 47 },
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_TESTERS: { section: 'Limits', kind: 'csv' },
@@ -1568,7 +1576,7 @@ Choose your preferred language:
     const rows = await db.all(`SELECT day, name, n FROM counters WHERE day IN (${keys.map(() => '?').join(',')})`, ...keys);
     const by = {};
     for (const r of rows) (by[r.day] ??= {})[r.name] = r.n;
-    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue', 'app_videos', 'app_wall', 'app_buy', 'app_dl'];
+    const F = ['new_users', 'starts', 'links', 'referrals', 'videos', 'trials', 'plans_shown', 'orders', 'paid', 'revenue', 'app_videos', 'app_wall', 'app_buy', 'app_dl', 'offer_first', 'offer_first_paid', 'offer_back', 'offer_back_paid'];
     const tot = Object.fromEntries(F.map(f => [f, keys.reduce((a, k) => a + (by[k]?.[f] || 0), 0)]));
     const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
     const lines = keys.map(k => {
@@ -1581,6 +1589,7 @@ Choose your preferred language:
       `🔗 Links streamed: **${tot.links}**\n` +
       `👥 Referrals: **${tot.referrals}**\n` +
       `🎬 /videos sent: **${tot.videos}**\n` +
+      `🎁 Offers: first-time ${tot.offer_first} orders → ${tot.offer_first_paid} paid · welcome-back ${tot.offer_back} orders → ${tot.offer_back_paid} paid\n` +
       `📱 Videos App: **${tot.app_videos}** videos served · 🔒 paywall ${tot.app_wall} · 💳 plan taps ${tot.app_buy} · ⬇️ downloads ${tot.app_dl}\n` +
       `🎁 Trials started: **${tot.trials}** (${pct(tot.trials, tot.new_users)} of new users)\n` +
       `📋 Plans shown: **${tot.plans_shown}**\n` +
@@ -2251,6 +2260,31 @@ Choose your preferred language:
     });
 
     const getPlans = () => cached('vid_plans', () => getJ(`${pay}/api/plans`), 300);
+    // ---- offers: the price is always decided here (never by the app or a button's data) ----
+    // subEnd = when the user's last plan ended (s), null = never bought one.
+    //   first: never bought → the OFFER_FIRST_DAYS-day plan at OFFER_FIRST_PRICE
+    //   back:  a plan ended less than BACK_HOURS ago → OFFER_BACK_PCT % off every plan; once used
+    //          (paid), not again for 30 days (store offer_back:<uid>)
+    const BACK_HOURS = 24;
+    async function offerFor(uid, subEnd) {
+      const rt = await runtime(), now = nowS();
+      if (!subEnd) return rt.OFFER_FIRST_PRICE > 0 ? { kind: 'first', days: rt.OFFER_FIRST_DAYS, price: rt.OFFER_FIRST_PRICE } : null;
+      if (rt.OFFER_BACK_PCT > 0 && now >= subEnd && now < subEnd + BACK_HOURS * 3600 && !(await db.get(`offer_back:${int(uid)}`)))
+        return { kind: 'back', pct: rt.OFFER_BACK_PCT, until: subEnd + BACK_HOURS * 3600 };
+      return null;
+    }
+    // plan p's price with offer o, or null when the offer doesn't lower it
+    const offerPrice = (p, o) => {
+      if (!o) return null;
+      const v = o.kind === 'first' ? (int(p.validity_days) === o.days ? o.price : null) : Math.max(1, Math.round(p.price * (100 - o.pct) / 100));
+      return v != null && v < p.price ? v : null;
+    };
+    const offerLine = (o, plans) => {
+      if (!o) return '';
+      if (o.kind === 'back') return `🎁 <b>Welcome back: ${o.pct}% off every plan</b> — only till ${dmyHM(o.until)}`;
+      const p = plans.find(x => offerPrice(x, o) != null);
+      return p ? `🔥 <b>First-time offer:</b> ${escHtml(p.name)} ${p.validity_days} days for just <b>₹${o.price}</b> <s>₹${p.price}</s>` : '';
+    };
     // returns false (sending nothing) when quiet and the plans can't be loaded
     async function showPlans(chatId, intro = null, quiet = false) {
       const res = await getPlans();
@@ -2263,9 +2297,17 @@ Choose your preferred language:
       // longer plans show how much they save per day against the cheapest one (the upgrade nudge)
       const base = plans[0].price / plans[0].validity_days;
       const save = p => Math.round((1 - p.price / p.validity_days / base) * 100);
-      const buttons = plans.map((p, i) => [Button.inline(`${i === 0 ? '⚡ ' : p === best ? '💎 ' : ''}${p.name} - ₹${p.price} (${p.validity_days} days)${i && save(p) >= 10 ? ` • save ${save(p)}%` : ''}`, `vid_plan_${p.id}`)]);
+      // the user's offer (private chats: chatId = the user)
+      const offer = chatId > 0 ? await offerFor(chatId, (await urow(chatId)).sub_until || null) : null;
+      const buttons = plans.map((p, i) => {
+        const off = offerPrice(p, offer);
+        if (off != null) return [Button.inline(`${offer.kind === 'first' ? '🔥' : '🎁'} ${p.name} - ₹${off} (${p.validity_days} days) • was ₹${p.price}`, `vid_plan_${p.id}`)];
+        return [Button.inline(`${i === 0 ? '⚡ ' : p === best ? '💎 ' : ''}${p.name} - ₹${p.price} (${p.validity_days} days)${i && save(p) >= 10 ? ` • save ${save(p)}%` : ''}`, `vid_plan_${p.id}`)];
+      });
       await funnel('plans_shown');
-      const caption = (intro ? `${intro}\n\n` : '') + '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
+      const ol = offerLine(offer, plans);
+      if (ol) funnel(`offer_${offer.kind}_shown`);
+      const caption = (intro ? `${intro}\n\n` : '') + (ol ? `${ol}\n\n` : '') + '🗂️ Select a Plan Category for Unlimited Videos\n\n⚡ All plans are fastest and having smooth experience for premium videos ⚡ \n\n📋 <b>Available Plans:</b>\nChoose a plan below to subscribe: 👇';
       const r = await api.call('sendPhoto', { chat_id: chatId, photo: PLANS_PHOTO, caption, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
       if (!r.ok) await api.send(chatId, caption, { html: true, buttons });
       return true;
@@ -2326,13 +2368,18 @@ Choose your preferred language:
 
       const plan = ((await getPlans())?.plans || []).find(p => int(p.id) === planId);
       if (!plan) return done('❌ Plan not found. Please try again.');
+      // the offer is decided again here; "never bought" needs both the payment worker and our row to
+      // say so (an older buyer whose bot row has no sub_until doesn't get the first-time price)
+      const wEnd = Date.parse(status.subscription_end_at || '') / 1000 || 0;
+      const offer = await offerFor(uid, Math.max(wEnd, int((await urow(uid)).sub_until)) || null);
+      const off = offerPrice(plan, offer), price = off ?? int(plan.price);
 
       let order;
       try {
         const r = await fetch(`${pay}/api/create-order`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(15000),
           body: JSON.stringify({
-            customer_mobile: '9999999999', user_token: token, amount: int(plan.price),
+            customer_mobile: '9999999999', user_token: token, amount: price,
             order_id: `ORD${Math.floor(nowS())}${String(token).slice(-4)}`, plan_id: int(plan.id),
             redirect_url: 'https://t.me/at_botz', remark1: `plan_${plan.id}`, remark2: 'telegram_bot',
           }),
@@ -2346,18 +2393,20 @@ Choose your preferred language:
       if (!order?.status || !order.result?.payment_url) return done(`❌ Failed to create order: ${escHtml(order?.message || 'Unknown error')}`);
 
       await funnel('orders');
-      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: plan.price, days: plan.validity_days, byte_txn: order.result.byteTransactionId, at: Math.floor(nowS()), chat: chatId, first: from.first_name || '-', user: from.username || '-' }), { ex: 86400 });
+      if (off != null) funnel(`offer_${offer.kind}`);
+      await db.set(`vid_order:${uid}`, JSON.stringify({ order_id: order.result.orderId, plan: plan.name, amount: price, ...(off != null ? { offer: offer.kind, was: int(plan.price) } : {}), days: plan.validity_days, byte_txn: order.result.byteTransactionId, at: Math.floor(nowS()), chat: chatId, first: from.first_name || '-', user: from.username || '-' }), { ex: 86400 });
       await done();
-      const buttons = [[Button.url(`💳 Pay ₹${plan.price}`, order.result.payment_url)], [Button.inline("✅ I've Paid - Verify", 'vid_verify')]];
+      const buttons = [[Button.url(`💳 Pay ₹${price}`, order.result.payment_url)], [Button.inline("✅ I've Paid - Verify", 'vid_verify')]];
       // the QR right in the chat (same QR as the Pay page — the payment worker keeps it fixed per order);
       // without it (older payment worker, or Telegram can't fetch it) the text-only message as before
       const qr = order.result.qr_url || String(order.result.payment_url).replace('/instant-pay/', '/qr/');
       const sent = await api.call('sendPhoto', { chat_id: chatId, photo: qr, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
-        caption: `💳 <b>Pay ₹${plan.price} for ${escHtml(plan.name)}</b> (${plan.validity_days} days)\n\n` +
+        caption: `💳 <b>Pay ₹${price} for ${escHtml(plan.name)}</b> (${plan.validity_days} days)\n` +
+          (off != null ? `${offer.kind === 'first' ? '🔥 First-time price' : `🎁 Welcome back: ${offer.pct}% off`} (was ₹${plan.price})\n` : '') + '\n' +
           '<b>📱 How to pay:</b>\n1️⃣ Scan this QR in any UPI app — or save it and use <i>Scan from gallery</i> in GPay / PhonePe / Paytm\n' +
           "2️⃣ Or tap <b>Pay</b> below for the payment page\n3️⃣ Done — it activates automatically (or tap <b>I've Paid</b>)\n\n⏰ This QR expires in 10 minutes" });
       if (!sent.ok) await api.send(chatId,
-        `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${plan.price}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
+        `💳 <b>Pay for ${escHtml(plan.name)}</b>\n\n<b>Amount:</b> ₹${price}${off != null ? ` (was ₹${plan.price})` : ''}\n<b>Validity:</b> ${plan.validity_days} days\n\n` +
         "<b>📱 How to Pay:</b>\n1️⃣ Scan QR or click Pay button\n2️⃣ Complete payment in UPI app\n3️⃣ Click 'I've Paid' below\n\n⏰ Payment link expires in 10 minutes",
         { html: true, buttons });
     }
@@ -2387,8 +2436,12 @@ Choose your preferred language:
       await logx(`payment ok ${uid} order=${o.order_id} plan=${o.plan} amount=${o.amount}${auto ? ' (auto)' : ''}`);
       funnel('paid');
       funnel('revenue', int(o.amount));
+      if (o.offer) {
+        funnel(`offer_${o.offer}_paid`);
+        if (o.offer === 'back') await db.set(`offer_back:${int(uid)}`, '1', { ex: 30 * 86400 });
+      }
       for (const a of await getAllAdmins())
-        await api.send(a, `💰 Payment received${auto ? ' (auto-verified)' : ''}\nUser: ${escHtml(o.first || '-')} (@${escHtml(o.user || '-')})\nID: <code>${uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}\nOrder: <code>${o.order_id}</code>`, { html: true });
+        await api.send(a, `💰 Payment received${auto ? ' (auto-verified)' : ''}\nUser: ${escHtml(o.first || '-')} (@${escHtml(o.user || '-')})\nID: <code>${uid}</code>\nPlan: ${escHtml(o.plan)} — ₹${o.amount}${o.offer ? ` (${o.offer === 'first' ? 'first-time' : 'welcome-back'} offer, was ₹${o.was})` : ''}\nOrder: <code>${o.order_id}</code>`, { html: true });
       await api.send(o.chat || uid,
         `🎉 <b>Payment Verified!</b>\n\n✅ Your payment of ₹${o.amount} has been confirmed.\n📋 Plan: ${escHtml(o.plan)}\n🆔 Order ID: <code>${o.order_id}</code>\n\nThank you! Your plan is active — ⭐ Premium included (multi-file links, folders, custom thumbnail).\nSend /videos to start watching 🎬`,
         { html: true });
@@ -2488,10 +2541,13 @@ Choose your preferred language:
         const plans = ((await getPlans())?.plans || []).filter(p => p.status === 'active').sort((x, y) => x.price - y.price);
         const perDay = p => p.price / p.validity_days, best = plans.reduce((x, p) => (!x || perDay(p) < perDay(x) ? p : x), null);
         const [h, mi, se] = ymdHMS().slice(11).split(':').map(Number);
+        const offer = await offerFor(uid, int(ctx.state.sub_until) || null);
         wall = {
           daily, resetIn: 86400 - (h * 3600 + mi * 60 + se),
-          plans: plans.map(p => ({ id: int(p.id), name: String(p.name), price: +p.price, days: int(p.validity_days), save: Math.round((1 - perDay(p) / perDay(plans[0])) * 100), best: plans.length > 1 && p === best })),
+          offer: offer && plans.some(p => offerPrice(p, offer) != null) ? { kind: offer.kind, pct: offer.pct || 0, endsIn: offer.until ? Math.round(offer.until - nowS()) : 0 } : null,
+          plans: plans.map(p => ({ id: int(p.id), name: String(p.name), price: offerPrice(p, offer) ?? +p.price, was: offerPrice(p, offer) != null ? +p.price : 0, days: int(p.validity_days), save: Math.round((1 - perDay(p) / perDay(plans[0])) * 100), best: plans.length > 1 && p === best })),
         };
+        if (wall.offer) funnel(`offer_${offer.kind}_shown`);
       }
       return { ok: true, unlimited: access === true, left, videos, wall };
     };
@@ -2542,14 +2598,21 @@ Choose your preferred language:
     // users.sub_rem remembers what was sent; a new sub_until clears it (setState).
     subReminders = async () => {
       const now = Math.floor(nowS());
-      const rows = await db.all("SELECT id, sub_until, sub_rem FROM users WHERE sub_until BETWEEN ? AND ? AND (sub_rem IS NULL OR (sub_rem = 'soon' AND sub_until <= ?))", now - 86400, now + 7200, now);
-      const done = { soon: [], ended: [] };
+      // soon (2 h before the end) → ended (with the welcome-back offer) → last (4 h before the offer ends)
+      const lastAt = now - (BACK_HOURS - 4) * 3600;
+      const rows = await db.all("SELECT id, sub_until, sub_rem FROM users WHERE sub_until BETWEEN ? AND ? AND (sub_rem IS NULL OR (sub_rem = 'soon' AND sub_until <= ?) OR (sub_rem = 'ended' AND sub_until <= ?))", now - 86400, now + 7200, now, lastAt);
+      const done = { soon: [], ended: [], last: [] };
       for (const r of rows.slice(0, 10)) { // ponytail: 10 per run (each plans menu is 1-2 Telegram calls)
         const ended = r.sub_until <= now, mins = Math.max(1, Math.round((r.sub_until - now) / 60));
+        const stage = !ended ? 'soon' : r.sub_rem === 'ended' ? 'last' : 'ended';
+        const offer = ended ? await offerFor(r.id, r.sub_until) : null;
         // before the end only a heads-up: a second plan can't be bought while one is active
-        if (ended) await showPlans(r.id, '⏰ <b>Your /videos plan has ended.</b>\nRenew now to keep watching — longer plans save more per day:');
-        else await api.send(r.id, `⏳ <b>Your /videos plan ends in ${mins >= 60 ? `${Math.round(mins / 60)} hour(s)` : `${mins} min`}</b> (${dmyHM(r.sub_until)}).\nYou can renew as soon as it ends — we'll send you the plans then.`, { html: true });
-        done[ended ? 'ended' : 'soon'].push(r.id);
+        if (stage === 'soon') await api.send(r.id, `⏳ <b>Your /videos plan ends in ${mins >= 60 ? `${Math.round(mins / 60)} hour(s)` : `${mins} min`}</b> (${dmyHM(r.sub_until)}).\nYou can renew as soon as it ends — we'll send you the plans then.`, { html: true });
+        else if (stage === 'ended') await showPlans(r.id, offer?.kind === 'back'
+          ? `⏰ <b>Your /videos plan has ended.</b>\n🎁 Come back now and get <b>${offer.pct}% off</b> — only for the next ${BACK_HOURS} hours!`
+          : '⏰ <b>Your /videos plan has ended.</b>\nRenew now to keep watching — longer plans save more per day:');
+        else if (offer?.kind === 'back') await showPlans(r.id, `⏳ <b>Only 4 hours left</b> for your ${offer.pct}% off — renew before it's gone!`);
+        done[stage].push(r.id);
       }
       for (const [stage, ids] of Object.entries(done))
         if (ids.length) await db.run(`UPDATE users SET sub_rem = ? WHERE id IN (${ids.map(() => '?').join(',')})`, stage, ...ids);

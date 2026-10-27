@@ -103,6 +103,9 @@ body.held .top,body.seeking .top{opacity:0}
 .plan.best{border-color:transparent;box-shadow:0 0 0 2px #d62976}
 .plan em{position:absolute;top:-9px;left:14px;font-style:normal;font-weight:700;font-size:10px;letter-spacing:.06em;padding:3px 8px;border-radius:6px;background:var(--ig)}
 .plan:active{transform:scale(.98)}
+.plan .pr s{display:block;font-size:12px;font-weight:500;color:var(--mute);text-align:right}
+.plan.deal{border-color:transparent;box-shadow:0 0 0 2px #ff3040}
+.plan.deal em{background:#ff3040}
 .all{margin-top:12px;width:100%;background:none;border:0;color:#0095f6;font-weight:600;font-size:14px;cursor:pointer;padding:8px}
 /* login */
 #login{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:#000;transition:opacity .35s}
@@ -235,14 +238,23 @@ function paywall(w) {
     '<div class="sheet"><div class="grab"></div><h3>Keep watching — unlimited</h3><p class="perks">No daily limit · /videos too · cancel anytime</p><div class="plans"></div><button class="all">See all plans in the bot</button></div>';
   plans.forEach(function (p, i) {
     var b = document.createElement("button"); b.className = "plan" + (p.best ? " best" : "");
-    b.innerHTML = '<span class="nm"></span><span class="pr"></span><small></small>' + (p.best ? "<em>BEST VALUE</em>" : "");
+    // a discounted plan: the old price struck through and the offer's badge instead of BEST VALUE
+    var deal = p.was > p.price;
+    if (deal) b.className = "plan deal";
+    b.innerHTML = '<span class="nm"></span><span class="pr"><span class="now"></span><s></s></span><small></small>' + (deal ? "<em></em>" : p.best ? "<em>BEST VALUE</em>" : "");
     b.querySelector(".nm").textContent = p.name;
-    b.querySelector(".pr").textContent = "₹" + p.price;
-    b.querySelector("small").textContent = p.days + (p.days === 1 ? " day" : " days") + " unlimited" + (i && p.save >= 10 ? " · save " + p.save + "%" : "");
+    b.querySelector(".pr .now").textContent = "₹" + p.price;
+    if (deal) { b.querySelector(".pr s").textContent = "₹" + p.was; b.querySelector("em").textContent = w.offer && w.offer.kind === "back" ? w.offer.pct + "% OFF" : "FIRST TIME"; }
+    b.querySelector("small").textContent = p.days + (p.days === 1 ? " day" : " days") + " unlimited" + (!deal && i && p.save >= 10 ? " · save " + p.save + "%" : "");
     b.onclick = function () { haptic("medium"); LV.buy = p.price; live(true); buy(p.id); };
     s.querySelector(".plans").appendChild(b);
   });
   s.querySelector(".all").onclick = openPlans;
+  if (w.offer) {
+    var h3 = s.querySelector(".sheet h3");
+    if (w.offer.kind === "first") h3.textContent = "🔥 First-time offer — just for you";
+    else { var oe = Date.now() + w.offer.endsIn * 1000; (function t() { var x = Math.max(0, Math.round((oe - Date.now()) / 1000)); h3.textContent = "🎁 Welcome back: " + w.offer.pct + "% off · ends in " + Math.floor(x / 3600) + "h " + Math.floor(x % 3600 / 60) + "m"; if (x > 0) setTimeout(t, 30000); })(); }
+  }
   var ag = s.querySelector(".again");
   if (w.daily > 0) {
     var end = Date.now() + w.resetIn * 1000;
