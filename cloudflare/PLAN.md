@@ -29,26 +29,19 @@ Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Nu
 - 2026-10-29: old 0.41 s avg start, 21 stalls per 100 videos (1,935 starts); new 0.49 s, 14 stalls per 100 (1,370). Stalls are the lag users feel; the new loading has a third fewer.
 - [ ] Give everyone the new loading and delete the old code path.
 
-## 2b. Likes + profile (Instagram-style), plan only
+## 2b. Likes + profile (Instagram-style) — built 2026-10-29, admins + APP_TESTERS only
 
-- [ ] Likes saved on the server: table `likes (user_id, video_id, at)`, primary key (user_id, video_id), WITHOUT ROWID. Like = 1 write, unlike = 1 delete. Today likes live only in the phone (localStorage). Also tells us which videos people like.
-- [ ] Profile button in the bottom-right corner → profile page: name / id, number of likes, liked reels in a 3-column grid; tap one → that reel, swipe through the liked ones.
-- [ ] Thumbnails — one per video, shared by everyone (a thumbnail belongs to the video, not the user):
-  - When a reel is liked and the video has no thumbnail yet, the phone grabs the current frame (canvas, ~160×284, ~5 KB JPEG; the video comes through our worker, so it isn't blocked) and uploads it: table `thumbs (video_id PRIMARY KEY, jpg BLOB)`, served from `/thumb/<id>` with long browser caching. ~8,600 videos × 5 KB ≈ 43 MB of D1's 500 MB; one write per video, ever.
-  - Upload rules: only for a video the user has liked (signed like), JPEG under ~15 KB, first one wins (never replaced).
-  - A user on a new phone / after logout sees all liked reels (likes are on the server) with these thumbnails. A video without one yet: placeholder tile, then the phone grabs the first frame of the visible tiles (a little video data each) and uploads it.
-  - Phone-only cache (IndexedDB) isn't needed once thumbnails are on the server.
-- [ ] Where to keep it as users grow (decided 2026-10-29): a **separate D1 database** (own 500 MB, free, same speed) for `likes` + `thumbs`, so the bot's DB never fills up. Thumbnails grow with the number of videos, not users (~43 MB for 8,600). Likes ≈ 60 B a row (100k users × 50 likes ≈ 300 MB). The first limit to hit is D1's 100k rows written/day (account-wide), not storage.
-  - Later, if likes approach the write limit: move only `likes` to Turso (bigger free write allowance; +50–150 ms per query, each query is an extra subrequest). Check its current free limits before moving.
-  - **No R2** (the owner won't add payment details). Thumbnails stay in D1: make them ~120×213, ~3 KB → ~150k per 500 MB database; when one fills up, another free D1 database. Not KV (1,000 writes/day, low read allowance), not Supabase (pauses after a week idle), not Telegram (ban risk).
-- [ ] Tap a grid thumbnail → that reel plays full screen; swipe up/down through the other liked reels in the same order; ✕ back to the grid. The server returns signed links for the liked ids like the feed does (Reels: Telegram stream; /str: HLS).
-- [ ] Free users (decided 2026-10-29): everyone sees the grid; a free user can replay one liked reel, then the plans ("❤️ Watch your liked reels anytime → Premium").
-- [ ] Good frames, not black screens / intros:
-  - On like: the frame the user is watching (usually mid-video, the moment they liked). Check it on a tiny canvas: too dark or one flat colour → try 1 s later, up to 3 tries.
-  - Fallback (no thumbnail yet): never the first frame — seek to ~30 % of the video, then ~50 %, then ~15 %, first good one wins (videos under 10 s: ~2 s). Intros, ads and black screens are mostly in the first seconds.
-  - Logo / "subscribe" intro screens aren't dark, so the check can't catch them; taking the frame from the middle avoids them in practice.
-- [ ] Testing without looking at any real video: frames are grabbed by the users' own phones; development tests use a synthetic clip made for the test (e.g. 3 s black, then solid colours) to check the dark-frame skip and the 30 / 50 / 15 % seeks, and fake data for upload rules and the grid API. The admin tests the real thing on the phone, behind an admin/tester-only switch first. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
-- [ ] Works for Reels and /str alike.
+Live for admins and testers (`PROFILE_PUBLIC` 0). Database `terabox-bot-likes` (binding `LIKES`, `likes_schema.sql`): `likes (uid, vid, at)` and `thumbs (vid, jpg)`. Code: `likesApi` in `src/bot.js`, routes `/app/api/like|thumb|liked` and `/app/thumb/<vid>` in `src/index.js`, the profile / grid / Premium sheet / viewer in `src/reels.js`.
+
+- Likes are saved on the server (1 write per like, unlike = delete); the phone's older local likes are uploaded once.
+- Profile button at the bottom of the rail → Instagram-style profile: @username, name, Liked count, plan, 3-column 9:16 grid.
+- Thumbnails: one ~3 KB JPEG per video, shared by everyone, first one wins. On like: the frame being watched (dark / flat → 1 s later, 3 tries). Missing ones (Premium): from ~30 %, then 50 %, then 15 % of the video, up to 6 per opening.
+- Tap a tile: Premium → the liked reels full screen (swipe through, unlike there); free → the Premium sheet with the plans and the user's offer, no video (decided: replaying liked reels is Premium-only).
+- Tested locally with a synthetic clip (3 s black, then colours) and mock Telegram / payment worker; no real video.
+- Limits: a separate D1 database (500 MB). Later, if likes near the 100k writes/day: move `likes` to Turso. No R2 (no payment details); when thumbnails fill 500 MB: another free D1 database. Not KV, Supabase or Telegram.
+- [ ] The owner tests it on the phone, then `/configset PROFILE_PUBLIC 1` opens it to everyone.
+- [ ] /str: likes and the profile there too (the page is a copy of Reels; its videos are HLS, the viewer would need hls.js).
+- [ ] `/funnel`: show `pf_open` (profile opens) next to the app numbers.
 
 ## 3. Payment worker security (paytm-payment-worker/index.js) — important
 

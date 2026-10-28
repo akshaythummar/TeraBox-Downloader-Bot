@@ -3,6 +3,7 @@
 // stream link (own TeraBox resolver + HLS proxy worker) instead of download→upload→forward.
 
 import { Button, md } from './tg.js';
+import { DB } from './db.js';
 
 // ---------------- constants (from main.py / tools.py) ---------------- //
 
@@ -381,6 +382,7 @@ export function createBot(env, api, db, origin) {
       VIDEO_DELETE_HOURS: Math.min(int(o.VIDEO_DELETE_HOURS ?? env.VIDEO_DELETE_HOURS ?? 24), 47),
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
       APP_LOG_CHAT: csv(o.APP_LOG_CHAT ?? env.APP_LOG_CHAT), // where the Videos App's live session log goes (default the owner; 0 = off)
+      PROFILE_PUBLIC: int(o.PROFILE_PUBLIC ?? env.PROFILE_PUBLIC ?? 0), // 1 = likes on the server + the profile grid for everyone (else admins + APP_TESTERS)
       APP_TESTERS: csv(o.APP_TESTERS ?? env.APP_TESTERS), // user IDs who get the app before it's public — as normal users (free limit, paywall)
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
@@ -1131,6 +1133,7 @@ Choose your preferred language:
     VIDEO_DELETE_HOURS: { section: 'Limits', kind: 'int', min: 0, max: 47 },
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_TESTERS: { section: 'Limits', kind: 'csv' },
+    PROFILE_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_LOG_CHAT: { section: 'Limits', kind: 'csv' },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
@@ -2013,7 +2016,7 @@ Choose your preferred language:
   let uploadTick = null; // set below when /videos is configured; run by the cron
   let planViewHook = null; // status + /videos plans menu: /plan, ⭐ Premium, Renew buttons
   let buyPlanHook = null; // t.me/<bot>?start=plan_<id> (the Videos App's plan cards): straight to that plan's QR
-  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null; // /videos payments: auto-verify + renew reminders (cron)
+  let ordersTick = null, subReminders = null, videoCleanTick = null, appFeed = null, appSend = null, likesApi = null; // /videos payments: auto-verify + renew reminders (cron)
   if (env.VIDEOS_POOL_WORKER && env.VIDEOS_PAYMENT_API) {
     const pay = env.VIDEOS_PAYMENT_API.replace(/\/$/, '');
     // VIDEOS_POOL_WORKER can list several pool workers (comma-separated); each fetch picks the next
@@ -2550,22 +2553,94 @@ Choose your preferred language:
       let wall = null;
       if (access !== true && left === 0) {
         funnel('app_wall');
-        const plans = ((await getPlans())?.plans || []).filter(p => p.status === 'active').sort((x, y) => x.price - y.price);
-        const perDay = p => p.price / p.validity_days, best = plans.reduce((x, p) => (!x || perDay(p) < perDay(x) ? p : x), null);
-        const [h, mi, se] = ymdHMS().slice(11).split(':').map(Number);
-        const offer = await offerFor(uid, int(ctx.state.sub_until) || null);
-        wall = {
-          daily, resetIn: 86400 - (h * 3600 + mi * 60 + se),
-          offer: offer && plans.some(p => offerPrice(p, offer) != null) ? { kind: offer.kind, pct: offer.pct || 0, endsIn: offer.until ? Math.round(offer.until - nowS()) : 0 } : null,
-          plans: plans.map(p => ({ id: int(p.id), name: String(p.name), price: offerPrice(p, offer) ?? +p.price, was: offerPrice(p, offer) != null ? +p.price : 0, days: int(p.validity_days), save: Math.round((1 - perDay(p) / perDay(plans[0])) * 100), best: plans.length > 1 && p === best })),
-        };
-        if (wall.offer) funnel(`offer_${offer.kind}_shown`);
+        wall = await wallPlans(uid, ctx, daily);
       }
       return { ok: true, unlimited: access === true, left, videos, wall };
     };
+    // the plans for the app's paywall / Premium sheet: cheapest first, best value, the user's offer, and
+    // when the daily free videos come back (midnight in TZ)
+    async function wallPlans(uid, ctx, daily) {
+      const plans = ((await getPlans())?.plans || []).filter(p => p.status === 'active').sort((x, y) => x.price - y.price);
+      const perDay = p => p.price / p.validity_days, best = plans.reduce((x, p) => (!x || perDay(p) < perDay(x) ? p : x), null);
+      const [h, mi, se] = ymdHMS().slice(11).split(':').map(Number);
+      const offer = await offerFor(uid, int(ctx.state.sub_until) || null);
+      const wall = {
+        daily, resetIn: 86400 - (h * 3600 + mi * 60 + se),
+        offer: offer && plans.some(p => offerPrice(p, offer) != null) ? { kind: offer.kind, pct: offer.pct || 0, endsIn: offer.until ? Math.round(offer.until - nowS()) : 0 } : null,
+        plans: plans.map(p => ({ id: int(p.id), name: String(p.name), price: offerPrice(p, offer) ?? +p.price, was: offerPrice(p, offer) != null ? +p.price : 0, days: int(p.validity_days), save: Math.round((1 - perDay(p) / perDay(plans[0])) * 100), best: plans.length > 1 && p === best })),
+      };
+      if (wall.offer) funnel(`offer_${offer.kind}_shown`);
+      return wall;
+    }
     // ⬇️ in the app: that video into the user's chat (by file_id, instant) — like /videos: spoiler,
     // no forwarding, auto-deleted. The feed signed the id for this user (d), so only videos the app
     // already gave them; not counted again.
+    // ---- likes + the profile grid (Reels): their own D1 database (binding LIKES) ----
+    // vid = a Reels video (md5) or a /str stream ("code:fid"). Thumbnails are one per video, grabbed by
+    // the first liker's phone (first one wins). Replaying liked reels is Premium-only (the lure).
+    const ldb = env.LIKES ? new DB(env.LIKES) : null;
+    const VID = /^(?:[0-9a-f]{32}|[\w-]+:\d+)$/;
+    const profileOn = async uid => !!ldb && ((await isAdmin(uid)) || (await runtime()).PROFILE_PUBLIC === 1 || (await runtime()).APP_TESTERS.includes(String(uid)));
+    const thumbUrl = async vid => `/app/thumb/${encodeURIComponent(vid)}?t=${await sign(env.WEBHOOK_SECRET, `thumb:${vid}`)}`;
+    const THUMB_MAX = 15000; // bytes; a 120×213 JPEG is ~3 KB
+    likesApi = {
+      profileOn,
+      // like / unlike one video (id), or upload the phone's old local likes once (ids, ≤100)
+      async like(uid, b) {
+        if (!(await profileOn(uid))) return { ok: false };
+        const ids = [...new Set((Array.isArray(b.ids) ? b.ids : [b.id]).map(String))].filter(v => VID.test(v)).slice(0, 100);
+        if (!ids.length) return { ok: false };
+        const now = Math.floor(nowS());
+        if (b.on === false) await ldb.run(`DELETE FROM likes WHERE uid = ? AND vid IN (${ids.map(() => '?').join(',')})`, int(uid), ...ids);
+        else for (let i = 0; i < ids.length; i += 30) { // D1: ≤100 bound parameters per query
+          const part = ids.slice(i, i + 30);
+          await ldb.run(`INSERT INTO likes (uid, vid, at) VALUES ${part.map(() => '(?, ?, ?)').join(', ')} ON CONFLICT (uid, vid) DO NOTHING`, ...part.flatMap(v => [int(uid), v, now]));
+        }
+        // one like turned on: does its video still need a thumbnail?
+        const needThumb = b.on !== false && ids.length === 1 && !(await ldb.one('SELECT 1 x FROM thumbs WHERE vid = ?', ids[0]));
+        return { ok: true, needThumb };
+      },
+      // a thumbnail from the liker's phone: only for a video they liked, a small JPEG, first one wins
+      async thumb(uid, b) {
+        const vid = String(b.id || '');
+        if (!VID.test(vid) || !(await profileOn(uid))) return { ok: false };
+        let bytes;
+        try { bytes = Uint8Array.from(atob(String(b.jpg || '')), c => c.charCodeAt(0)); } catch { return { ok: false }; }
+        if (bytes.length < 200 || bytes.length > THUMB_MAX || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) return { ok: false };
+        if (!(await ldb.one('SELECT 1 x FROM likes WHERE uid = ? AND vid = ?', int(uid), vid))) return { ok: false };
+        await ldb.run('INSERT INTO thumbs (vid, jpg) VALUES (?, ?) ON CONFLICT (vid) DO NOTHING', vid, bytes);
+        return { ok: true };
+      },
+      async thumbJpg(vid) {
+        if (!ldb || !VID.test(vid)) return null;
+        const r = await ldb.one('SELECT jpg FROM thumbs WHERE vid = ?', vid);
+        return r ? new Uint8Array(r.jpg) : null;
+      },
+      // the grid: newest likes first; Premium gets playable links, everyone else the plans (the lure)
+      async liked(uid) {
+        if (!(await profileOn(uid))) return { ok: false };
+        funnel('pf_open');
+        const rows = await ldb.all('SELECT vid, at FROM likes WHERE uid = ? ORDER BY at DESC LIMIT 300', int(uid));
+        const has = new Set();
+        for (let i = 0; i < rows.length; i += 90) {
+          const part = rows.slice(i, i + 90).map(r => r.vid);
+          for (const r of await ldb.all(`SELECT vid FROM thumbs WHERE vid IN (${part.map(() => '?').join(',')})`, ...part)) has.add(r.vid);
+        }
+        const ctx = await loadCtx(uid), premium = (await hasAccess(uid, ctx)) === true;
+        const exp = Math.floor(nowS()) + 50 * 60, q = DEFAULT_QUALITY;
+        const items = await Promise.all(rows.map(async r => {
+          const it = { id: r.vid, thumb: has.has(r.vid) ? await thumbUrl(r.vid) : null };
+          if (!premium) return it;
+          const str = /^([\w-]+):(\d+)$/.exec(r.vid);
+          it.src = str
+            ? `/m3u8?s=${str[1]}&f=${str[2]}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${str[1]}:${str[2]}:${q}`)}`
+            : `/app/v/${r.vid}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${r.vid}:${exp}`)}`;
+          if (!str) it.d = await sign(env.WEBHOOK_SECRET, `dl:${uid}:${r.vid}`);
+          return it;
+        }));
+        return { ok: true, premium, items, wall: premium ? null : await wallPlans(uid, ctx, (await runtime()).DAILY_FREE_VIDEOS) };
+      },
+    };
     appSend = async (uid, id) => {
       const fid = (await db.one('SELECT file_id FROM videos WHERE md5 = ?', id))?.file_id;
       if (!fid) return { ok: false };
@@ -2907,5 +2982,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, likes: () => likesApi };
 }

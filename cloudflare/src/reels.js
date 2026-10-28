@@ -77,7 +77,7 @@ body.held .top,body.seeking .top{opacity:0}
 .msg{position:absolute;inset:0;display:none;place-items:center;text-align:center;padding:24px;color:var(--mute)}
 .slide.bad .msg{display:grid}.slide.bad .load{opacity:0}
 /* snackbar + first-time hint */
-#toast{position:fixed;left:16px;right:16px;bottom:calc(var(--sb) + 70px);z-index:8;padding:13px 16px;border-radius:12px;background:#262626;box-shadow:0 6px 24px #0008;font-size:14px;font-weight:500;animation:up .25s ease}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(var(--sb) + 70px);z-index:30;padding:13px 16px;border-radius:12px;background:#262626;box-shadow:0 6px 24px #0008;font-size:14px;font-weight:500;animation:up .25s ease}
 @keyframes up{from{opacity:0;transform:translateY(12px)}}
 .hint{position:fixed;left:50%;bottom:calc(var(--sb) + 130px);transform:translateX(-50%);z-index:5;display:flex;flex-direction:column;align-items:center;gap:2px;font-weight:600;text-shadow:0 1px 4px #000;pointer-events:none;animation:bob 1.4s ease-in-out infinite}
 .hint svg{width:30px;height:30px}
@@ -130,6 +130,59 @@ body.held .top,body.seeking .top{opacity:0}
 @keyframes tick{to{stroke-dashoffset:0}}
 @keyframes boom{50%{transform:scale(1.12)}}
 .card .sub{color:var(--mute);font-size:14px;min-height:20px}
+/* profile (likes on the server): the button at the bottom of the rail, the page, the Premium sheet, the liked-reels viewer */
+.me{width:34px;height:34px;border-radius:50%;padding:2px;background:var(--ig);border:0;cursor:pointer}
+.me i{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#000;border:2px solid #000;font-style:normal;font-weight:800;font-size:13px;color:#fff}
+.me:active{transform:scale(.9)}
+#prof{position:fixed;inset:0;z-index:15;background:#000;transform:translateX(100%);transition:transform .28s cubic-bezier(.2,.8,.2,1);overflow-y:auto;overscroll-behavior:contain;visibility:hidden}
+#prof.open{transform:none;visibility:visible}
+.ph{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:4px;padding:calc(var(--st) + 6px) 8px 6px;background:#000}
+.ph b{font-size:18px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib{width:42px;height:42px;display:grid;place-items:center;border:0;background:none;color:#fff;border-radius:50%;cursor:pointer;flex:none}
+.ib:active{background:#ffffff1f}
+.ib svg{width:26px;height:26px}
+.pinfo{display:flex;align-items:center;gap:20px;padding:6px 16px 0}
+.pav{width:86px;height:86px;border-radius:50%;padding:3px;background:var(--ig);flex:none}
+.pav i{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;background:#262626;border:3px solid #000;font-style:normal;font-weight:700;font-size:34px}
+.pstats{flex:1;display:flex;justify-content:space-around;text-align:center}
+.pstats b{display:block;font-size:17px;font-weight:700}.pstats span{font-size:13px}
+.pname{padding:12px 16px 0;font-weight:600;font-size:14px}
+.pbio{padding:2px 16px 0;font-size:14px;color:var(--mute)}
+.pbtn{display:flex;gap:8px;margin:14px 16px 12px}
+.pbtn button{flex:1;padding:9px;border:0;border-radius:8px;background:#262626;font-weight:600;font-size:14px;cursor:pointer}
+.pbtn button.go2{background:#0095f6}
+.ptabs{position:sticky;top:calc(var(--st) + 54px);z-index:1;display:flex;background:#000;border-top:1px solid #262626}
+.ptabs div{flex:1;display:grid;place-items:center;padding:10px 0;border-bottom:1.5px solid #fff}
+.ptabs svg{width:24px;height:24px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding-bottom:calc(var(--sb) + 24px)}
+.tile{position:relative;display:block;aspect-ratio:9/16;border:0;padding:0;background:linear-gradient(160deg,#1f1f22,#2c2c30);overflow:hidden;cursor:pointer;color:#fff}
+.tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s}
+.tile img.ok{opacity:1}
+.tile .pi{position:absolute;left:6px;bottom:6px;width:15px;height:15px;filter:drop-shadow(0 1px 2px #000a)}
+.tile .lo{position:absolute;right:6px;top:6px;width:16px;height:16px;filter:drop-shadow(0 1px 2px #000a)}
+.tile:active{opacity:.75}
+.tile.sk{animation:sk 1.1s ease-in-out infinite}
+@keyframes sk{50%{opacity:.55}}
+.pempty{padding:56px 32px;text-align:center;color:var(--mute);line-height:1.45}
+.pempty .ring3{width:78px;height:78px;margin:0 auto 14px;border:2px solid #fff;border-radius:50%;display:grid;place-items:center;color:#fff}
+.pempty .ring3 svg{width:38px;height:38px}
+.pempty b{display:block;color:#fff;font-size:21px;margin-bottom:6px}
+#up{position:fixed;inset:0;z-index:17;background:#0009;display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .2s}
+#up.open{opacity:1;pointer-events:auto}
+#up .sheet{transform:translateY(100%);transition:transform .3s cubic-bezier(.2,.8,.2,1)}
+#up.open .sheet{transform:none}
+.uh{text-align:center;padding:2px 6px 14px}
+.uh svg{width:50px;height:50px;margin:0 auto 8px;color:var(--red)}
+.uh b{display:block;font-size:19px;font-weight:700}
+.uh p{margin:6px 0 0;color:var(--mute);font-size:14px;line-height:1.4}
+#lv{position:fixed;inset:0;z-index:16;background:#000;display:none}
+#lv.open{display:block}
+#lvf{height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;scrollbar-width:none;overscroll-behavior:contain}
+#lvf::-webkit-scrollbar{display:none}
+.lvs img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.lvs video{background:transparent}
+.lvx{position:absolute;left:6px;top:calc(var(--st) + 6px);z-index:3;filter:drop-shadow(0 1px 3px #000a)}
+.lvs .bar{bottom:calc(var(--sb) + 18px)}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="top"><span id="badge" class="pill" hidden></span></div>
@@ -143,6 +196,20 @@ body.held .top,body.seeking .top{opacity:0}
   <div class="sub" id="lsub">Verifying your Telegram account…</div>
 </div></div>
 <div id="toast" hidden></div>
+<div id="prof">
+  <div class="ph"><button class="ib" id="pback" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><b id="puser"></b></div>
+  <div class="pinfo"><span class="pav"><i id="pav"></i></span><div class="pstats"><div><b id="pcount">–</b><span>Liked</span></div><div><b id="pplanv">–</b><span>Plan</span></div></div></div>
+  <div class="pname" id="pname"></div>
+  <div class="pbio">❤️ Reels you like show up here</div>
+  <div class="pbtn"><button id="pbtn"></button></div>
+  <div class="ptabs"><div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg></div></div>
+  <div class="grid" id="pgrid"></div>
+</div>
+<div id="lv"><button class="ib lvx" id="lvx" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><div id="lvf"></div></div>
+<div id="up"><div class="sheet"><div class="grab"></div>
+  <div class="uh"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.79 3.9A4.99 4.99 0 0 1 21.5 9.12c0 3.07-2.65 4.96-5.2 7.22-2.51 2.24-3.86 3.47-4.3 3.75-.48-.31-2.14-1.82-4.3-3.75C5.14 14.07 2.5 12.17 2.5 9.12A4.99 4.99 0 0 1 7.2 3.9a4.21 4.21 0 0 1 3.68 1.94c.84 1.18.98 1.76 1.12 1.76s.28-.59 1.11-1.77A4.17 4.17 0 0 1 16.8 3.9z"/></svg><b>Watch your liked reels anytime</b><p>Premium replays every reel you like — and gives you unlimited reels every day.</p></div>
+  <div class="plans" id="uplans"></div><button class="all" id="uall">See all plans in the bot</button>
+</div></div>
 <div id="hint" class="hint" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>Swipe up</div>
 <script>
 var BOT = "__BOT__", MODE = "feed";
@@ -279,7 +346,196 @@ function like(s, on) {
   var id = s.dataset.id, was = !!liked[id]; liked[id] = on === undefined ? !liked[id] : on; if (!liked[id]) delete liked[id]; saveLikes();
   if (!was && liked[id]) { LV.lk++; live(); haptic(); }
   s.querySelector(".lk").classList.toggle("on", !!liked[id]); s.querySelector(".lk span").textContent = liked[id] ? "Liked" : "Like";
+  // profile on: the like is saved on the server; the first like of a video sends its thumbnail
+  if (PROFILE && was !== !!liked[id]) api("/app/api/like", { id: id, on: !!liked[id] }).then(function (d) { if (d.needThumb) grabThumb(s._v, id, 0); }).catch(function () {});
 }
+
+// ================= profile: liked reels in a grid (Instagram-style) =================
+var PROFILE = false, OV = false, PF = null, thumbs = {}, backBound = false;
+var myInit = ((meName || "").replace("@", "").charAt(0) || "U").toUpperCase();
+function api(path, body) { body = body || {}; body.initData = INIT; return fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(function (r) { return r.json(); }); }
+// the likes this phone kept before (localStorage) go to the server once
+function syncLikes() {
+  try { if (localStorage.getItem("likes_up")) return; } catch (e) { return; }
+  var ids = Object.keys(liked).filter(function (k) { return /^[0-9a-f]{32}$/.test(k); }).slice(-100);
+  var done = function () { try { localStorage.setItem("likes_up", "1"); } catch (e) {} };
+  if (!ids.length) return done();
+  api("/app/api/like", { ids: ids, on: true }).then(function (d) { if (d.ok) done(); }).catch(function () {});
+}
+// The video's current frame as a small JPEG (cover-cropped to 9:16), or null when it's dark or one flat
+// colour (a black intro, a fade) — the caller then tries another moment.
+var TW = 120, TH = 213;
+function frame(v) {
+  if (!v || v.readyState < 2 || !v.videoWidth) return null;
+  var c = document.createElement("canvas"); c.width = TW; c.height = TH;
+  var x = c.getContext("2d"), vw = v.videoWidth, vh = v.videoHeight, r = Math.max(TW / vw, TH / vh), w = vw * r, h = vh * r, px;
+  try { x.drawImage(v, (TW - w) / 2, (TH - h) / 2, w, h); px = x.getImageData(0, 0, TW, TH).data; } catch (e) { return null; }
+  var n = 0, sum = 0, sq = 0;
+  for (var i = 0; i < px.length; i += 32) { var l = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; sum += l; sq += l * l; n++; }
+  var avg = sum / n, sd = Math.sqrt(Math.max(0, sq / n - avg * avg));
+  if (avg < 22 || sd < 8) return null;
+  var q = 0.62, u = c.toDataURL("image/jpeg", q);
+  while (u.length * 0.75 > 14000 && q > 0.3) { q -= 0.12; u = c.toDataURL("image/jpeg", q); }
+  return u;
+}
+// on like: the frame being watched; dark → 1 s later, up to 3 tries (the player may have moved on)
+function grabThumb(v, id, tries) {
+  var u = frame(v);
+  if (!u) { if (tries < 2) setTimeout(function () { if (v && v._s && v._s.dataset.id === id) grabThumb(v, id, tries + 1); }, 1000); return; }
+  thumbs[id] = u;
+  api("/app/api/thumb", { id: id, jpg: u.split(",")[1] }).catch(function () {});
+}
+// a liked video with no thumbnail yet (Premium only — it needs the video): never the first frame —
+// ~30 % in, then 50 %, then 15 % (under 10 s: ~2 s), the first good one; at most 6 per opening
+function fallback(list) {
+  var q = list.slice(0, 6);
+  (function next() {
+    var it = q.shift();
+    if (!it || !document.getElementById("prof").classList.contains("open")) return;
+    var v = document.createElement("video"), pts = [], k = 0, done = false;
+    v.muted = true; v.setAttribute("playsinline", ""); v.preload = "auto";
+    var t = setTimeout(function () { fin(null); }, 15000);
+    function fin(u) {
+      if (done) return; done = true; clearTimeout(t);
+      v.removeAttribute("src"); v.load();
+      if (u) { thumbs[it.id] = u; if (it._img) { it._img.src = u; } api("/app/api/thumb", { id: it.id, jpg: u.split(",")[1] }).catch(function () {}); }
+      next();
+    }
+    v.addEventListener("loadedmetadata", function () { var d = v.duration; pts = d && isFinite(d) ? (d < 10 ? [Math.min(2, d / 2)] : [d * 0.3, d * 0.5, d * 0.15]) : [2]; v.currentTime = pts[0]; });
+    v.addEventListener("seeked", function () { setTimeout(function () { var u = frame(v); if (u) return fin(u); k++; if (k < pts.length) v.currentTime = pts[k]; else fin(null); }, 150); });
+    v.addEventListener("error", function () { fin(null); });
+    v.src = it.src;
+  })();
+}
+// the Telegram back button closes the top layer (viewer → sheet → profile)
+function syncBack() { try { if (OV) tg.BackButton.show(); else tg.BackButton.hide(); } catch (e) {} }
+function backTop() {
+  if (document.getElementById("lv").classList.contains("open")) closeViewer();
+  else if (document.getElementById("up").classList.contains("open")) closeUp();
+  else closeProfile();
+}
+function openProfile() {
+  haptic(); OV = true;
+  var cur = current(); if (cur && cur._v) cur._v.pause();
+  if (!backBound && tg && tg.BackButton) { try { tg.BackButton.onClick(backTop); backBound = true; } catch (e) {} }
+  syncBack();
+  document.getElementById("puser").textContent = meName || "Profile";
+  document.getElementById("pname").textContent = (u0 && [u0.first_name, u0.last_name].filter(Boolean).join(" ")) || "";
+  document.getElementById("pav").textContent = myInit;
+  document.getElementById("prof").classList.add("open");
+  loadLiked();
+}
+function closeProfile() {
+  document.getElementById("prof").classList.remove("open"); OV = false; syncBack();
+  var s = current(); if (s && s._v && !s._up) start(s);
+}
+function loadLiked() {
+  var g = document.getElementById("pgrid");
+  g.innerHTML = ""; for (var i = 0; i < 9; i++) { var sk = document.createElement("div"); sk.className = "tile sk"; g.appendChild(sk); }
+  api("/app/api/liked").then(function (d) {
+    if (!d.ok) throw 0;
+    PF = d; renderGrid();
+  }).catch(function () { g.innerHTML = '<div class="pempty" style="grid-column:1/-1"><b>Couldn&#39;t load</b>Check your internet and try again.</div>'; });
+}
+var PLAY_S = '<svg class="pi" viewBox="0 0 24 24" fill="#fff"><path d="M7 4.5v15l13-7.5z"/></svg>';
+var LOCK_S = '<svg class="lo" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+function renderGrid() {
+  var d = PF, g = document.getElementById("pgrid");
+  document.getElementById("pcount").textContent = d.items.length;
+  document.getElementById("pplanv").textContent = d.premium ? "Premium" : "Free";
+  var b = document.getElementById("pbtn");
+  b.className = d.premium ? "" : "go2"; b.textContent = d.premium ? "♾️ Premium active" : "Go unlimited";
+  b.onclick = d.premium ? null : function () { showUp(); };
+  g.innerHTML = "";
+  if (!d.items.length) {
+    g.innerHTML = '<div class="pempty" style="grid-column:1/-1"><div class="ring3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="' + HEART + '"/></svg></div><b>No liked reels yet</b>Double-tap a reel or tap ❤️ — it shows up here.</div>';
+    return;
+  }
+  var miss = [];
+  d.items.forEach(function (it, i) {
+    var t = document.createElement("button"); t.className = "tile";
+    t.innerHTML = '<img alt="">' + PLAY_S + (d.premium ? "" : LOCK_S);
+    var img = t.querySelector("img"); it._img = img;
+    img.onload = function () { img.classList.add("ok"); };
+    var src = thumbs[it.id] || it.thumb;
+    if (src) img.src = src; else if (it.src) miss.push(it);
+    t.onclick = function () { haptic(); if (d.premium) openViewer(i); else showUp(); };
+    g.appendChild(t);
+  });
+  if (d.premium && miss.length) fallback(miss);
+}
+// free users: the Premium sheet (the plans, the user's offer) — the lure
+function showUp() {
+  var w = PF && PF.wall, box = document.getElementById("uplans"); box.innerHTML = "";
+  ((w && w.plans) || []).forEach(function (p, i) {
+    var deal = p.was > p.price, b = document.createElement("button");
+    b.className = "plan" + (deal ? " deal" : p.best ? " best" : "");
+    b.innerHTML = '<span class="nm"></span><span class="pr"><span class="now"></span><s></s></span><small></small>' + (deal || p.best ? "<em></em>" : "");
+    b.querySelector(".nm").textContent = p.name;
+    b.querySelector(".pr .now").textContent = "₹" + p.price;
+    if (deal) b.querySelector(".pr s").textContent = "₹" + p.was;
+    if (deal || p.best) b.querySelector("em").textContent = deal ? (w.offer && w.offer.kind === "back" ? w.offer.pct + "% OFF" : "FIRST TIME") : "BEST VALUE";
+    b.querySelector("small").textContent = p.days + (p.days === 1 ? " day" : " days") + " unlimited" + (!deal && i && p.save >= 10 ? " · save " + p.save + "%" : "");
+    b.onclick = function () { haptic("medium"); LV.buy = p.price; live(true); buy(p.id); };
+    box.appendChild(b);
+  });
+  document.getElementById("uall").onclick = openPlans;
+  document.getElementById("up").classList.add("open"); syncBack();
+}
+function closeUp() { document.getElementById("up").classList.remove("open"); syncBack(); }
+// Premium: the liked reels full screen, swipe through them; one player moved along (tapping a tile
+// unlocks it for sound on Android)
+var LVV = null, LVI = -1, lvItems = [], lvio = null;
+function openViewer(i) {
+  var f = document.getElementById("lvf"), start0 = PF.items[i];
+  lvItems = PF.items.filter(function (x) { return x.src; });
+  f.innerHTML = ""; LVI = -1;
+  if (!LVV) {
+    LVV = document.createElement("video"); LVV.setAttribute("playsinline", ""); LVV.loop = true; LVV.preload = "auto";
+    LVV.addEventListener("playing", function () { var s = LVV.parentNode; if (s) s.classList.remove("wait", "up"); });
+    LVV.addEventListener("waiting", function () { var s = LVV.parentNode; if (s) s.classList.add("wait"); });
+    LVV.addEventListener("loadedmetadata", function () { var s = LVV.parentNode; if (s) s.classList.toggle("tall", LVV.videoHeight >= LVV.videoWidth * 1.2); });
+    LVV.addEventListener("timeupdate", function () { var s = LVV.parentNode; if (s && LVV.duration) s.querySelector(".bar i").style.width = (100 * LVV.currentTime / LVV.duration) + "%"; });
+    lvio = new IntersectionObserver(function (es) { es.forEach(function (e) { if (e.isIntersecting && e.intersectionRatio > 0.6) lvPlay(+e.target.dataset.k); }); }, { root: f, threshold: [0.6] });
+  }
+  lvItems.forEach(function (it, k) {
+    var s = document.createElement("div"); s.className = "slide lvs"; s.dataset.k = k;
+    var th = thumbs[it.id] || it.thumb;
+    s.innerHTML = (th ? '<img alt="">' : "") + '<div class="load"><div class="spin"></div></div><div class="tp">' + IC.play + '</div>' +
+      '<div class="rail"><button class="act lk on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path class="o" d="' + HEART + '"/></svg><svg class="f" viewBox="0 0 24 24" fill="currentColor"><path d="' + HEART + '"/></svg><span>Liked</span></button></div>' +
+      '<div class="bar"><i></i></div>';
+    if (th) s.querySelector("img").src = th;
+    s.onclick = function () { if (+s.dataset.k !== LVI) return; if (LVV.paused) { s.classList.remove("up"); LVV.play().catch(function () {}); } else { LVV.pause(); s.classList.add("up"); } haptic(); };
+    var lb = s.querySelector(".lk");
+    lb.onclick = function (e) {
+      e.stopPropagation(); haptic();
+      var on = !lb.classList.contains("on"); lb.classList.toggle("on", on); lb.querySelector("span").textContent = on ? "Liked" : "Like";
+      if (on) liked[it.id] = true; else delete liked[it.id]; saveLikes();
+      api("/app/api/like", { id: it.id, on: on }).catch(function () {});
+    };
+    f.appendChild(s); lvio.observe(s);
+  });
+  document.getElementById("lv").classList.add("open"); syncBack();
+  var k0 = Math.max(0, lvItems.indexOf(start0));
+  f.children[k0].scrollIntoView();
+  lvPlay(k0);
+}
+function lvPlay(k) {
+  if (k === LVI || !lvItems[k]) return; LVI = k;
+  var s = document.getElementById("lvf").children[k];
+  s.insertBefore(LVV, s.querySelector(".load")); s.classList.remove("up"); s.classList.add("wait");
+  LVV.muted = muted; LVV.src = lvItems[k].src;
+  var p = LVV.play();
+  if (p && p.catch) p.catch(function () { LVV.muted = true; LVV.play().catch(function () { s.classList.add("up"); s.classList.remove("wait"); }); });
+}
+function closeViewer() {
+  if (LVV) { LVV.pause(); LVV.removeAttribute("src"); LVV.load(); if (LVV.parentNode) LVV.parentNode.removeChild(LVV); }
+  LVI = -1; document.getElementById("lv").classList.remove("open"); document.getElementById("lvf").innerHTML = ""; syncBack();
+  loadLiked(); // unliked ones leave the grid
+}
+document.getElementById("pback").onclick = closeProfile;
+document.getElementById("lvx").onclick = closeViewer;
+document.getElementById("up").onclick = function (e) { if (e.target.id === "up") closeUp(); };
 // Android's WebView lets a <video> element play with sound only after a tap asked it to play;
 // swipes don't count. So 4 elements are reused for all slides, and taps unlock all 4 for good.
 var POOL = [];
@@ -358,7 +614,7 @@ function addVideo(v) {
         '<svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 12.5 5 5 10-11"/></svg>' +
         '<svg class="w" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg><span>Download</span></button>' +
       '<button class="act snd"><span class="on">' + IC.speakerOn + '</span><span class="off">' + IC.speakerOff + '</span><span>Sound</span></button>' +
-      '<div class="disc">' + initial + '</div>' +
+      (PROFILE ? '<button class="me" aria-label="Profile"><i>' + myInit + '</i></button>' : '<div class="disc">' + initial + '</div>') +
     '</div>' +
     '<div class="seek"><span class="tm"></span><div class="bar"><i></i></div></div>';
   if (liked[v.id]) like(s, true);
@@ -366,6 +622,7 @@ function addVideo(v) {
   s.querySelector(".dl").onclick = function (e) { e.stopPropagation(); download(s, this); };
   s.querySelector(".snd").onclick = function (e) { e.stopPropagation(); muted = !muted; setSound(true); haptic(); if (s._v && s._v.paused && !s._up) start(s); };
   var pr = s.querySelector(".prem"); if (pr) pr.onclick = function (e) { e.stopPropagation(); haptic("medium"); openPlans(); };
+  var mb = s.querySelector(".me"); if (mb) mb.onclick = function (e) { e.stopPropagation(); openProfile(); };
   gestures(s); seeker(s);
   feed.appendChild(s); slides.push(s); io.observe(s);
 }
@@ -449,13 +706,13 @@ var io = new IntersectionObserver(function (es) {
 // it's asked again from the same spot.
 setInterval(function () {
   var s = current(), v = s && s._v;
-  if (!v || !s._on || s._drag || document.hidden) return;
+  if (!v || !s._on || s._drag || document.hidden || OV) return;
   if (v.paused) { if (!s._up && !s.classList.contains("held") && !s.classList.contains("tap") && v.readyState >= 2 && Date.now() - s._arr > 1200) start(s); return; }
   if (!v.currentTime) return;
   if (v.currentTime !== s._lt) { s._lt = v.currentTime; s._lm = Date.now(); return; }
   if (Date.now() - s._lm > 2500) { s._lm = Date.now(); v.currentTime = v.currentTime + 0.05; }
 }, 500);
-document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else if (!s._up) start(s); });
+document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else if (!s._up && !OV) start(s); });
 
 function more() {
   if (loading || ended) return; loading = true;
@@ -468,6 +725,7 @@ function more() {
       var b = document.getElementById("badge"); b.hidden = false;
       b.textContent = d.unlimited ? "Unlimited" : (d.left + d.videos.length) + " free today";
       freeLeft = d.unlimited ? null : d.left;
+      if (d.profile && !PROFILE) { PROFILE = true; syncLikes(); }
       var firstBatch = !slides.length;
       d.videos.forEach(addVideo);
       if (firstBatch && slides.length) document.getElementById("hint").hidden = false;

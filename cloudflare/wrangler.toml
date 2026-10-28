@@ -28,6 +28,12 @@ binding = "DB"
 database_name = "terabox-bot-eu"
 database_id = "59f6c78a-5f4c-433f-a793-5d8fc62db3d0"   # Western Europe, next to Telegram's servers (old APAC db: terabox-bot)
 
+# likes + thumbnails (Reels profile): its own database so it never fills the bot one
+[[d1_databases]]
+binding = "LIKES"
+database_name = "terabox-bot-likes"
+database_id = "58af70fa-6c8a-489d-9eba-0701a0d2ae4d"
+
 # broadcast sender worker (cloudflare/sender): lets broadcasts go out at ~25 messages/second
 [[services]]
 binding = "SENDER"

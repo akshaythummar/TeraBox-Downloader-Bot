@@ -206,8 +206,27 @@ export default {
       const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
       if (!(await bot.appAllowed(uid))) return Response.json({ ok: false, error: 'soon' });
       const res = await bot.appFeed(uid);
+      if (res.ok) res.profile = !!(await bot.likes()?.profileOn(uid)); // likes on the server + the profile grid
       ctx.waitUntil(db.flush());
       return Response.json(res);
+    }
+    // likes + the profile grid (bot.likes(): its own D1 database)
+    if (['/app/api/like', '/app/api/thumb', '/app/api/liked'].includes(url.pathname) && req.method === 'POST') {
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
+      if (!uid) return Response.json({ ok: false }, { status: 401 });
+      const L = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).likes();
+      if (!L) return Response.json({ ok: false });
+      const res = await L[url.pathname.slice(9)](uid, body);
+      ctx.waitUntil(db.flush());
+      return Response.json(res);
+    }
+    if (url.pathname.startsWith('/app/thumb/')) {
+      const vid = decodeURIComponent(url.pathname.slice(11));
+      if (url.searchParams.get('t') !== (await sign(env.WEBHOOK_SECRET, `thumb:${vid}`))) return new Response('Bad link', { status: 403 });
+      const jpg = await createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin).likes()?.thumbJpg(vid);
+      // first one wins and is never replaced: cached for good
+      return jpg ? new Response(jpg, { headers: { 'content-type': 'image/jpeg', 'cache-control': 'private, max-age=31536000, immutable' } }) : new Response('Not found', { status: 404 });
     }
     if (url.pathname === '/m3u8') return m3u8(env, db, url);
     if (url.pathname.startsWith('/panel-api/')) return panelApi(req, env, db, url.pathname.slice(11));
