@@ -19,11 +19,22 @@ Live for admins: `/str`, `src/str.js`, table `streams` (code, fid, name, fails),
 - [ ] Decide before opening /str to users: the `streams` table holds users' own files. Showing them to other users is a privacy and report/ban risk.
 - [ ] If it wins: merge into `src/reels.js` (one page, not two copies).
 
+- [ ] Count /str's loading numbers too (counters `rl_*_s`; now only in the live log) to compare stalls with Reels.
+- [ ] Don't send users from Reels to /str yet (decided 2026-10-29): /str shows users' own unchecked files to everyone (report / ban risk), only ~1,250 videos, no free count / paywall, depends on the TeraBox cookie and the HLS proxy. Keep Reels; take what makes /str smooth (small HLS chunks, fewer stalls) into Reels instead.
+
 ## 2. Reels loading A/B test
 
 Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Numbers in `/funnel` ("⚡ Reels loading (old / new)").
 
-- [ ] After a few days, read `/funnel 3`; keep the faster one for everyone and delete the other code path.
+- 2026-10-29: old 0.41 s avg start, 21 stalls per 100 videos (1,935 starts); new 0.49 s, 14 stalls per 100 (1,370). Stalls are the lag users feel; the new loading has a third fewer.
+- [ ] Give everyone the new loading and delete the old code path.
+
+## 2b. Likes + profile (Instagram-style), plan only
+
+- [ ] Likes saved on the server: table `likes (user_id, video_id, at)`, primary key (user_id, video_id), WITHOUT ROWID. Like = 1 write, unlike = 1 delete. Today likes live only in the phone (localStorage). Also tells us which videos people like.
+- [ ] Profile button in the bottom-right corner → profile page: name / id, number of likes, liked reels in a 3-column grid; tap one → that reel, swipe through the liked ones.
+- [ ] Thumbnails: when a reel is liked, the phone grabs the current frame (canvas, ~5 KB JPEG; the video comes through our worker, so it isn't blocked) and keeps it in the phone. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
+- [ ] Works for Reels and /str alike.
 
 ## 3. Payment worker security (paytm-payment-worker/index.js) — important
 
