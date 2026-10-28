@@ -179,10 +179,9 @@ body.held .top,body.seeking .top{opacity:0}
 #lv.open{display:block}
 #lvf{height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;scrollbar-width:none;overscroll-behavior:contain}
 #lvf::-webkit-scrollbar{display:none}
-.lvs img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.lvs .poster{background-size:cover;background-position:center}
 .lvs video{background:transparent}
 .lvx{position:absolute;left:6px;top:calc(var(--st) + 6px);z-index:3;filter:drop-shadow(0 1px 3px #000a)}
-.lvs .bar{bottom:calc(var(--sb) + 18px)}
 .me i,.pav i{position:relative;overflow:hidden}
 .me i img,.pav i img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
 [hidden]{display:none!important}
@@ -531,56 +530,74 @@ function showUp() {
   document.getElementById("up").classList.add("open"); syncBack();
 }
 function closeUp() { document.getElementById("up").classList.remove("open"); syncBack(); }
-// Premium: the liked reels full screen, swipe through them; one player moved along (tapping a tile
-// unlocks it for sound on Android)
-var LVV = null, LVI = -1, lvItems = [], lvio = null;
+// Premium: the liked reels full screen, exactly like the feed (like, download, sound, seek, double-tap,
+// hold), swiping through every liked reel in order. Two players: the one on screen and the next one
+// warmed (started muted and paused), swapped on a swipe — so the next reel starts at once.
+var LVV = null, LVN = null, LVI = -1, lvItems = [], lvio = null, lvCur = null;
+function lvPlayer() {
+  var v = document.createElement("video");
+  v.setAttribute("playsinline", ""); v.setAttribute("disablepictureinpicture", ""); v.loop = true; v.preload = "auto"; v.muted = true;
+  v.oncontextmenu = function () { return false; };
+  v.addEventListener("playing", function () { var s = v._s; if (!s) return; s.classList.add("ready"); s.classList.remove("wait", "tap"); if (s !== lvCur) v.pause(); });
+  v.addEventListener("waiting", function () { var s = v._s; if (s && s === lvCur) s.classList.add("wait"); });
+  v.addEventListener("loadedmetadata", function () { var s = v._s; if (!s) return; s.classList.toggle("tall", v.videoHeight >= v.videoWidth * 1.2); if (s._show) s._show(v.currentTime); });
+  v.addEventListener("timeupdate", function () { var s = v._s; if (s && s._show && !s._drag) s._show(v.currentTime); });
+  return v;
+}
+// puts player v on slide k with its video (the same video kept if it's already there)
+function lvAttach(v, k) {
+  var s = document.getElementById("lvf").children[k];
+  if (!s || !lvItems[k]) return;
+  if (v._s === s) return;
+  if (v._s) v._s._v = null;
+  v._s = s; s._v = v; v._k = k;
+  s.insertBefore(v, s.querySelector(".shade"));
+  s.classList.remove("ready");
+  v.muted = true; v.src = lvItems[k].src;
+}
 function openViewer(id) {
   var f = document.getElementById("lvf");
   lvItems = view().filter(function (x) { return x.src; });
-  var start0 = lvItems.filter(function (x) { return x.id === id; })[0];
+  var k0 = Math.max(0, lvItems.map(function (x) { return x.id; }).indexOf(id));
   f.innerHTML = ""; LVI = -1;
   if (!LVV) {
-    LVV = document.createElement("video"); LVV.setAttribute("playsinline", ""); LVV.loop = true; LVV.preload = "auto";
-    LVV.addEventListener("playing", function () { var s = LVV.parentNode; if (s) s.classList.remove("wait", "up"); });
-    LVV.addEventListener("waiting", function () { var s = LVV.parentNode; if (s) s.classList.add("wait"); });
-    LVV.addEventListener("loadedmetadata", function () { var s = LVV.parentNode; if (s) s.classList.toggle("tall", LVV.videoHeight >= LVV.videoWidth * 1.2); });
-    LVV.addEventListener("timeupdate", function () { var s = LVV.parentNode; if (s && LVV.duration) s.querySelector(".bar i").style.width = (100 * LVV.currentTime / LVV.duration) + "%"; });
+    LVV = lvPlayer(); LVN = lvPlayer();
     lvio = new IntersectionObserver(function (es) { es.forEach(function (e) { if (e.isIntersecting && e.intersectionRatio > 0.6) lvPlay(+e.target.dataset.k); }); }, { root: f, threshold: [0.6] });
   }
   lvItems.forEach(function (it, k) {
-    var s = document.createElement("div"); s.className = "slide lvs"; s.dataset.k = k;
+    var s = document.createElement("div"); s.className = "slide lvs"; s.dataset.k = k; s.dataset.id = it.id; s.dataset.d = it.d || "";
+    s.innerHTML = slideHTML(false, false);
     var th = thumbs[it.id] || (it.jpg ? "data:image/jpeg;base64," + it.jpg : it.thumb);
-    s.innerHTML = (th ? '<img alt="">' : "") + '<div class="load"><div class="spin"></div></div><div class="tp">' + IC.play + '</div>' +
-      '<div class="rail"><button class="act lk on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path class="o" d="' + HEART + '"/></svg><svg class="f" viewBox="0 0 24 24" fill="currentColor"><path d="' + HEART + '"/></svg><span>Liked</span></button></div>' +
-      '<div class="bar"><i></i></div>';
-    if (th) s.querySelector("img").src = th;
-    s.onclick = function () { if (+s.dataset.k !== LVI) return; if (LVV.paused) { s.classList.remove("up"); LVV.play().catch(function () {}); } else { LVV.pause(); s.classList.add("up"); } haptic(); };
-    var lb = s.querySelector(".lk");
-    lb.onclick = function (e) {
-      e.stopPropagation(); haptic();
-      var on = !lb.classList.contains("on"); lb.classList.toggle("on", on); lb.querySelector("span").textContent = on ? "Liked" : "Like";
-      if (on) liked[it.id] = true; else delete liked[it.id]; saveLikes(); markPend(it.id, on);
-      api("/app/api/like", { id: it.id, on: on }).catch(function () {});
-    };
+    if (th) s.querySelector(".poster").style.backgroundImage = 'url("' + th + '")';
+    wireSlide(s);
+    // shown as liked (it is) — the state only, no request; tapping ❤️ then unlikes as usual
+    liked[it.id] = true; s.querySelector(".lk").classList.add("on"); s.querySelector(".lk span").textContent = "Liked";
     f.appendChild(s); lvio.observe(s);
   });
   document.getElementById("lv").classList.add("open"); syncBack();
-  var k0 = Math.max(0, lvItems.indexOf(start0));
   f.children[k0].scrollIntoView();
   lvPlay(k0);
 }
 function lvPlay(k) {
-  if (k === LVI || !lvItems[k]) return; LVI = k;
-  var s = document.getElementById("lvf").children[k];
-  s.insertBefore(LVV, s.querySelector(".load")); s.classList.remove("up"); s.classList.add("wait");
-  LVV.muted = muted; LVV.src = lvItems[k].src;
-  var p = LVV.play();
-  if (p && p.catch) p.catch(function () { LVV.muted = true; LVV.play().catch(function () { s.classList.add("up"); s.classList.remove("wait"); }); });
+  if (k === LVI || !lvItems[k]) return;
+  var prev = lvCur;
+  if (prev && prev._v) { prev._v.pause(); prev._up = false; prev.classList.remove("up", "held", "tap"); }
+  LVI = k;
+  // the warmed player already holds this reel: swap the two
+  if (LVN._k === k && LVN._s) { var t = LVV; LVV = LVN; LVN = t; }
+  lvAttach(LVV, k);
+  lvCur = document.getElementById("lvf").children[k];
+  lvCur.classList.add("wait");
+  if (LVV.currentTime > 0.5) LVV.currentTime = 0;
+  start(lvCur);
+  // warm the next one
+  if (lvItems[k + 1]) { lvAttach(LVN, k + 1); var p = LVN.play(); if (p && p.catch) p.catch(function () {}); }
 }
 function closeViewer() {
-  if (LVV) { LVV.pause(); LVV.removeAttribute("src"); LVV.load(); if (LVV.parentNode) LVV.parentNode.removeChild(LVV); }
-  LVI = -1; document.getElementById("lv").classList.remove("open"); document.getElementById("lvf").innerHTML = ""; syncBack();
-  loadLiked(); // unliked ones leave the grid
+  [LVV, LVN].forEach(function (v) { if (!v) return; v.pause(); v.removeAttribute("src"); v.load(); if (v._s) v._s._v = null; v._s = null; v._k = -1; if (v.parentNode) v.parentNode.removeChild(v); });
+  LVI = -1; lvCur = null;
+  document.getElementById("lv").classList.remove("open"); document.getElementById("lvf").innerHTML = ""; syncBack();
+  loadLiked(true); // unliked ones leave the grid
 }
 document.getElementById("pback").onclick = closeProfile;
 document.getElementById("lvx").onclick = closeViewer;
@@ -650,11 +667,21 @@ function start(s) {
 }
 function addVideo(v) {
   var s = document.createElement("div"); s.className = "slide"; s.dataset.id = v.id; s.dataset.src = v.src; s.dataset.d = v.d || "";
+  s.innerHTML = slideHTML(freeLeft != null, PROFILE);
+  wireSlide(s);
+  if (liked[v.id]) like(s, true);
+  var pr = s.querySelector(".prem"); if (pr) pr.onclick = function (e) { e.stopPropagation(); haptic("medium"); openPlans(); };
+  var mb = s.querySelector(".me"); if (mb) { addPhoto(mb.querySelector("i")); mb.onclick = function (e) { e.stopPropagation(); openProfile(); }; }
+  feed.appendChild(s); slides.push(s); io.observe(s);
+}
+// a reel's markup (the feed and the liked-reels viewer): prem = the "Go unlimited" button, prof = the
+// profile button at the bottom of the rail (else the bot's disc)
+function slideHTML(prem, prof) {
   var initial = (BOT.charAt(0) || "R").toUpperCase();
-  s.innerHTML = '<div class="poster"></div><div class="shade"></div>' +
+  return '<div class="poster"></div><div class="shade"></div>' +
     '<div class="load"><div class="spin"></div></div><div class="tp">' + IC.play + '</div>' +
     '<div class="msg">This reel didn\'t load — skipping…</div>' +
-    '<div class="info"><div class="who"><span class="av"><i>' + initial + '</i></span><b>' + BOT + '</b>' + (freeLeft != null ? '<button class="prem">Go unlimited</button>' : "") + '</div>' +
+    '<div class="info"><div class="who"><span class="av"><i>' + initial + '</i></span><b>' + BOT + '</b>' + (prem ? '<button class="prem">Go unlimited</button>' : "") + '</div>' +
       '<div class="cap">Swipe up for the next reel 🔥</div>' +
       '<div class="aud">' + IC.music + '<div><span>' + BOT + ' · Original audio<b class="len"></b></span></div></div></div>' +
     '<div class="rail">' +
@@ -663,17 +690,16 @@ function addVideo(v) {
         '<svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 12.5 5 5 10-11"/></svg>' +
         '<svg class="w" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg><span>Download</span></button>' +
       '<button class="act snd"><span class="on">' + IC.speakerOn + '</span><span class="off">' + IC.speakerOff + '</span><span>Sound</span></button>' +
-      (PROFILE ? '<button class="me" aria-label="Profile"><i>' + myInit + '</i></button>' : '<div class="disc">' + initial + '</div>') +
+      (prof ? '<button class="me" aria-label="Profile"><i>' + myInit + '</i></button>' : '<div class="disc">' + initial + '</div>') +
     '</div>' +
     '<div class="seek"><span class="tm"></span><div class="bar"><i></i></div></div>';
-  if (liked[v.id]) like(s, true);
+}
+// like, download, sound, tap / double-tap / hold, the seek bar
+function wireSlide(s) {
   s.querySelector(".lk").onclick = function (e) { e.stopPropagation(); like(s); };
   s.querySelector(".dl").onclick = function (e) { e.stopPropagation(); download(s, this); };
   s.querySelector(".snd").onclick = function (e) { e.stopPropagation(); muted = !muted; setSound(true); haptic(); if (s._v && s._v.paused && !s._up) start(s); };
-  var pr = s.querySelector(".prem"); if (pr) pr.onclick = function (e) { e.stopPropagation(); haptic("medium"); openPlans(); };
-  var mb = s.querySelector(".me"); if (mb) { addPhoto(mb.querySelector("i")); mb.onclick = function (e) { e.stopPropagation(); openProfile(); }; }
   gestures(s); seeker(s);
-  feed.appendChild(s); slides.push(s); io.observe(s);
 }
 // one tap = pause / play, double-tap = like (with the big heart; the tap waits 280 ms to tell them
 // apart), hold = pause while held (the UI hides, like Instagram)
@@ -713,7 +739,7 @@ function bad(s, report) {
   if (report) try { fetch("/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
-function current() { var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
+function current() { if (lvCur) return lvCur; var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
 // Phones' in-app browsers ignore preload, so the next video is "warmed" once the current one has its
 // metadata, the one after once it plays: started muted off-screen and paused as soon as it plays —
 // the browser has then fetched and decoded its start, and a swipe plays it at once.
