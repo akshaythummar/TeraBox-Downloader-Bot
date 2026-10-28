@@ -19,6 +19,7 @@ Live for admins: `/str`, `src/str.js`, table `streams` (code, fid, name, fails),
 - [ ] Decide before opening /str to users: the `streams` table holds users' own files. Showing them to other users is a privacy and report/ban risk.
 - [ ] If it wins: merge into `src/reels.js` (one page, not two copies).
 
+- Request cost (2026-10-29): per video 1 request on our worker (the /m3u8 playlist; a TeraBox resolve + 1 D1 write when the 30-min link cache is cold), but **every HLS segment is a request on the HLS proxy worker** (HLS_PROXY, a separate Cloudflare account) — ~20–40+ per video watched, plus a few for the warmed next one. Watch Online uses the same proxy, so /str and Watch Online share that account's 100k/day (~4,000 videos/day at ~25 segments each). Before opening /str to users: several proxy accounts (spread the load) or a paid proxy plan.
 - [ ] Count /str's loading numbers too (counters `rl_*_s`; now only in the live log) to compare stalls with Reels.
 - [ ] Don't send users from Reels to /str yet (decided 2026-10-29): /str shows users' own unchecked files to everyone (report / ban risk), only ~1,250 videos, no free count / paywall, depends on the TeraBox cookie and the HLS proxy. Keep Reels; take what makes /str smooth (small HLS chunks, fewer stalls) into Reels instead.
 
