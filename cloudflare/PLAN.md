@@ -46,7 +46,8 @@ Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Nu
 - [ ] Good frames, not black screens / intros:
   - On like: the frame the user is watching (usually mid-video, the moment they liked). Check it on a tiny canvas: too dark or one flat colour → try 1 s later, up to 3 tries.
   - Fallback (no thumbnail yet): never the first frame — seek to ~30 % of the video, then ~50 %, then ~15 %, first good one wins (videos under 10 s: ~2 s). Intros, ads and black screens are mostly in the first seconds.
-  - Logo / "subscribe" intro screens aren't dark, so the check can't catch them; taking the frame from the middle avoids them in practice. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
+  - Logo / "subscribe" intro screens aren't dark, so the check can't catch them; taking the frame from the middle avoids them in practice.
+- [ ] Testing without looking at any real video: frames are grabbed by the users' own phones; development tests use a synthetic clip made for the test (e.g. 3 s black, then solid colours) to check the dark-frame skip and the 30 / 50 / 15 % seeks, and fake data for upload rules and the grid API. The admin tests the real thing on the phone, behind an admin/tester-only switch first. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
 - [ ] Works for Reels and /str alike.
 
 ## 3. Payment worker security (paytm-payment-worker/index.js) — important
