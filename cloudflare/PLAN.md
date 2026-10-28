@@ -42,7 +42,11 @@ Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Nu
   - Later, if likes approach the write limit: move only `likes` to Turso (bigger free write allowance; +50–150 ms per query, each query is an extra subrequest). Check its current free limits before moving.
   - **No R2** (the owner won't add payment details). Thumbnails stay in D1: make them ~120×213, ~3 KB → ~150k per 500 MB database; when one fills up, another free D1 database. Not KV (1,000 writes/day, low read allowance), not Supabase (pauses after a week idle), not Telegram (ban risk).
 - [ ] Tap a grid thumbnail → that reel plays full screen; swipe up/down through the other liked reels in the same order; ✕ back to the grid. The server returns signed links for the liked ids like the feed does (Reels: Telegram stream; /str: HLS).
-- [ ] Decide: liked reels for free users — counted in the 5 free a day, or replaying liked reels is Premium-only (suggested: grid for all, one replay free, then the plans). On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
+- [ ] Free users (decided 2026-10-29): everyone sees the grid; a free user can replay one liked reel, then the plans ("❤️ Watch your liked reels anytime → Premium").
+- [ ] Good frames, not black screens / intros:
+  - On like: the frame the user is watching (usually mid-video, the moment they liked). Check it on a tiny canvas: too dark or one flat colour → try 1 s later, up to 3 tries.
+  - Fallback (no thumbnail yet): never the first frame — seek to ~30 % of the video, then ~50 %, then ~15 %, first good one wins (videos under 10 s: ~2 s). Intros, ads and black screens are mostly in the first seconds.
+  - Logo / "subscribe" intro screens aren't dark, so the check can't catch them; taking the frame from the middle avoids them in practice. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
 - [ ] Works for Reels and /str alike.
 
 ## 3. Payment worker security (paytm-payment-worker/index.js) — important
