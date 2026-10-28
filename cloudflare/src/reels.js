@@ -183,6 +183,8 @@ body.held .top,body.seeking .top{opacity:0}
 .lvs video{background:transparent}
 .lvx{position:absolute;left:6px;top:calc(var(--st) + 6px);z-index:3;filter:drop-shadow(0 1px 3px #000a)}
 .lvs .bar{bottom:calc(var(--sb) + 18px)}
+.me i,.pav i{position:relative;overflow:hidden}
+.me i img,.pav i img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="top"><span id="badge" class="pill" hidden></span></div>
@@ -353,6 +355,13 @@ function like(s, on) {
 // ================= profile: liked reels in a grid (Instagram-style) =================
 var PROFILE = false, OV = false, PF = null, thumbs = {}, backBound = false;
 var myInit = ((meName || "").replace("@", "").charAt(0) || "U").toUpperCase();
+// the user's Telegram profile photo (login data, Bot API 8.0+, when their privacy settings allow it):
+// laid over the initial; a photo that doesn't load leaves the initial
+var myPhoto = u0 && /^https:\/\//.test(u0.photo_url || "") ? u0.photo_url : "";
+function addPhoto(el) {
+  if (!myPhoto || !el || el.querySelector("img")) return;
+  var im = document.createElement("img"); im.alt = ""; im.onerror = function () { im.remove(); }; im.src = myPhoto; el.appendChild(im);
+}
 function api(path, body) { body = body || {}; body.initData = INIT; return fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(function (r) { return r.json(); }); }
 // the likes this phone kept before (localStorage) go to the server once
 function syncLikes() {
@@ -421,7 +430,7 @@ function openProfile() {
   syncBack();
   document.getElementById("puser").textContent = meName || "Profile";
   document.getElementById("pname").textContent = (u0 && [u0.first_name, u0.last_name].filter(Boolean).join(" ")) || "";
-  document.getElementById("pav").textContent = myInit;
+  document.getElementById("pav").textContent = myInit; addPhoto(document.getElementById("pav"));
   document.getElementById("prof").classList.add("open");
   loadLiked();
 }
@@ -622,7 +631,7 @@ function addVideo(v) {
   s.querySelector(".dl").onclick = function (e) { e.stopPropagation(); download(s, this); };
   s.querySelector(".snd").onclick = function (e) { e.stopPropagation(); muted = !muted; setSound(true); haptic(); if (s._v && s._v.paused && !s._up) start(s); };
   var pr = s.querySelector(".prem"); if (pr) pr.onclick = function (e) { e.stopPropagation(); haptic("medium"); openPlans(); };
-  var mb = s.querySelector(".me"); if (mb) mb.onclick = function (e) { e.stopPropagation(); openProfile(); };
+  var mb = s.querySelector(".me"); if (mb) { addPhoto(mb.querySelector("i")); mb.onclick = function (e) { e.stopPropagation(); openProfile(); }; }
   gestures(s); seeker(s);
   feed.appendChild(s); slides.push(s); io.observe(s);
 }
