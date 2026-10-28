@@ -33,7 +33,11 @@ Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Nu
 
 - [ ] Likes saved on the server: table `likes (user_id, video_id, at)`, primary key (user_id, video_id), WITHOUT ROWID. Like = 1 write, unlike = 1 delete. Today likes live only in the phone (localStorage). Also tells us which videos people like.
 - [ ] Profile button in the bottom-right corner → profile page: name / id, number of likes, liked reels in a 3-column grid; tap one → that reel, swipe through the liked ones.
-- [ ] Thumbnails: when a reel is liked, the phone grabs the current frame (canvas, ~160×284, ~5 KB JPEG; the video comes through our worker, so it isn't blocked) and keeps it in the phone's IndexedDB (not localStorage: ~5 MB cap). Keep the newest 300 (~1.5 MB); older ones and cleared storage fall back to the lazy first frame. Nothing stored on our side but the like row. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
+- [ ] Thumbnails — one per video, shared by everyone (a thumbnail belongs to the video, not the user):
+  - When a reel is liked and the video has no thumbnail yet, the phone grabs the current frame (canvas, ~160×284, ~5 KB JPEG; the video comes through our worker, so it isn't blocked) and uploads it: table `thumbs (video_id PRIMARY KEY, jpg BLOB)`, served from `/thumb/<id>` with long browser caching. ~8,600 videos × 5 KB ≈ 43 MB of D1's 500 MB; one write per video, ever.
+  - Upload rules: only for a video the user has liked (signed like), JPEG under ~15 KB, first one wins (never replaced).
+  - A user on a new phone / after logout sees all liked reels (likes are on the server) with these thumbnails. A video without one yet: placeholder tile, then the phone grabs the first frame of the visible tiles (a little video data each) and uploads it.
+  - Phone-only cache (IndexedDB) isn't needed once thumbnails are on the server. On another phone: load each video's first frame lazily. Not on the server (D1's 500 MB fills up); Telegram thumbnails aren't stored for the 8,600 old videos; TeraBox thumbnail URLs expire.
 - [ ] Works for Reels and /str alike.
 
 ## 3. Payment worker security (paytm-payment-worker/index.js) — important
