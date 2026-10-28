@@ -349,6 +349,7 @@ function like(s, on) {
   if (!was && liked[id]) { LV.lk++; live(); haptic(); }
   s.querySelector(".lk").classList.toggle("on", !!liked[id]); s.querySelector(".lk span").textContent = liked[id] ? "Liked" : "Like";
   // profile on: the like is saved on the server; the first like of a video sends its thumbnail
+  if (PROFILE && was !== !!liked[id]) markPend(id, !!liked[id]);
   if (PROFILE && was !== !!liked[id]) api("/app/api/like", { id: id, on: !!liked[id] }).then(function (d) { if (d.needThumb) grabThumb(s._v, id, 0); setTimeout(prefetchLiked, d.needThumb ? 5000 : 500); }).catch(function () {});
 }
 
@@ -440,41 +441,58 @@ function closeProfile() {
   var s = current(); if (s && s._v && !s._up) start(s);
 }
 // quiet = a grid is already showing (cached): refresh it in the background, re-draw only if it changed
-var pfBusy = false;
+// Likes / unlikes made in this phone, until the server's list has them: a like is in the grid at once
+// (with the frame grabbed when liking), even if the list was fetched before the like reached the server
+var pend = {}; // id → { on, t }
+function markPend(id, on) { pend[id] = { on: on, t: Date.now() }; if (PF && document.getElementById("prof").classList.contains("open")) renderGrid(); }
+function view() {
+  if (!PF) return [];
+  var now = Date.now(), have = {}, add = [];
+  Object.keys(pend).forEach(function (id) { if (now - pend[id].t > 120000) delete pend[id]; }); // a failed like doesn't linger
+  var items = PF.items.filter(function (x) { have[x.id] = 1; return !(pend[x.id] && !pend[x.id].on); });
+  Object.keys(pend).forEach(function (id) { if (pend[id].on && !have[id]) add.push({ id: id, local: true, t: pend[id].t }); });
+  add.sort(function (a, b) { return b.t - a.t; });
+  return add.concat(items);
+}
+var pfBusy = false, pfAgain = false;
 function loadLiked(quiet) {
   var g = document.getElementById("pgrid");
   if (!quiet) { g.innerHTML = ""; for (var i = 0; i < 9; i++) { var sk = document.createElement("div"); sk.className = "tile sk"; g.appendChild(sk); } }
-  if (pfBusy) return; pfBusy = true;
-  var was = PF ? sig(PF) : "";
+  if (pfBusy) { pfAgain = true; return; } // one already on the way: another right after it, never dropped
+  pfBusy = true;
+  var was = sig();
   api("/app/api/liked").then(function (d) {
     if (!d.ok) throw 0;
     d._at = Date.now(); PF = d; savePF();
-    if (document.getElementById("prof").classList.contains("open") && (!quiet || sig(d) !== was)) renderGrid();
+    // what the server's list now confirms stops being pending
+    var on = {}; d.items.forEach(function (x) { on[x.id] = 1; });
+    Object.keys(pend).forEach(function (id) { if (!!on[id] === pend[id].on) delete pend[id]; });
+    if (document.getElementById("prof").classList.contains("open") && (!quiet || sig() !== was)) renderGrid();
   }).catch(function () { if (!quiet) g.innerHTML = '<div class="pempty" style="grid-column:1/-1"><b>Couldn&#39;t load</b>Check your internet and try again.</div>'; })
-    .then(function () { pfBusy = false; });
+    .then(function () { pfBusy = false; if (pfAgain) { pfAgain = false; loadLiked(true); } });
 }
-function sig(d) { return (d.premium ? "p" : "f") + d.items.map(function (x) { return x.id + (x.jpg || x.thumb ? "+" : ""); }).join(","); }
+function sig() { return PF ? (PF.premium ? "p" : "f") + view().map(function (x) { return x.id + (thumbs[x.id] || x.jpg || x.thumb ? "+" : "") + (x.src ? "s" : ""); }).join(",") : ""; }
 // the last list is kept in the phone (thumbnails included) so the next opening is instant too
 function savePF() { try { localStorage.setItem("pf_cache", JSON.stringify({ me: me, d: PF })); } catch (e) {} }
 try { var pc = JSON.parse(localStorage.getItem("pf_cache") || "null"); if (pc && pc.me === me) PF = pc.d; } catch (e) {}
 // fetched ahead of time, once the first reel plays (the profile then opens instantly)
-function prefetchLiked() { if (PROFILE && !pfBusy) loadLiked(true); }
+function prefetchLiked() { if (PROFILE) loadLiked(true); }
 var PLAY_S = '<svg class="pi" viewBox="0 0 24 24" fill="#fff"><path d="M7 4.5v15l13-7.5z"/></svg>';
 var LOCK_S = '<svg class="lo" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
 function renderGrid() {
-  var d = PF, g = document.getElementById("pgrid");
-  document.getElementById("pcount").textContent = d.items.length;
+  var d = PF, g = document.getElementById("pgrid"), list = view();
+  document.getElementById("pcount").textContent = list.length;
   document.getElementById("pplanv").textContent = d.premium ? "Premium" : "Free";
   var b = document.getElementById("pbtn");
   b.className = d.premium ? "" : "go2"; b.textContent = d.premium ? "♾️ Premium active" : "Go unlimited";
   b.onclick = d.premium ? null : function () { showUp(); };
   g.innerHTML = "";
-  if (!d.items.length) {
+  if (!list.length) {
     g.innerHTML = '<div class="pempty" style="grid-column:1/-1"><div class="ring3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="' + HEART + '"/></svg></div><b>No liked reels yet</b>Double-tap a reel or tap ❤️ — it shows up here.</div>';
     return;
   }
   var miss = [];
-  d.items.forEach(function (it, i) {
+  list.forEach(function (it) {
     var t = document.createElement("button"); t.className = "tile";
     t.innerHTML = '<img alt="">' + PLAY_S + (d.premium ? "" : LOCK_S);
     var img = t.querySelector("img"); it._img = img;
@@ -484,8 +502,11 @@ function renderGrid() {
     t.onclick = function () {
       haptic();
       // a cached list's video links last ~50 min: an older one is refreshed first (a second or so)
-      if (PF.premium && Date.now() - (PF._at || 0) > 40 * 60000) { toast("Loading…"); return loadLiked(true); }
-      if (PF.premium) openViewer(i); else showUp();
+      if (!PF.premium) return showUp();
+      // a cached list's video links last ~50 min; a like that isn't on the server's list yet has none
+      var cur = view().filter(function (x) { return x.id === it.id; })[0];
+      if (!cur || !cur.src || Date.now() - (PF._at || 0) > 40 * 60000) { toast("Loading…"); return loadLiked(true); }
+      openViewer(it.id);
     };
     g.appendChild(t);
   });
@@ -513,9 +534,10 @@ function closeUp() { document.getElementById("up").classList.remove("open"); syn
 // Premium: the liked reels full screen, swipe through them; one player moved along (tapping a tile
 // unlocks it for sound on Android)
 var LVV = null, LVI = -1, lvItems = [], lvio = null;
-function openViewer(i) {
-  var f = document.getElementById("lvf"), start0 = PF.items[i];
-  lvItems = PF.items.filter(function (x) { return x.src; });
+function openViewer(id) {
+  var f = document.getElementById("lvf");
+  lvItems = view().filter(function (x) { return x.src; });
+  var start0 = lvItems.filter(function (x) { return x.id === id; })[0];
   f.innerHTML = ""; LVI = -1;
   if (!LVV) {
     LVV = document.createElement("video"); LVV.setAttribute("playsinline", ""); LVV.loop = true; LVV.preload = "auto";
@@ -537,7 +559,7 @@ function openViewer(i) {
     lb.onclick = function (e) {
       e.stopPropagation(); haptic();
       var on = !lb.classList.contains("on"); lb.classList.toggle("on", on); lb.querySelector("span").textContent = on ? "Liked" : "Like";
-      if (on) liked[it.id] = true; else delete liked[it.id]; saveLikes();
+      if (on) liked[it.id] = true; else delete liked[it.id]; saveLikes(); markPend(it.id, on);
       api("/app/api/like", { id: it.id, on: on }).catch(function () {});
     };
     f.appendChild(s); lvio.observe(s);
