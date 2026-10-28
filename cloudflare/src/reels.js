@@ -349,7 +349,7 @@ function like(s, on) {
   if (!was && liked[id]) { LV.lk++; live(); haptic(); }
   s.querySelector(".lk").classList.toggle("on", !!liked[id]); s.querySelector(".lk span").textContent = liked[id] ? "Liked" : "Like";
   // profile on: the like is saved on the server; the first like of a video sends its thumbnail
-  if (PROFILE && was !== !!liked[id]) api("/app/api/like", { id: id, on: !!liked[id] }).then(function (d) { if (d.needThumb) grabThumb(s._v, id, 0); }).catch(function () {});
+  if (PROFILE && was !== !!liked[id]) api("/app/api/like", { id: id, on: !!liked[id] }).then(function (d) { if (d.needThumb) grabThumb(s._v, id, 0); setTimeout(prefetchLiked, d.needThumb ? 5000 : 500); }).catch(function () {});
 }
 
 // ================= profile: liked reels in a grid (Instagram-style) =================
@@ -432,20 +432,33 @@ function openProfile() {
   document.getElementById("pname").textContent = (u0 && [u0.first_name, u0.last_name].filter(Boolean).join(" ")) || "";
   document.getElementById("pav").textContent = myInit; addPhoto(document.getElementById("pav"));
   document.getElementById("prof").classList.add("open");
-  loadLiked();
+  if (PF) renderGrid(); // the list fetched ahead of time / last time: no waiting
+  loadLiked(!!PF);
 }
 function closeProfile() {
   document.getElementById("prof").classList.remove("open"); OV = false; syncBack();
   var s = current(); if (s && s._v && !s._up) start(s);
 }
-function loadLiked() {
+// quiet = a grid is already showing (cached): refresh it in the background, re-draw only if it changed
+var pfBusy = false;
+function loadLiked(quiet) {
   var g = document.getElementById("pgrid");
-  g.innerHTML = ""; for (var i = 0; i < 9; i++) { var sk = document.createElement("div"); sk.className = "tile sk"; g.appendChild(sk); }
+  if (!quiet) { g.innerHTML = ""; for (var i = 0; i < 9; i++) { var sk = document.createElement("div"); sk.className = "tile sk"; g.appendChild(sk); } }
+  if (pfBusy) return; pfBusy = true;
+  var was = PF ? sig(PF) : "";
   api("/app/api/liked").then(function (d) {
     if (!d.ok) throw 0;
-    PF = d; renderGrid();
-  }).catch(function () { g.innerHTML = '<div class="pempty" style="grid-column:1/-1"><b>Couldn&#39;t load</b>Check your internet and try again.</div>'; });
+    d._at = Date.now(); PF = d; savePF();
+    if (document.getElementById("prof").classList.contains("open") && (!quiet || sig(d) !== was)) renderGrid();
+  }).catch(function () { if (!quiet) g.innerHTML = '<div class="pempty" style="grid-column:1/-1"><b>Couldn&#39;t load</b>Check your internet and try again.</div>'; })
+    .then(function () { pfBusy = false; });
 }
+function sig(d) { return (d.premium ? "p" : "f") + d.items.map(function (x) { return x.id + (x.jpg || x.thumb ? "+" : ""); }).join(","); }
+// the last list is kept in the phone (thumbnails included) so the next opening is instant too
+function savePF() { try { localStorage.setItem("pf_cache", JSON.stringify({ me: me, d: PF })); } catch (e) {} }
+try { var pc = JSON.parse(localStorage.getItem("pf_cache") || "null"); if (pc && pc.me === me) PF = pc.d; } catch (e) {}
+// fetched ahead of time, once the first reel plays (the profile then opens instantly)
+function prefetchLiked() { if (PROFILE && !pfBusy) loadLiked(true); }
 var PLAY_S = '<svg class="pi" viewBox="0 0 24 24" fill="#fff"><path d="M7 4.5v15l13-7.5z"/></svg>';
 var LOCK_S = '<svg class="lo" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
 function renderGrid() {
@@ -466,9 +479,14 @@ function renderGrid() {
     t.innerHTML = '<img alt="">' + PLAY_S + (d.premium ? "" : LOCK_S);
     var img = t.querySelector("img"); it._img = img;
     img.onload = function () { img.classList.add("ok"); };
-    var src = thumbs[it.id] || it.thumb;
+    var src = thumbs[it.id] || (it.jpg ? "data:image/jpeg;base64," + it.jpg : it.thumb);
     if (src) img.src = src; else if (it.src) miss.push(it);
-    t.onclick = function () { haptic(); if (d.premium) openViewer(i); else showUp(); };
+    t.onclick = function () {
+      haptic();
+      // a cached list's video links last ~50 min: an older one is refreshed first (a second or so)
+      if (PF.premium && Date.now() - (PF._at || 0) > 40 * 60000) { toast("Loading…"); return loadLiked(true); }
+      if (PF.premium) openViewer(i); else showUp();
+    };
     g.appendChild(t);
   });
   if (d.premium && miss.length) fallback(miss);
@@ -509,7 +527,7 @@ function openViewer(i) {
   }
   lvItems.forEach(function (it, k) {
     var s = document.createElement("div"); s.className = "slide lvs"; s.dataset.k = k;
-    var th = thumbs[it.id] || it.thumb;
+    var th = thumbs[it.id] || (it.jpg ? "data:image/jpeg;base64," + it.jpg : it.thumb);
     s.innerHTML = (th ? '<img alt="">' : "") + '<div class="load"><div class="spin"></div></div><div class="tp">' + IC.play + '</div>' +
       '<div class="rail"><button class="act lk on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path class="o" d="' + HEART + '"/></svg><svg class="f" viewBox="0 0 24 24" fill="currentColor"><path d="' + HEART + '"/></svg><span>Liked</span></button></div>' +
       '<div class="bar"><i></i></div>';
@@ -734,7 +752,7 @@ function more() {
       var b = document.getElementById("badge"); b.hidden = false;
       b.textContent = d.unlimited ? "Unlimited" : (d.left + d.videos.length) + " free today";
       freeLeft = d.unlimited ? null : d.left;
-      if (d.profile && !PROFILE) { PROFILE = true; syncLikes(); }
+      if (d.profile && !PROFILE) { PROFILE = true; syncLikes(); setTimeout(prefetchLiked, 4000); }
       var firstBatch = !slides.length;
       d.videos.forEach(addVideo);
       if (firstBatch && slides.length) document.getElementById("hint").hidden = false;

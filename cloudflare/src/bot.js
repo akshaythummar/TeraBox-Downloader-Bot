@@ -2616,20 +2616,26 @@ Choose your preferred language:
         const r = await ldb.one('SELECT jpg FROM thumbs WHERE vid = ?', vid);
         return r ? new Uint8Array(r.jpg) : null;
       },
-      // the grid: newest likes first; Premium gets playable links, everyone else the plans (the lure)
+      // the grid: newest likes first; Premium gets playable links, everyone else the plans (the lure).
+      // Fast: the likes and the user's row are read at once, the first 60 thumbnails come inline (one
+      // response instead of 60 image requests), and "Premium?" is the row's state — no payment-worker call.
       async liked(uid) {
         if (!(await profileOn(uid))) return { ok: false };
         funnel('pf_open');
-        const rows = await ldb.all('SELECT vid, at FROM likes WHERE uid = ? ORDER BY at DESC LIMIT 300', int(uid));
-        const has = new Set();
-        for (let i = 0; i < rows.length; i += 90) {
-          const part = rows.slice(i, i + 90).map(r => r.vid);
-          for (const r of await ldb.all(`SELECT vid FROM thumbs WHERE vid IN (${part.map(() => '?').join(',')})`, ...part)) has.add(r.vid);
-        }
-        const ctx = await loadCtx(uid), premium = (await hasAccess(uid, ctx)) === true;
+        const [rows, ctx] = await Promise.all([ldb.all('SELECT vid, at FROM likes WHERE uid = ? ORDER BY at DESC LIMIT 300', int(uid)), loadCtx(uid)]);
+        const premium = !!(ctx.free || ctx.admin || ctx.premium || +ctx.state.sub_until > nowS());
+        const INLINE = 60, jpg = new Map(), has = new Set();
+        const inList = vids => vids.map(() => '?').join(',');
+        const first = rows.slice(0, INLINE).map(r => r.vid), rest = rows.slice(INLINE).map(r => r.vid);
+        const [, , wall] = await Promise.all([
+          first.length ? ldb.all(`SELECT vid, jpg FROM thumbs WHERE vid IN (${inList(first)})`, ...first).then(rs => rs.forEach(r => jpg.set(r.vid, r.jpg))) : null,
+          (async () => { for (let i = 0; i < rest.length; i += 90) { const part = rest.slice(i, i + 90); for (const r of await ldb.all(`SELECT vid FROM thumbs WHERE vid IN (${inList(part)})`, ...part)) has.add(r.vid); } })(),
+          premium ? null : wallPlans(uid, ctx, (await runtime()).DAILY_FREE_VIDEOS),
+        ]);
+        const b64 = a => { const u = new Uint8Array(a); let s = ''; for (let i = 0; i < u.length; i += 8192) s += String.fromCharCode.apply(null, u.subarray(i, i + 8192)); return btoa(s); };
         const exp = Math.floor(nowS()) + 50 * 60, q = DEFAULT_QUALITY;
         const items = await Promise.all(rows.map(async r => {
-          const it = { id: r.vid, thumb: has.has(r.vid) ? await thumbUrl(r.vid) : null };
+          const it = { id: r.vid, ...(jpg.has(r.vid) ? { jpg: b64(jpg.get(r.vid)) } : { thumb: has.has(r.vid) ? await thumbUrl(r.vid) : null }) };
           if (!premium) return it;
           const str = /^([\w-]+):(\d+)$/.exec(r.vid);
           it.src = str
@@ -2638,7 +2644,7 @@ Choose your preferred language:
           if (!str) it.d = await sign(env.WEBHOOK_SECRET, `dl:${uid}:${r.vid}`);
           return it;
         }));
-        return { ok: true, premium, items, wall: premium ? null : await wallPlans(uid, ctx, (await runtime()).DAILY_FREE_VIDEOS) };
+        return { ok: true, premium, items, wall };
       },
     };
     appSend = async (uid, id) => {
