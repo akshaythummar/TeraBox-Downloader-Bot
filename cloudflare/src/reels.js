@@ -382,7 +382,7 @@ var MARKS = [
   { el: ".dl", t: "⬇️ Download", p: "Tap to get this reel in your Telegram chat.", later: true, go: function (s) { download(s, s.querySelector(".dl")); } },
   { el: ".me", t: "👤 Your liked reels", p: "Your liked reel is saved here — tap your photo to see it.", go: function () { tourEnd(); openProfile(); } }
 ];
-function tourSeen() { try { return !!localStorage.getItem("tour_likes"); } catch (e) { return true; } }
+function tourSeen() { try { return !!localStorage.getItem("tour_steps"); } catch (e) { return true; } }
 // waits for the first reel to play and the login card to fade (max ~20 s), then a moment more
 function tourWait(n) {
   if (!TOUR || tourSeen() || n > 30) return;
@@ -428,7 +428,7 @@ function tourLay() {
   hd.setAttribute("style", "stroke-dasharray:none;stroke-width:2");
   svg.appendChild(hd);
 }
-function tourEnd() { tourS = null; tourI = -1; feed.style.overflowY = ""; document.body.classList.remove("touring"); removeEventListener("resize", tourRelay); var T = document.getElementById("tour"); T.classList.remove("on"); T.innerHTML = ""; try { localStorage.setItem("tour_likes", "1"); } catch (e) {} }
+function tourEnd() { tourS = null; tourI = -1; feed.style.overflowY = ""; document.body.classList.remove("touring"); removeEventListener("resize", tourRelay); var T = document.getElementById("tour"); T.classList.remove("on"); T.innerHTML = ""; try { localStorage.setItem("tour_steps", "1"); } catch (e) {} }
 document.getElementById("tour").onclick = function (e) {
   if (e.target.closest(".skip")) return tourEnd();
   if (e.target.closest(".later")) return tourStep();
