@@ -30,9 +30,9 @@ Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Nu
 - 2026-10-29: old 0.41 s avg start, 21 stalls per 100 videos (1,935 starts); new 0.49 s, 14 stalls per 100 (1,370). Stalls are the lag users feel; the new loading has a third fewer.
 - [ ] Give everyone the new loading and delete the old code path.
 
-## 2b. Likes + profile (Instagram-style) — built 2026-10-29, admins + APP_TESTERS only
+## 2b. Likes + profile (Instagram-style) — live for everyone since 2026-10-30
 
-Live for admins and testers (`PROFILE_PUBLIC` 0). Database `terabox-bot-likes` (binding `LIKES`, `likes_schema.sql`): `likes (uid, vid, at)` and `thumbs (vid, jpg)`. Code: `likesApi` in `src/bot.js`, routes `/app/api/like|thumb|liked` and `/app/thumb/<vid>` in `src/index.js`, the profile / grid / Premium sheet / viewer in `src/reels.js`.
+Live for everyone (`PROFILE_PUBLIC` 1, set 2026-10-30), with a step-by-step first-time tour (Like → Download → profile; once per phone, key `tour_steps`). Database `terabox-bot-likes` (binding `LIKES`, `likes_schema.sql`): `likes (uid, vid, at)` and `thumbs (vid, jpg)`. Code: `likesApi` in `src/bot.js`, routes `/app/api/like|thumb|liked` and `/app/thumb/<vid>` in `src/index.js`, the profile / grid / Premium sheet / viewer in `src/reels.js`.
 
 - Likes are saved on the server (1 write per like, unlike = delete); the phone's older local likes are uploaded once.
 - Profile button at the bottom of the rail → Instagram-style profile: @username, name, Liked count, plan, 3-column 9:16 grid.
@@ -40,7 +40,7 @@ Live for admins and testers (`PROFILE_PUBLIC` 0). Database `terabox-bot-likes` (
 - Tap a tile: Premium → the liked reels full screen (swipe through, unlike there); free → the Premium sheet with the plans and the user's offer, no video (decided: replaying liked reels is Premium-only).
 - Tested locally with a synthetic clip (3 s black, then colours) and mock Telegram / payment worker; no real video.
 - Limits: a separate D1 database (500 MB). Later, if likes near the 100k writes/day: move `likes` to Turso. No R2 (no payment details); when thumbnails fill 500 MB: another free D1 database. Not KV, Supabase or Telegram.
-- [ ] The owner tests it on the phone, then `/configset PROFILE_PUBLIC 1` opens it to everyone.
+- [x] Opened to everyone (`/configset PROFILE_PUBLIC 0` turns it off again).
 - [ ] /str: likes and the profile there too (the page is a copy of Reels; its videos are HLS, the viewer would need hls.js).
 - [ ] `/funnel`: show `pf_open` (profile opens) next to the app numbers.
 

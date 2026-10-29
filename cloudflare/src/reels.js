@@ -374,7 +374,7 @@ function like(s, on) {
 }
 
 // ================= first-time coach marks: one step at a time, the user does each action =================
-// once per phone; admins only for now (the feed's "tour"). Each step rings one button; a tap on it does
+// once per phone, for everyone with the profile (the feed's "tour"). Each step rings one button; a tap on it does
 // what the button does and moves on; a tap elsewhere only nudges the ring. "Skip tour" ends it.
 var TOUR = false, tourS = null, tourI = -1;
 var MARKS = [
