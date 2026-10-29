@@ -2646,6 +2646,24 @@ Choose your preferred language:
         }));
         return { ok: true, premium, items, wall };
       },
+      // Telegram file paths for up to 6 liked reels (the ones about to be played), signed into their
+      // links like the feed's — so they start at once instead of waiting for getFile when tapped.
+      // Premium only (it hands out playable links); Reels videos only (/str ones are HLS).
+      async paths(uid, b) {
+        const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(String))].filter(v => /^[0-9a-f]{32}$/.test(v)).slice(0, 6);
+        if (!ids.length || !(await profileOn(uid))) return { ok: false };
+        const ctx = await loadCtx(uid);
+        if (!(ctx.free || ctx.admin || ctx.premium || +ctx.state.sub_until > nowS())) return { ok: false };
+        const rows = await db.all(`SELECT md5, file_id FROM videos WHERE md5 IN (${ids.map(() => '?').join(',')}) AND file_id IS NOT NULL`, ...ids);
+        const cap = new Promise(r => setTimeout(r, 3500, null));
+        const got = await Promise.all(rows.map(r => Promise.race([api.call('getFile', { file_id: r.file_id }).then(g => (g.ok ? g.result.file_path : null), () => null), cap])));
+        const exp = Math.floor(nowS()) + 50 * 60, src = {};
+        await Promise.all(rows.map(async (r, i) => {
+          const p = got[i];
+          if (p) src[r.md5] = `/app/v/${r.md5}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${r.md5}:${exp}:${p}`)}`;
+        }));
+        return { ok: true, src };
+      },
     };
     appSend = async (uid, id) => {
       const fid = (await db.one('SELECT file_id FROM videos WHERE md5 = ?', id))?.file_id;

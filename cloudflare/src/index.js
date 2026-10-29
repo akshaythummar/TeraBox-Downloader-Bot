@@ -212,7 +212,7 @@ export default {
       return Response.json(res);
     }
     // likes + the profile grid (bot.likes(): its own D1 database)
-    if (['/app/api/like', '/app/api/thumb', '/app/api/liked'].includes(url.pathname) && req.method === 'POST') {
+    if (['/app/api/like', '/app/api/thumb', '/app/api/liked', '/app/api/paths'].includes(url.pathname) && req.method === 'POST') {
       const body = await req.json().catch(() => ({}));
       const uid = await webAppUser(body.initData, env.BOT_TOKEN);
       if (!uid) return Response.json({ ok: false }, { status: 401 });

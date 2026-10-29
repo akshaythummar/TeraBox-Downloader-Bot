@@ -601,6 +601,7 @@ function renderGrid() {
     g.appendChild(t);
   });
   if (d.premium && miss.length) fallback(miss);
+  if (d.premium) warmPaths(list.slice(0, 6));
 }
 // free users: the Premium sheet (the plans, the user's offer) — the lure
 function showUp() {
@@ -644,7 +645,7 @@ function lvAttach(v, k) {
   v._s = s; s._v = v; v._k = k;
   s.insertBefore(v, s.querySelector(".shade"));
   s.classList.remove("ready");
-  v.muted = true; v.src = lvItems[k].src;
+  usePath(lvItems[k]); v.muted = true; v.src = lvItems[k].src;
 }
 function openViewer(id) {
   var f = document.getElementById("lvf");
@@ -669,6 +670,19 @@ function openViewer(id) {
   f.children[k0].scrollIntoView();
   lvPlay(k0);
 }
+// the Telegram paths of a few liked reels, signed into their links (one request for up to 6). Kept for
+// 40 min (the links last 50) across list refreshes, so each reel is asked once. Returns a promise.
+var pathSrc = {}, pathAsked = {};
+function usePath(x) { var p = pathSrc[x.id]; if (p && Date.now() - p.at < 40 * 60000) { x.src = p.src; x.pw = 1; } return !!x.pw; }
+function warmPaths(items) {
+  var want = items.filter(function (x) { return x && x.src && !usePath(x) && !pathAsked[x.id] && /^[0-9a-f]{32}$/.test(x.id); });
+  if (!want.length) return Promise.resolve();
+  want.forEach(function (x) { pathAsked[x.id] = 1; });
+  return api("/app/api/paths", { ids: want.map(function (x) { return x.id; }) }).then(function (d) {
+    if (!d.ok) return;
+    want.forEach(function (x) { if (d.src[x.id]) { pathSrc[x.id] = { src: d.src[x.id], at: Date.now() }; usePath(x); } });
+  }).catch(function () {}).then(function () { want.forEach(function (x) { delete pathAsked[x.id]; }); });
+}
 function lvPlay(k) {
   if (k === LVI || !lvItems[k]) return;
   var prev = lvCur;
@@ -681,8 +695,13 @@ function lvPlay(k) {
   lvCur.classList.add("wait");
   if (LVV.currentTime > 0.5) LVV.currentTime = 0;
   start(lvCur);
-  // warm the next one
-  if (lvItems[k + 1]) { lvAttach(LVN, k + 1); var p = LVN.play(); if (p && p.catch) p.catch(function () {}); }
+  // the next ones' paths, then the second player warms the next reel
+  var nk = k + 1;
+  var near = lvItems.slice(k, k + 3).some(function (x) { return !usePath(x); });
+  (near ? warmPaths(lvItems.slice(k, k + 6)) : Promise.resolve()).then(function () {
+    if (LVI !== k || !lvItems[nk]) return;
+    lvAttach(LVN, nk); var p = LVN.play(); if (p && p.catch) p.catch(function () {});
+  });
 }
 function closeViewer() {
   [LVV, LVN].forEach(function (v) { if (!v) return; v.pause(); v.removeAttribute("src"); v.load(); if (v._s) v._s._v = null; v._s = null; v._k = -1; if (v.parentNode) v.parentNode.removeChild(v); });
