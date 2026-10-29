@@ -207,6 +207,7 @@ export default {
       if (!(await bot.appAllowed(uid))) return Response.json({ ok: false, error: 'soon' });
       const res = await bot.appFeed(uid);
       if (res.ok) res.profile = !!(await bot.likes()?.profileOn(uid)); // likes on the server + the profile grid
+      if (res.profile) res.tour = await bot.isAdmin(uid); // the first-time coach marks: admins only for now
       ctx.waitUntil(db.flush());
       return Response.json(res);
     }

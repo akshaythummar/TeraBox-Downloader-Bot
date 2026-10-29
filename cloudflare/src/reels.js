@@ -183,6 +183,17 @@ body.held .top,body.seeking .top{opacity:0}
 .lvs video{background:transparent}
 .lvx{position:absolute;left:6px;top:calc(var(--st) + 6px);z-index:3;filter:drop-shadow(0 1px 3px #000a)}
 .me i,.pav i{position:relative;overflow:hidden}
+/* first-time coach marks: labels with arrows to the buttons, the video still visible */
+#tour{position:fixed;inset:0;z-index:25;display:none;background:#00000094;animation:tin .3s ease}
+#tour.on{display:block}
+@keyframes tin{from{opacity:0}}
+#tour svg.ar{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+#tour svg.ar path{fill:none;stroke:#fff;stroke-width:1.6;stroke-linecap:round;stroke-dasharray:4 4}
+#tour .cmr{position:absolute;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 4px #ffffff22;pointer-events:none}
+#tour .cm{position:absolute;max-width:170px;text-shadow:0 1px 4px #000}
+#tour .cm b{display:flex;align-items:center;gap:6px;color:#ffb020;font-size:15px;font-weight:700;margin-bottom:2px}
+#tour .cm span{display:block;color:#fff;font-size:12.5px;line-height:1.35}
+#tour .ok{position:absolute;left:50%;bottom:calc(var(--sb) + 64px);transform:translateX(-50%);padding:10px 26px;border-radius:999px;border:0;background:#fff;color:#000;font-weight:700;font-size:14px;box-shadow:0 6px 20px #0008;cursor:pointer}
 .me i img,.pav i img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
 [hidden]{display:none!important}
 </style></head><body>
@@ -196,6 +207,7 @@ body.held .top,body.seeking .top{opacity:0}
   <div class="ring" id="ring"><svg viewBox="0 0 64 64"><circle class="c" cx="32" cy="32" r="28"/><circle class="s" cx="32" cy="32" r="28"/><path class="k" d="M20 33l8 8 17-18"/></svg></div>
   <div class="sub" id="lsub">Verifying your Telegram account…</div>
 </div></div>
+<div id="tour"></div>
 <div id="toast" hidden></div>
 <div id="prof">
   <div class="ph"><button class="ib" id="pback" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><b id="puser"></b></div>
@@ -351,6 +363,75 @@ function like(s, on) {
   if (PROFILE && was !== !!liked[id]) markPend(id, !!liked[id]);
   if (PROFILE && was !== !!liked[id]) api("/app/api/like", { id: id, on: !!liked[id] }).then(function (d) { if (d.needThumb) grabThumb(s._v, id, 0); setTimeout(prefetchLiked, d.needThumb ? 5000 : 500); }).catch(function () {});
 }
+
+// ================= first-time coach marks (once per phone; admins only for now: the feed's "tour") =================
+var TOUR = false;
+var MARKS = [
+  { el: ".lk", t: "❤️ Like", p: "Tap the heart or double-tap the video — it's saved for you" },
+  { el: ".dl", t: "⬇️ Download", p: "Get this reel in your Telegram chat" },
+  { el: ".me", t: "👤 Your liked reels", p: "Tap your photo to see them all and watch again" }
+];
+function tourSeen() { try { return !!localStorage.getItem("tour_likes"); } catch (e) { return true; } }
+// waits for the first reel to play and the login card to fade (max ~20 s), then a moment more
+function tourWait(n) {
+  if (!TOUR || tourSeen() || n > 30) return;
+  var s = current();
+  if (loginGone && s && s.classList.contains("ready") && s.querySelector(".me") && !OV) return setTimeout(function () { if (!OV && current() === s) tourStart(s); }, 1200);
+  setTimeout(function () { tourWait(n + 1); }, 700);
+}
+var tourS = null;
+function tourStart(s) {
+  if (tourSeen()) return;
+  tourS = s; feed.style.overflowY = "hidden"; s.scrollIntoView();
+  tourLay(); setTimeout(function () { if (tourS) tourLay(); }, 350);
+  addEventListener("resize", tourRelay);
+  haptic();
+}
+function tourRelay() { if (tourS) tourLay(); }
+function tourLay() {
+  var s = tourS;
+  var T = document.getElementById("tour"), W = innerWidth, H = innerHeight, NS = "http://www.w3.org/2000/svg";
+  T.innerHTML = ""; T.classList.add("on");
+  var svg = document.createElementNS(NS, "svg"); svg.setAttribute("class", "ar"); T.appendChild(svg);
+  MARKS.forEach(function (m) {
+    var el = s.querySelector(m.el); if (!el) return;
+    var ic = m.el === ".me" ? el : (el.querySelector("svg:not([style*='none'])") || el);
+    var r = ic.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2, rad = Math.max(r.width, r.height) / 2 + 8;
+    var ring = document.createElement("div"); ring.className = "cmr";
+    ring.style.cssText = "left:" + (cx - rad) + "px;top:" + (cy - rad) + "px;width:" + rad * 2 + "px;height:" + rad * 2 + "px";
+    if (m.el === ".me") ring.dataset.me = "1";
+    T.appendChild(ring);
+    // the label to the left of the button, a little higher; a curved dashed arrow from it to the ring
+    var c = document.createElement("div"); c.className = "cm";
+    c.innerHTML = "<b></b><span></span>"; c.querySelector("b").textContent = m.t; c.querySelector("span").textContent = m.p;
+    T.appendChild(c);
+    var right = cx - rad - 46, top = cy - 58;
+    c.style.right = (W - right) + "px"; c.style.top = Math.max(12, top) + "px";
+    var lb = c.getBoundingClientRect(), x1 = lb.right + 4, y1 = lb.top + 10, x2 = cx - rad - 4, y2 = cy;
+    var p = document.createElementNS(NS, "path");
+    p.setAttribute("d", "M" + x1 + " " + y1 + " Q " + (x2 - 6) + " " + y1 + " " + x2 + " " + (y2 - 2));
+    svg.appendChild(p);
+    var hd = document.createElementNS(NS, "path"); // arrow head
+    hd.setAttribute("d", "M" + (x2 - 6) + " " + (y2 - 9) + " L " + x2 + " " + (y2 - 2) + " L " + (x2 - 8) + " " + (y2 - 1));
+    hd.setAttribute("style", "stroke-dasharray:none;stroke-width:2");
+    svg.appendChild(hd);
+  });
+  // the gestures, in the middle
+  var g = document.createElement("div"); g.className = "cm";
+  g.innerHTML = "<b>👆 Gestures</b><span>Tap = pause · Double-tap = like · Swipe up = next reel</span>";
+  g.style.cssText = "left:24px;top:" + Math.round(H * 0.32) + "px;max-width:230px";
+  T.appendChild(g);
+  var ok = document.createElement("button"); ok.className = "ok"; ok.textContent = "Got it"; T.appendChild(ok);
+  ok.style.cssText = "left:24px;bottom:auto;transform:none;top:" + Math.round(H * 0.32 + 92) + "px";
+  document.getElementById("hint").hidden = true;
+}
+function tourEnd() { tourS = null; feed.style.overflowY = ""; removeEventListener("resize", tourRelay); var T = document.getElementById("tour"); T.classList.remove("on"); T.innerHTML = ""; try { localStorage.setItem("tour_likes", "1"); } catch (e) {} }
+// anywhere closes it; a tap on the profile ring opens the profile
+document.getElementById("tour").onclick = function (e) {
+  var me = document.querySelector('#tour .cmr[data-me]');
+  if (me) { var r = me.getBoundingClientRect(); if (e.clientX >= r.left - 10 && e.clientX <= r.right + 10 && e.clientY >= r.top - 10 && e.clientY <= r.bottom + 10) { tourEnd(); openProfile(); return; } }
+  tourEnd();
+};
 
 // ================= profile: liked reels in a grid (Instagram-style) =================
 var PROFILE = false, OV = false, PF = null, thumbs = {}, backBound = false;
@@ -801,6 +882,7 @@ function more() {
       b.textContent = d.unlimited ? "Unlimited" : (d.left + d.videos.length) + " free today";
       freeLeft = d.unlimited ? null : d.left;
       if (d.profile && !PROFILE) { PROFILE = true; syncLikes(); setTimeout(prefetchLiked, 4000); }
+      if (d.tour && !TOUR) { TOUR = true; tourWait(0); }
       var firstBatch = !slides.length;
       d.videos.forEach(addVideo);
       if (firstBatch && slides.length) document.getElementById("hint").hidden = false;

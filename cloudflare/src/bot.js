@@ -2988,5 +2988,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, likes: () => likesApi };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, likes: () => likesApi, isAdmin };
 }
