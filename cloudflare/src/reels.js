@@ -189,6 +189,15 @@ body.held .top,body.seeking .top{opacity:0}
 @keyframes tin{from{opacity:0}}
 #tour svg.ar{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
 #tour svg.ar path{fill:none;stroke:#fff;stroke-width:1.6;stroke-linecap:round;stroke-dasharray:4 4}
+#tour .cmr:after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2px solid #fff;animation:tring 1.4s ease-out infinite}
+@keyframes tring{0%{transform:scale(.92);opacity:.9}100%{transform:scale(1.45);opacity:0}}
+#tour .cmr.nudge{animation:nud .4s}
+@keyframes nud{25%{transform:scale(1.15)}50%{transform:scale(.95)}75%{transform:scale(1.08)}}
+body.touring .top{opacity:0}
+#tour .bar2{position:absolute;left:16px;right:16px;top:calc(var(--st) + 14px);display:flex;align-items:center;justify-content:space-between}
+#tour .bar2 i{font-style:normal;font-weight:700;font-size:13px;color:#fff;padding:5px 11px;border-radius:999px;background:#ffffff26}
+#tour .bar2 button{border:0;background:none;color:#ddd;font-weight:600;font-size:14px;padding:6px 2px;cursor:pointer}
+#tour .cm .later{display:inline-block;margin-top:8px;border:0;border-radius:999px;background:#ffffff2e;color:#fff;font-weight:600;font-size:12.5px;padding:6px 12px;cursor:pointer}
 #tour .cmr{position:absolute;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 4px #ffffff22;pointer-events:none}
 #tour .cm{position:absolute;max-width:170px;text-shadow:0 1px 4px #000}
 #tour .cm b{display:flex;align-items:center;gap:6px;color:#ffb020;font-size:15px;font-weight:700;margin-bottom:2px}
@@ -364,12 +373,14 @@ function like(s, on) {
   if (PROFILE && was !== !!liked[id]) api("/app/api/like", { id: id, on: !!liked[id] }).then(function (d) { if (d.needThumb) grabThumb(s._v, id, 0); setTimeout(prefetchLiked, d.needThumb ? 5000 : 500); }).catch(function () {});
 }
 
-// ================= first-time coach marks (once per phone; admins only for now: the feed's "tour") =================
-var TOUR = false;
+// ================= first-time coach marks: one step at a time, the user does each action =================
+// once per phone; admins only for now (the feed's "tour"). Each step rings one button; a tap on it does
+// what the button does and moves on; a tap elsewhere only nudges the ring. "Skip tour" ends it.
+var TOUR = false, tourS = null, tourI = -1;
 var MARKS = [
-  { el: ".lk", t: "❤️ Like", p: "Tap the heart or double-tap the video — it's saved for you" },
-  { el: ".dl", t: "⬇️ Download", p: "Get this reel in your Telegram chat" },
-  { el: ".me", t: "👤 Your liked reels", p: "Tap your photo to see them all and watch again" }
+  { el: ".lk", t: "❤️ Like this reel", p: "Tap the heart (or double-tap the video). Every reel you like is saved for you.", go: function (s) { like(s, true); } },
+  { el: ".dl", t: "⬇️ Download", p: "Tap to get this reel in your Telegram chat.", later: true, go: function (s) { download(s, s.querySelector(".dl")); } },
+  { el: ".me", t: "👤 Your liked reels", p: "Your liked reel is saved here — tap your photo to see it.", go: function () { tourEnd(); openProfile(); } }
 ];
 function tourSeen() { try { return !!localStorage.getItem("tour_likes"); } catch (e) { return true; } }
 // waits for the first reel to play and the login card to fade (max ~20 s), then a moment more
@@ -379,58 +390,57 @@ function tourWait(n) {
   if (loginGone && s && s.classList.contains("ready") && s.querySelector(".me") && !OV) return setTimeout(function () { if (!OV && current() === s) tourStart(s); }, 1200);
   setTimeout(function () { tourWait(n + 1); }, 700);
 }
-var tourS = null;
 function tourStart(s) {
   if (tourSeen()) return;
-  tourS = s; feed.style.overflowY = "hidden"; s.scrollIntoView();
+  tourS = s; tourI = 0; feed.style.overflowY = "hidden"; s.scrollIntoView(); document.body.classList.add("touring");
+  document.getElementById("hint").hidden = true;
   tourLay(); setTimeout(function () { if (tourS) tourLay(); }, 350);
   addEventListener("resize", tourRelay);
   haptic();
 }
 function tourRelay() { if (tourS) tourLay(); }
+function tourStep() { if (++tourI >= MARKS.length) return tourEnd(); tourLay(); haptic(); }
 function tourLay() {
-  var s = tourS;
-  var T = document.getElementById("tour"), W = innerWidth, H = innerHeight, NS = "http://www.w3.org/2000/svg";
-  T.innerHTML = ""; T.classList.add("on");
+  var s = tourS, m = MARKS[tourI], el = s && m && s.querySelector(m.el);
+  if (!el) return tourStep();
+  var T = document.getElementById("tour"), W = innerWidth, NS = "http://www.w3.org/2000/svg";
+  document.getElementById("toast").hidden = true; // e.g. "Sent to your chat" from the step before
+  T.innerHTML = '<div class="bar2"><i>' + (tourI + 1) + " / " + MARKS.length + '</i><button class="skip">Skip tour</button></div>';
+  T.classList.add("on");
   var svg = document.createElementNS(NS, "svg"); svg.setAttribute("class", "ar"); T.appendChild(svg);
-  MARKS.forEach(function (m) {
-    var el = s.querySelector(m.el); if (!el) return;
-    var ic = m.el === ".me" ? el : (el.querySelector("svg:not([style*='none'])") || el);
-    var r = ic.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2, rad = Math.max(r.width, r.height) / 2 + 8;
-    var ring = document.createElement("div"); ring.className = "cmr";
-    ring.style.cssText = "left:" + (cx - rad) + "px;top:" + (cy - rad) + "px;width:" + rad * 2 + "px;height:" + rad * 2 + "px";
-    if (m.el === ".me") ring.dataset.me = "1";
-    T.appendChild(ring);
-    // the label to the left of the button, a little higher; a curved dashed arrow from it to the ring
-    var c = document.createElement("div"); c.className = "cm";
-    c.innerHTML = "<b></b><span></span>"; c.querySelector("b").textContent = m.t; c.querySelector("span").textContent = m.p;
-    T.appendChild(c);
-    var right = cx - rad - 46, top = cy - 58;
-    c.style.right = (W - right) + "px"; c.style.top = Math.max(12, top) + "px";
-    var lb = c.getBoundingClientRect(), x1 = lb.right + 4, y1 = lb.top + 10, x2 = cx - rad - 4, y2 = cy;
-    var p = document.createElementNS(NS, "path");
-    p.setAttribute("d", "M" + x1 + " " + y1 + " Q " + (x2 - 6) + " " + y1 + " " + x2 + " " + (y2 - 2));
-    svg.appendChild(p);
-    var hd = document.createElementNS(NS, "path"); // arrow head
-    hd.setAttribute("d", "M" + (x2 - 6) + " " + (y2 - 9) + " L " + x2 + " " + (y2 - 2) + " L " + (x2 - 8) + " " + (y2 - 1));
-    hd.setAttribute("style", "stroke-dasharray:none;stroke-width:2");
-    svg.appendChild(hd);
-  });
-  // the gestures, in the middle
-  var g = document.createElement("div"); g.className = "cm";
-  g.innerHTML = "<b>👆 Gestures</b><span>Tap = pause · Double-tap = like · Swipe up = next reel</span>";
-  g.style.cssText = "left:24px;top:" + Math.round(H * 0.32) + "px;max-width:230px";
-  T.appendChild(g);
-  var ok = document.createElement("button"); ok.className = "ok"; ok.textContent = "Got it"; T.appendChild(ok);
-  ok.style.cssText = "left:24px;bottom:auto;transform:none;top:" + Math.round(H * 0.32 + 92) + "px";
-  document.getElementById("hint").hidden = true;
+  var ic = m.el === ".me" ? el : (el.querySelector("svg:not([style*='none'])") || el);
+  var r = ic.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2, rad = Math.max(r.width, r.height) / 2 + 8;
+  var ring = document.createElement("div"); ring.className = "cmr";
+  ring.style.cssText = "left:" + (cx - rad) + "px;top:" + (cy - rad) + "px;width:" + rad * 2 + "px;height:" + rad * 2 + "px";
+  T.appendChild(ring);
+  // the label to the left of the button, a little higher; a curved dashed arrow from it to the ring
+  var c = document.createElement("div"); c.className = "cm";
+  c.innerHTML = "<b></b><span></span>" + (m.later ? '<button class="later">Skip this</button>' : "");
+  c.querySelector("b").textContent = m.t; c.querySelector("span").textContent = m.p;
+  T.appendChild(c);
+  c.style.right = (W - (cx - rad - 46)) + "px"; c.style.top = Math.max(60, cy - 58) + "px";
+  var lb = c.getBoundingClientRect(), x1 = lb.right + 4, y1 = lb.top + 10, x2 = cx - rad - 4, y2 = cy;
+  var p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M" + x1 + " " + y1 + " Q " + (x2 - 6) + " " + y1 + " " + x2 + " " + (y2 - 2));
+  svg.appendChild(p);
+  var hd = document.createElementNS(NS, "path"); // arrow head
+  hd.setAttribute("d", "M" + (x2 - 6) + " " + (y2 - 9) + " L " + x2 + " " + (y2 - 2) + " L " + (x2 - 8) + " " + (y2 - 1));
+  hd.setAttribute("style", "stroke-dasharray:none;stroke-width:2");
+  svg.appendChild(hd);
 }
-function tourEnd() { tourS = null; feed.style.overflowY = ""; removeEventListener("resize", tourRelay); var T = document.getElementById("tour"); T.classList.remove("on"); T.innerHTML = ""; try { localStorage.setItem("tour_likes", "1"); } catch (e) {} }
-// anywhere closes it; a tap on the profile ring opens the profile
+function tourEnd() { tourS = null; tourI = -1; feed.style.overflowY = ""; document.body.classList.remove("touring"); removeEventListener("resize", tourRelay); var T = document.getElementById("tour"); T.classList.remove("on"); T.innerHTML = ""; try { localStorage.setItem("tour_likes", "1"); } catch (e) {} }
 document.getElementById("tour").onclick = function (e) {
-  var me = document.querySelector('#tour .cmr[data-me]');
-  if (me) { var r = me.getBoundingClientRect(); if (e.clientX >= r.left - 10 && e.clientX <= r.right + 10 && e.clientY >= r.top - 10 && e.clientY <= r.bottom + 10) { tourEnd(); openProfile(); return; } }
-  tourEnd();
+  if (e.target.closest(".skip")) return tourEnd();
+  if (e.target.closest(".later")) return tourStep();
+  var ring = document.querySelector("#tour .cmr"), m = MARKS[tourI];
+  if (!ring || !m) return tourEnd();
+  var r = ring.getBoundingClientRect();
+  if (e.clientX >= r.left - 12 && e.clientX <= r.right + 12 && e.clientY >= r.top - 12 && e.clientY <= r.bottom + 12) {
+    var s = tourS; m.go(s);
+    if (tourS) setTimeout(tourStep, 450); // let the heart / spinner show first
+    return;
+  }
+  ring.classList.remove("nudge"); void ring.offsetWidth; ring.classList.add("nudge");
 };
 
 // ================= profile: liked reels in a grid (Instagram-style) =================
