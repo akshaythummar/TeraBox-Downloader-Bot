@@ -5,7 +5,9 @@
 // Settings (Worker → Settings → Variables and Secrets):
 //   SECRET  (required, Secret) any long random text — signs the chunk links this worker writes, so
 //           nobody can use it as an open proxy for other sites
-//   COOKIE  (optional, Secret) a TeraBox cookie ("ndus=…") if TeraBox starts asking for one
+//   COOKIE  (required for full videos, Secret) TeraBox ndus cookie(s): "ndus=Abc…" or just "Abc…";
+//           several comma-separated = one picked at random per request. Without it TeraBox plays
+//           only a ~30 s preview.
 
 // playlists are fetched only from TeraBox's own sites (chunk links are checked by signature instead)
 const HOSTS = ['1024tera.com', 'terabox.com', 'teraboxapp.com', 'freeterabox.com', '4funbox.com', 'mirrobox.com', 'nephobox.com', 'momerybox.com', 'tibibox.com', 'teraboxlink.com', 'terasharelink.com'];
@@ -19,7 +21,8 @@ async function sig(secret, text) {
   return [...b.slice(0, 12)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 const teraHost = u => { try { const h = new URL(u).hostname; return HOSTS.some(d => h === d || h.endsWith('.' + d)); } catch { return false; } };
-const upstream = (env, extra = {}) => ({ 'user-agent': UA, referer: 'https://www.1024tera.com/', ...(env.COOKIE ? { cookie: env.COOKIE } : {}), ...extra });
+const cookie = env => { const c = String(env.COOKIE || '').split(',').map(x => x.trim()).filter(Boolean); if (!c.length) return {}; const v = c[Math.floor(Math.random() * c.length)]; return { cookie: v.includes('=') ? v : `ndus=${v}` }; };
+const upstream = (env, extra = {}) => ({ 'user-agent': UA, referer: 'https://www.terabox.com/', ...cookie(env), ...extra });
 const fail = (status, text) => new Response(text, { status, headers: CORS });
 
 // a link this worker writes: playlists again through ?hls=, everything else through ?seg=
@@ -28,8 +31,14 @@ async function link(env, origin, u) {
 }
 
 async function playlist(env, origin, src) {
-  const r = await fetch(src, { headers: upstream(env), signal: AbortSignal.timeout(15000) });
-  const text = await r.text();
+  // TeraBox sometimes answers {"errno":400141} ("needs verify"): wait 1 s and ask again (≤5 times)
+  let r, text;
+  for (let i = 0; i < 5; i++) {
+    r = await fetch(src, { headers: upstream(env), signal: AbortSignal.timeout(15000) });
+    text = await r.text();
+    if (!text.includes('400141') || text.startsWith('#EXTM3U')) break;
+    await new Promise(ok => setTimeout(ok, 1000));
+  }
   if (!r.ok || !text.startsWith('#EXTM3U')) return fail(502, 'TeraBox: ' + r.status);
   const base = r.url || src; // after redirects
   const out = [];
