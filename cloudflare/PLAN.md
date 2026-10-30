@@ -11,6 +11,8 @@ What's decided but not done yet, roughly in order. Update this file when somethi
 
 ## 1. /str stream test (TeraBox HLS instead of Telegram files)
 
+**2026-10-31 03:30: `REELS_HLS 2` — every user's /reels plays the HLS streams.** Undo: `/configset REELS_HLS 0`. Watch: payments in `/funnel` vs 30 Oct, the 3 proxy accounts' requests (100k/day each), videos suddenly 0:30 = cookie dead.
+
 Live for admins: `/str` (since 2026-10-31 the Reels page itself, `src/reels.js` with `STR` — same UI, no Download), table `streams` (code, fid, name, fails), feed of every link whose stream post went out.
 
 - [ ] Compare with Reels for 2–3 days: live-log "⚡ Start: … · 🧪 stream test" vs the Reels lines (start time, stalls).
