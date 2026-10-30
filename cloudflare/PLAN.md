@@ -17,6 +17,7 @@ Live for admins: `/str`, `src/str.js`, table `streams` (code, fid, name, fails),
 - [ ] Quality: now fixed at 480p (`DEFAULT_QUALITY`, `M3U8_AUTO_480`). Options: 720p (better picture, ~2x data), or pick by the phone's connection (360/480 on slow, 720 on good). Don't use 1080p.
 - [ ] `/strreset` (admin): set `fails` back to 0 — needed if the TeraBox cookie expires and every video collects 3 fails.
 - [ ] Decide before opening /str to users: the `streams` table holds users' own files. Showing them to other users is a privacy and report/ban risk.
+- [x] 2026-10-31: admins' `/reels` now play the /str streams (HLS) — `REELS_HLS` 1 (admins only; `/configset REELS_HLS 0` = back to Telegram videos). No Download / server likes there (stream ids). Live log says "🧪 stream test".
 - [ ] If it wins: merge into `src/reels.js` (one page, not two copies).
 
 - Request cost (2026-10-29): per video 1 request on our worker (the /m3u8 playlist; a TeraBox resolve + 1 D1 write when the 30-min link cache is cold), but **every HLS segment is a request on the HLS proxy worker** (HLS_PROXY, a separate Cloudflare account) — ~20–40+ per video watched, plus a few for the warmed next one. Watch Online uses the same proxy, so /str and Watch Online share that account's 100k/day (~4,000 videos/day at ~25 segments each). Before opening /str to users: several proxy accounts (spread the load) or a paid proxy plan.
