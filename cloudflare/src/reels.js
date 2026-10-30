@@ -268,13 +268,33 @@ function toast(t) { var el = document.getElementById("toast"); el.textContent = 
 // loading). Start / stall numbers are still reported (g = "b"): st = started, ms = total wait,
 // stall = stopped to load after starting, skip = swiped away before it started
 var AB = "b";
+// HLS: admins' speed test (REELS_HLS) — the feed gives /str streams (/m3u8), played with hls.js,
+// which is fetched only then. Their ids aren't Telegram videos: no Download, likes stay on the phone.
+var HLS = false, hlsJs = 0;
+function hlsLoad(v, src) {
+  if (hlsJs < 2) {
+    if (!hlsJs) { hlsJs = 1; var sc = document.createElement("script"); sc.src = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"; sc.onload = sc.onerror = function () { hlsJs = 2; POOL.forEach(function (x) { if (x._s && !x._h && !x.getAttribute("src")) { hlsLoad(x, x._s.dataset.src); if (x._s === current()) start(x._s); } }); }; document.head.appendChild(sc); }
+    return;
+  }
+  if (window.Hls && Hls.isSupported()) {
+    var h = v._h = new Hls({ fragLoadPolicy: { default: { maxTimeToFirstByteMs: 30000, maxLoadTimeMs: 60000, timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 }, errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 } } }, maxBufferLength: 30, startFragPrefetch: true });
+    h.loadSource(src); h.attachMedia(v);
+    h.on(Hls.Events.ERROR, function (_, d) {
+      if (!d.fatal || v._h !== h) return;
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR && d.details !== "manifestLoadError") return h.startLoad();
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return h.recoverMediaError();
+      if (v._s) bad(v._s, false);
+    });
+  } else v.src = src;
+}
+var hlsMax = -1;
 var LV = { fail: 0, n: 0, dl: 0, lk: 0, wall: 0, buy: 0, st: 0, ms: 0, stall: 0, skip: 0, sent: { st: 0, ms: 0, stall: 0, skip: 0 }, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
 function live(end) {
   if (!okAt) return;
   clearTimeout(LV.tm);
   var wait = 8000 - (Date.now() - LV.at);
   if (LV.busy || (!end && wait > 0)) { LV.tm = setTimeout(function () { live(end); }, LV.busy ? 700 : wait); return; }
-  var body = { mode: MODE, fail: LV.fail, initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0, g: AB, st: LV.st, ms: LV.ms, stall: LV.stall, skip: LV.skip };
+  var body = { mode: MODE, fail: LV.fail, initData: INIT, mid: LV.mid, sig: LV.sig, n: LV.n, dl: LV.dl, lk: LV.lk, wall: LV.wall, buy: LV.buy, plan: freeLeft == null ? "paid" : "free", end: end ? 1 : 0, g: HLS ? "s" : AB, st: LV.st, ms: LV.ms, stall: LV.stall, skip: LV.skip };
   var key = JSON.stringify([body.fail, body.n, body.dl, body.lk, body.wall, body.buy, body.end, body.st, body.stall, body.skip]);
   if (key === LV.key) return;
   body.secs = Math.round((Date.now() - LV.t0) / 1000);
@@ -754,12 +774,13 @@ function attach(s, i) {
   POOL.forEach(function (v) { var j = v._s ? slides.indexOf(v._s) : -1, d = !v._s ? 1e9 : j < i || j > i + 2 ? Math.abs(j - i) : -1; if (d > far) { far = d; pick = v; } });
   if (!pick) return null;
   detach(pick);
-  pick._s = s; s._v = pick; pick.muted = true; pick.src = s.dataset.src;
+  pick._s = s; s._v = pick; pick.muted = true; if (HLS) hlsLoad(pick, s.dataset.src); else pick.src = s.dataset.src;
   s.insertBefore(pick, s.querySelector(".shade"));
   return pick;
 }
 function detach(v) {
   var s = v._s; if (!s) return;
+  if (v._h) { v._h.destroy(); v._h = null; }
   v.pause(); v.removeAttribute("src"); v.load();
   clearTimeout(s._w); s._v = null; s._warm = false; s.classList.remove("ready", "wait", "tap"); v._s = null;
   if (v.parentNode) v.parentNode.removeChild(v);
@@ -780,6 +801,7 @@ function addVideo(v) {
   var s = document.createElement("div"); s.className = "slide"; s.dataset.id = v.id; s.dataset.src = v.src; s.dataset.d = v.d || "";
   s.innerHTML = slideHTML(freeLeft != null, PROFILE);
   wireSlide(s);
+  if (HLS) s.querySelector(".dl").style.display = "none";
   if (liked[v.id]) like(s, true);
   var pr = s.querySelector(".prem"); if (pr) pr.onclick = function (e) { e.stopPropagation(); haptic("medium"); openPlans(); };
   var mb = s.querySelector(".me"); if (mb) { addPhoto(mb.querySelector("i")); mb.onclick = function (e) { e.stopPropagation(); openProfile(); }; }
@@ -847,7 +869,7 @@ function bad(s, report) {
   if (s.classList.contains("bad")) return;
   s.classList.add("bad"); LV.fail++; live();
   if (s._v) detach(s._v);
-  if (report) try { fetch("/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
+  if (report || HLS) try { fetch(HLS ? "/str/api/bad" : "/app/api/bad", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, id: s.dataset.id }) }); } catch (e) {}
   if (current() === s) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 900);
 }
 function current() { if (lvCur) return lvCur; var y = feed.scrollTop + feed.clientHeight / 2, c = null; slides.forEach(function (s) { if (s.offsetTop <= y && s.offsetTop + s.offsetHeight > y) c = s; }); return c; }
@@ -880,6 +902,7 @@ var io = new IntersectionObserver(function (es) {
       clearTimeout(s._go);
       s._go = setTimeout(function () { if (current() !== s) return; prepare(i); if (!s._v) return; if (s._v.currentTime > 0.5) s._v.currentTime = 0; start(s); }, s._v && s._v.readyState >= 2 ? 0 : 250);
       if (s.classList.contains("bad")) setTimeout(function () { var n = s.nextElementSibling; if (n && current() === s) n.scrollIntoView({ behavior: "smooth" }); }, 600);
+      if (HLS && i > hlsMax) { hlsMax = i; try { localStorage.setItem("reels_after", s.dataset.id); } catch (e) {} }
       if (i > 0) document.getElementById("hint").hidden = true;
       // free users: the badge counts down, so the paywall after the last one is no surprise
       if (freeLeft != null) { var fl = slides.length - 1 - i + freeLeft; document.getElementById("badge").textContent = fl + " free left today"; if (!fl && !s._last) { s._last = true; toast("Last free reel for today"); } }
@@ -900,12 +923,15 @@ setInterval(function () {
 }, 500);
 document.addEventListener("visibilitychange", function () { var s = current(); if (!s || !s._v) return; if (document.hidden) s._v.pause(); else if (!s._up && !OV) start(s); });
 
+// HLS: go on where the user stopped (the server ignores it for the normal feed)
+function hlsAfter() { if (HLS && slides.length) return slides[slides.length - 1].dataset.id; try { return localStorage.getItem("reels_after") || ""; } catch (e) { return ""; } }
 function more() {
   if (loading || ended) return; loading = true;
   if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
-  fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT }) })
+  fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, after: hlsAfter() }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
+      if (d.hls && !HLS) { HLS = true; hlsLoad(); }
       if (!d.ok) { ended = true; return d.error === "soon" ? loginFail("Coming soon", "Reels open for everyone soon.") : loginFail("Login failed", "Close and open the app again."); }
       if (!okAt) { loginOk(); live(); }
       var b = document.getElementById("badge"); b.hidden = false;

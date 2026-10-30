@@ -201,10 +201,13 @@ export default {
       return Response.json(res);
     }
     if (url.pathname === '/app/api/feed' && req.method === 'POST') {
-      const uid = await webAppUser((await req.json().catch(() => ({}))).initData, env.BOT_TOKEN);
+      const body = await req.json().catch(() => ({}));
+      const uid = await webAppUser(body.initData, env.BOT_TOKEN);
       if (!uid) return Response.json({ ok: false, error: 'login' }, { status: 401 });
       const bot = createBot(env, makeApi(env.BOT_TOKEN, env.TG_API), db, url.origin);
       if (!(await bot.appAllowed(uid))) return Response.json({ ok: false, error: 'soon' });
+      // admins (REELS_HLS 1): the /str streams instead — the speed test; no likes / profile (other ids)
+      if (await bot.reelsHls(uid)) return Response.json({ ...(await bot.strFeed(uid, body.after)), hls: true });
       const res = await bot.appFeed(uid);
       if (res.ok) res.profile = !!(await bot.likes()?.profileOn(uid)); // likes on the server + the profile grid
       // the first-time tour: admins only again (2026-10-31) — it held the feed until the user tapped,

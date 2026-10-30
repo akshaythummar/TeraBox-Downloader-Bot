@@ -383,6 +383,7 @@ export function createBot(env, api, db, origin) {
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
       APP_LOG_CHAT: csv(o.APP_LOG_CHAT ?? env.APP_LOG_CHAT), // where the Videos App's live session log goes (default the owner; 0 = off)
       PROFILE_PUBLIC: int(o.PROFILE_PUBLIC ?? env.PROFILE_PUBLIC ?? 0), // 1 = likes on the server + the profile grid for everyone (else admins + APP_TESTERS)
+      REELS_HLS: int(o.REELS_HLS ?? env.REELS_HLS ?? 1), // 1 = admins' /reels play the /str streams (HLS) instead of the Telegram videos — a speed test
       APP_TESTERS: csv(o.APP_TESTERS ?? env.APP_TESTERS), // user IDs who get the app before it's public — as normal users (free limit, paywall)
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
@@ -1134,6 +1135,7 @@ Choose your preferred language:
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_TESTERS: { section: 'Limits', kind: 'csv' },
     PROFILE_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
+    REELS_HLS: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_LOG_CHAT: { section: 'Limits', kind: 'csv' },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
@@ -3006,5 +3008,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, likes: () => likesApi, isAdmin };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, reelsHls: async uid => (await runtime()).REELS_HLS === 1 && (await isAdmin(uid)), likes: () => likesApi, isAdmin };
 }
