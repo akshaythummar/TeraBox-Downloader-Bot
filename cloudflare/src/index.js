@@ -7,7 +7,6 @@ import { createBot, sign, teraboxCfg, resolveCached, streamUrl } from './bot.js'
 import { panelApi, botToken, setupWebhook } from './panel.js';
 import { REELS_HTML } from './reels.js';
 import { playerHtml } from './player.js';
-import { STR_HTML } from './str.js';
 
 function params(url) {
   const g = k => url.searchParams.get(k) || '';
@@ -157,8 +156,8 @@ export default {
     }
     if (url.pathname === '/watch') return watch(env, url);
     if (url.pathname === '/reels' || url.pathname === '/app') return appPage(env); // /app: buttons sent before the rename
-    // 🧪 /str: the stream test (admins; its own page and feed, the /m3u8 stream)
-    if (url.pathname === '/str') return new Response(STR_HTML.replace('__BOT__', (await botUsername(env)) || ''), { headers: { 'content-type': 'text/html;charset=utf-8', 'cache-control': 'no-store' } });
+    // 🧪 /str: the stream test (admins) — the Reels page on its own feed, the /m3u8 stream
+    if (url.pathname === '/str') return appPage(env);
     if (url.pathname === '/str/api/feed' && req.method === 'POST') {
       const body = await req.json().catch(() => ({}));
       const uid = await webAppUser(body.initData, env.BOT_TOKEN);

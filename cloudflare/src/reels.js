@@ -1,5 +1,5 @@
 // The Videos Mini App, Instagram-Reels style: served at /reels (and /app, its old name) by index.js,
-// with __BOT__ replaced. APIs: /app/api/feed, /app/v/*, /app/api/send, /app/api/bad, /app/api/live.
+// with __BOT__ replaced; /str too (the stream test, see STR). APIs: /app/api/feed, /app/v/*, /app/api/send, /app/api/bad, /app/api/live.
 // No backticks or dollar-brace inside (String.raw template).
 export const REELS_HTML = String.raw`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Reels</title>
@@ -234,7 +234,9 @@ body.touring .top{opacity:0}
 </div></div>
 <div id="hint" class="hint" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>Swipe up</div>
 <script>
-var BOT = "__BOT__", MODE = "feed";
+// /str (admins' stream test): this same page on the /str feed — every video an HLS stream
+var STR = location.pathname === "/str";
+var BOT = "__BOT__", MODE = STR ? "str" : "feed";
 if (window.Telegram && Telegram.WebApp && !tg) tgReady();
 // Telegram puts the signed login data in the URL hash: read it there so the feed starts at once
 var INIT = (tg && tg.initData) || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
@@ -270,7 +272,7 @@ function toast(t) { var el = document.getElementById("toast"); el.textContent = 
 var AB = "b";
 // HLS: admins' speed test (REELS_HLS) — the feed gives /str streams (/m3u8), played with hls.js,
 // which is fetched only then. Their ids aren't Telegram videos: no Download, likes stay on the phone.
-var HLS = false, hlsJs = 0;
+var HLS = STR, hlsJs = 0;
 function hlsLoad(v, src) {
   if (hlsJs < 2) {
     if (!hlsJs) { hlsJs = 1; var sc = document.createElement("script"); sc.src = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"; sc.onload = sc.onerror = function () { hlsJs = 2; POOL.forEach(function (x) { if (x._s && !x._h && !x.getAttribute("src")) { hlsLoad(x, x._s.dataset.src); if (x._s === current()) start(x._s); } }); }; document.head.appendChild(sc); }
@@ -928,11 +930,12 @@ function hlsAfter() { if (HLS && slides.length) return slides[slides.length - 1]
 function more() {
   if (loading || ended) return; loading = true;
   if (!INIT) { loginFail("Open from Telegram", "Open this app with the button in the bot."); ended = true; return; }
-  fetch("/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, after: hlsAfter() }) })
+  if (STR) hlsLoad(); // hls.js on its way while the feed loads
+  fetch(STR ? "/str/api/feed" : "/app/api/feed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData: INIT, after: hlsAfter() }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (d.hls && !HLS) { HLS = true; hlsLoad(); }
-      if (!d.ok) { ended = true; return d.error === "soon" ? loginFail("Coming soon", "Reels open for everyone soon.") : loginFail("Login failed", "Close and open the app again."); }
+      if (!d.ok) { ended = true; return d.error === "soon" || d.error === "admin" ? loginFail("Coming soon", "Reels open for everyone soon.") : loginFail("Login failed", "Close and open the app again."); }
       if (!okAt) { loginOk(); live(); }
       var b = document.getElementById("badge"); b.hidden = false;
       b.textContent = d.unlimited ? "Unlimited" : (d.left + d.videos.length) + " free today";

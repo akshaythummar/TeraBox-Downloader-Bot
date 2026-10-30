@@ -11,7 +11,7 @@ What's decided but not done yet, roughly in order. Update this file when somethi
 
 ## 1. /str stream test (TeraBox HLS instead of Telegram files)
 
-Live for admins: `/str`, `src/str.js`, table `streams` (code, fid, name, fails), feed of every link whose stream post went out.
+Live for admins: `/str` (since 2026-10-31 the Reels page itself, `src/reels.js` with `STR` — same UI, no Download), table `streams` (code, fid, name, fails), feed of every link whose stream post went out.
 
 - [ ] Compare with Reels for 2–3 days: live-log "⚡ Start: … · 🧪 stream test" vs the Reels lines (start time, stalls).
 - [ ] Quality: now fixed at 480p (`DEFAULT_QUALITY`, `M3U8_AUTO_480`). Options: 720p (better picture, ~2x data), or pick by the phone's connection (360/480 on slow, 720 on good). Don't use 1080p.
