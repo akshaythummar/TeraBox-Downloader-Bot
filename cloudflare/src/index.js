@@ -207,7 +207,9 @@ export default {
       if (!(await bot.appAllowed(uid))) return Response.json({ ok: false, error: 'soon' });
       const res = await bot.appFeed(uid);
       if (res.ok) res.profile = !!(await bot.likes()?.profileOn(uid)); // likes on the server + the profile grid
-      res.tour = res.profile; // the first-time tour (once per phone) for everyone with the profile
+      // the first-time tour: admins only again (2026-10-31) — it held the feed until the user tapped,
+      // and on the day it went to everyone fewer users reached the paywall
+      if (res.profile) res.tour = await bot.isAdmin(uid);
       ctx.waitUntil(db.flush());
       return Response.json(res);
     }
