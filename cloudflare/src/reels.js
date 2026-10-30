@@ -276,10 +276,17 @@ function toast(t) { var el = document.getElementById("toast"); el.textContent = 
 var AB = "b";
 // HLS: admins' speed test (REELS_HLS) — the feed gives /str streams (/m3u8), played with hls.js,
 // which is fetched only then. Their ids aren't Telegram videos: no Download, likes stay on the phone.
-var HLS = STR, hlsJs = 0;
+var HLS = STR, hlsJs = 0, hlsWait = [];
+// any player (feed, liked-reels viewer, thumbnails): a stream (/m3u8) through hls.js, else the file
+function setSrc(v, src) {
+  if (v._h) { v._h.destroy(); v._h = null; }
+  v._want = src;
+  if (src.indexOf("/m3u8") === 0) hlsLoad(v, src); else v.src = src;
+}
 function hlsLoad(v, src) {
   if (hlsJs < 2) {
-    if (!hlsJs) { hlsJs = 1; var sc = document.createElement("script"); sc.src = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"; sc.onload = sc.onerror = function () { hlsJs = 2; POOL.forEach(function (x) { if (x._s && !x._h && !x.getAttribute("src")) { hlsLoad(x, x._s.dataset.src); if (x._s === current()) start(x._s); } }); }; document.head.appendChild(sc); }
+    if (v) hlsWait.push(v);
+    if (!hlsJs) { hlsJs = 1; var sc = document.createElement("script"); sc.src = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"; sc.onload = sc.onerror = function () { hlsJs = 2; hlsWait.forEach(function (x) { if (x._want && x._want.indexOf("/m3u8") === 0 && !x._h) { hlsLoad(x, x._want); if (x._s && x._s === current()) start(x._s); } }); hlsWait = []; }; document.head.appendChild(sc); }
     return;
   }
   if (window.Hls && Hls.isSupported()) {
@@ -524,6 +531,7 @@ function fallback(list) {
     var t = setTimeout(function () { fin(null); }, 15000);
     function fin(u) {
       if (done) return; done = true; clearTimeout(t);
+      if (v._h) { v._h.destroy(); v._h = null; } v._want = null;
       v.removeAttribute("src"); v.load();
       if (u) { thumbs[it.id] = u; if (it._img) { it._img.src = u; } api("/app/api/thumb", { id: it.id, jpg: u.split(",")[1] }).catch(function () {}); }
       next();
@@ -531,7 +539,7 @@ function fallback(list) {
     v.addEventListener("loadedmetadata", function () { var d = v.duration; pts = d && isFinite(d) ? (d < 10 ? [Math.min(2, d / 2)] : [d * 0.3, d * 0.5, d * 0.15]) : [2]; v.currentTime = pts[0]; });
     v.addEventListener("seeked", function () { setTimeout(function () { var u = frame(v); if (u) return fin(u); k++; if (k < pts.length) v.currentTime = pts[k]; else fin(null); }, 150); });
     v.addEventListener("error", function () { fin(null); });
-    v.src = it.src;
+    setSrc(v, it.src);
   })();
 }
 // the Telegram back button closes the top layer (viewer → sheet → profile)
@@ -672,7 +680,7 @@ function lvAttach(v, k) {
   v._s = s; s._v = v; v._k = k;
   s.insertBefore(v, s.querySelector(".shade"));
   s.classList.remove("ready");
-  usePath(lvItems[k]); v.muted = true; v.src = lvItems[k].src;
+  usePath(lvItems[k]); v.muted = true; setSrc(v, lvItems[k].src);
 }
 function openViewer(id) {
   var f = document.getElementById("lvf");
@@ -731,7 +739,7 @@ function lvPlay(k) {
   });
 }
 function closeViewer() {
-  [LVV, LVN].forEach(function (v) { if (!v) return; v.pause(); v.removeAttribute("src"); v.load(); if (v._s) v._s._v = null; v._s = null; v._k = -1; if (v.parentNode) v.parentNode.removeChild(v); });
+  [LVV, LVN].forEach(function (v) { if (!v) return; if (v._h) { v._h.destroy(); v._h = null; } v._want = null; v.pause(); v.removeAttribute("src"); v.load(); if (v._s) v._s._v = null; v._s = null; v._k = -1; if (v.parentNode) v.parentNode.removeChild(v); });
   LVI = -1; lvCur = null;
   document.getElementById("lv").classList.remove("open"); document.getElementById("lvf").innerHTML = ""; syncBack();
   loadLiked(true); // unliked ones leave the grid
@@ -780,14 +788,14 @@ function attach(s, i) {
   POOL.forEach(function (v) { var j = v._s ? slides.indexOf(v._s) : -1, d = !v._s ? 1e9 : j < i || j > i + 2 ? Math.abs(j - i) : -1; if (d > far) { far = d; pick = v; } });
   if (!pick) return null;
   detach(pick);
-  pick._s = s; s._v = pick; pick.muted = true; if (HLS) hlsLoad(pick, s.dataset.src); else pick.src = s.dataset.src;
+  pick._s = s; s._v = pick; pick.muted = true; setSrc(pick, s.dataset.src);
   s.insertBefore(pick, s.querySelector(".shade"));
   return pick;
 }
 function detach(v) {
   var s = v._s; if (!s) return;
   if (v._h) { v._h.destroy(); v._h = null; }
-  v.pause(); v.removeAttribute("src"); v.load();
+  v._want = null; v.pause(); v.removeAttribute("src"); v.load();
   clearTimeout(s._w); s._v = null; s._warm = false; s.classList.remove("ready", "wait", "tap"); v._s = null;
   if (v.parentNode) v.parentNode.removeChild(v);
 }
@@ -940,6 +948,8 @@ function more() {
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (d.hls && !HLS) { HLS = true; hlsLoad(); document.documentElement.classList.add("str"); }
+      // streams have no Download: the tour skips that step
+      if (HLS) MARKS = MARKS.filter(function (m) { return m.el !== ".dl"; });
       if (!d.ok) { ended = true; return d.error === "soon" || d.error === "admin" ? loginFail("Coming soon", "Reels open for everyone soon.") : loginFail("Login failed", "Close and open the app again."); }
       if (!okAt) { loginOk(); live(); }
       var b = document.getElementById("badge"); b.hidden = false;

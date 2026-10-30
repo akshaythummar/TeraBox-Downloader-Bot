@@ -383,7 +383,7 @@ export function createBot(env, api, db, origin) {
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
       APP_LOG_CHAT: csv(o.APP_LOG_CHAT ?? env.APP_LOG_CHAT), // where the Videos App's live session log goes (default the owner; 0 = off)
       PROFILE_PUBLIC: int(o.PROFILE_PUBLIC ?? env.PROFILE_PUBLIC ?? 0), // 1 = likes on the server + the profile grid for everyone (else admins + APP_TESTERS)
-      REELS_HLS: int(o.REELS_HLS ?? env.REELS_HLS ?? 1), // 1 = admins' /reels play the /str streams (HLS) instead of the Telegram videos — a speed test
+      REELS_HLS: int(o.REELS_HLS ?? env.REELS_HLS ?? 1), // /reels plays the /str streams (HLS) instead of the Telegram videos: 0 = nobody, 1 = admins, 2 = everyone
       APP_TESTERS: csv(o.APP_TESTERS ?? env.APP_TESTERS), // user IDs who get the app before it's public — as normal users (free limit, paywall)
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
       FORCE_GROUPS: csv(o.FORCE_GROUPS ?? env.FORCE_GROUPS),
@@ -1135,7 +1135,7 @@ Choose your preferred language:
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_TESTERS: { section: 'Limits', kind: 'csv' },
     PROFILE_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
-    REELS_HLS: { section: 'Limits', kind: 'int', min: 0, max: 1 },
+    REELS_HLS: { section: 'Limits', kind: 'int', min: 0, max: 2 },
     APP_LOG_CHAT: { section: 'Limits', kind: 'csv' },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
     FORCE_GROUPS: { section: 'Force Join', kind: 'csv' },
@@ -2526,7 +2526,7 @@ Choose your preferred language:
       if (rows.length < n) rows = rows.concat(await db.all(`SELECT md5, file_id FROM videos WHERE ${ok} ORDER BY md5 LIMIT ?`, n - rows.length));
       return [...new Map(rows.map(r => [r.md5, r])).values()];
     }
-    appFeed = async uid => {
+    appFeed = async (uid, hls) => {
       const ctx = await loadCtx(uid), access = await hasAccess(uid, ctx), daily = (await runtime()).DAILY_FREE_VIDEOS;
       let n = 10, left = null, save = {};
       if (access !== true) {
@@ -2541,15 +2541,21 @@ Choose your preferred language:
       // its path waits for that when played. All are asked at once, for at most 3.5 s: the ready ones
       // go first with the path signed into the link; the rest follow (Telegram keeps preparing them,
       // so by the time they're played the lookup is quick).
-      const picked = n ? await pickVideos(n) : [];
-      const cap = new Promise(r => setTimeout(r, 3500, null));
-      const paths = await Promise.all(picked.map(v => Promise.race([api.call('getFile', { file_id: v.file_id }).then(g => (g.ok ? g.result.file_path : null), () => null), cap])));
-      const ok = picked.map((v, i) => [v.md5, paths[i]]).sort((a, b) => !a[1] - !b[1]);
-      const ids = ok.map(([id]) => id);
-      if (ids.length && save.trial_n != null) await setState(uid, { ...save, trial_n: save.trial_n - n + ids.length });
-      if (ids.length) funnel('app_videos', ids.length);
-      const exp = Math.floor(nowS()) + 50 * 60; // Telegram keeps a file path valid ≥1h; the app asks for more as you swipe
-      const videos = await Promise.all(ok.map(async ([id, p]) => ({ id, d: await sign(env.WEBHOOK_SECRET, `dl:${uid}:${id}`), src: p ? `/app/v/${id}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}:${p}`)}` : `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
+      let videos;
+      if (hls) {
+        // REELS_HLS: the /str streams (no Download: they aren't Telegram videos), from the phone's cursor
+        const rows = n ? await strRows(hls.after, n) : [];
+        videos = await Promise.all(rows.map(async (r, i) => ({ id: `${r.code}:${r.fid}`, src: await strSrc(r.code, r.fid, i), d: '' })));
+      } else {
+        const picked = n ? await pickVideos(n) : [];
+        const cap = new Promise(r => setTimeout(r, 3500, null));
+        const paths = await Promise.all(picked.map(v => Promise.race([api.call('getFile', { file_id: v.file_id }).then(g => (g.ok ? g.result.file_path : null), () => null), cap])));
+        const ok = picked.map((v, i) => [v.md5, paths[i]]).sort((a, b) => !a[1] - !b[1]);
+        const exp = Math.floor(nowS()) + 50 * 60; // Telegram keeps a file path valid ≥1h; the app asks for more as you swipe
+        videos = await Promise.all(ok.map(async ([id, p]) => ({ id, d: await sign(env.WEBHOOK_SECRET, `dl:${uid}:${id}`), src: p ? `/app/v/${id}?e=${exp}&p=${encodeURIComponent(p)}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}:${p}`)}` : `/app/v/${id}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${id}:${exp}`)}` })));
+      }
+      if (videos.length && save.trial_n != null) await setState(uid, { ...save, trial_n: save.trial_n - n + videos.length });
+      if (videos.length) funnel('app_videos', videos.length);
       // the paywall (shown after the last free video): the plans as on the bot's menu, and when the
       // daily free videos come back (midnight in TZ)
       let wall = null;
@@ -2635,13 +2641,13 @@ Choose your preferred language:
           premium ? null : wallPlans(uid, ctx, (await runtime()).DAILY_FREE_VIDEOS),
         ]);
         const b64 = a => { const u = new Uint8Array(a); let s = ''; for (let i = 0; i < u.length; i += 8192) s += String.fromCharCode.apply(null, u.subarray(i, i + 8192)); return btoa(s); };
-        const exp = Math.floor(nowS()) + 50 * 60, q = DEFAULT_QUALITY;
-        const items = await Promise.all(rows.map(async r => {
+        const exp = Math.floor(nowS()) + 50 * 60;
+        const items = await Promise.all(rows.map(async (r, i) => {
           const it = { id: r.vid, ...(jpg.has(r.vid) ? { jpg: b64(jpg.get(r.vid)) } : { thumb: has.has(r.vid) ? await thumbUrl(r.vid) : null }) };
           if (!premium) return it;
           const str = /^([\w-]+):(\d+)$/.exec(r.vid);
           it.src = str
-            ? `/m3u8?s=${str[1]}&f=${str[2]}&q=${q}&t=${await sign(env.WEBHOOK_SECRET, `${str[1]}:${str[2]}:${q}`)}`
+            ? await strSrc(str[1], str[2], i)
             : `/app/v/${r.vid}?e=${exp}&t=${await sign(env.WEBHOOK_SECRET, `app:${r.vid}:${exp}`)}`;
           if (!str) it.d = await sign(env.WEBHOOK_SECRET, `dl:${uid}:${r.vid}`);
           return it;
@@ -2981,26 +2987,35 @@ Choose your preferred language:
   // after = "code:fid" the phone last watched: the next 10 after it in (code, fid) order, so reopening
   // the app goes on where the user stopped and nothing repeats until the whole list has been seen.
   // No after (first time): a random point. Either way ~10 rows read, no writes.
-  const strFeed = async (uid, after) => {
-    if (!(await strAllowed(uid))) return { ok: false, error: 'admin' };
+  const strRows = async (after, n) => {
     const a = /^([\w-]+):(\d+)$/.exec(String(after || ''));
     let rows = a
-      ? await db.all('SELECT code, fid, name FROM streams WHERE (code > ? OR (code = ? AND fid > ?)) AND fails < 3 ORDER BY code, fid LIMIT 10', a[1], a[1], a[2])
-      : await db.all('SELECT code, fid, name FROM streams WHERE code >= ? AND fails < 3 ORDER BY code, fid LIMIT 10', '1' + STR_CHARS[Math.floor(Math.random() * STR_CHARS.length)]);
+      ? await db.all('SELECT code, fid, name FROM streams WHERE (code > ? OR (code = ? AND fid > ?)) AND fails < 3 ORDER BY code, fid LIMIT ?', a[1], a[1], a[2], n)
+      : await db.all('SELECT code, fid, name FROM streams WHERE code >= ? AND fails < 3 ORDER BY code, fid LIMIT ?', '1' + STR_CHARS[Math.floor(Math.random() * STR_CHARS.length)], n);
     // the end of the list: wrap to the start
-    if (rows.length < 10) rows = rows.concat(await db.all('SELECT code, fid, name FROM streams WHERE fails < 3 ORDER BY code, fid LIMIT ?', 10 - rows.length));
-    rows = [...new Map(rows.map(r => [`${r.code}:${r.fid}`, r])).values()];
-    if (!rows.length) return { ok: false, error: 'empty' };
+    if (rows.length < n) rows = rows.concat(await db.all('SELECT code, fid, name FROM streams WHERE fails < 3 ORDER BY code, fid LIMIT ?', n - rows.length));
+    return [...new Map(rows.map(r => [`${r.code}:${r.fid}`, r])).values()];
+  };
+  // a stream's link, through one of our own proxies (HLS_PROXIES, one per account): i picks it, so the
+  // videos take turns and the load is shared. Links (Watch Online) stay on HLS_PROXY.
+  const PX = String(env.HLS_PROXIES || '').split(',').filter(Boolean).length;
+  const strSrc = async (code, fid, i) => {
     const q = DEFAULT_QUALITY;
-    // our own proxies (HLS_PROXIES, one per account): the videos take turns, so the load is shared
-    const px = String(env.HLS_PROXIES || '').split(',').filter(Boolean).length;
-    const videos = await Promise.all(rows.map(async (r, i) => ({ id: `${r.code}:${r.fid}`, name: r.name || '', src: `/m3u8?s=${r.code}&f=${r.fid}&q=${q}${px ? `&p=${(i % px) + 1}` : ''}&t=${await sign(env.WEBHOOK_SECRET, `${r.code}:${r.fid}:${q}`)}`, d: '' })));
+    return `/m3u8?s=${code}&f=${fid}&q=${q}${PX ? `&p=${(i % PX) + 1}` : ''}&t=${await sign(env.WEBHOOK_SECRET, `${code}:${fid}:${q}`)}`;
+  };
+  const strFeed = async (uid, after) => {
+    if (!(await strAllowed(uid))) return { ok: false, error: 'admin' };
+    const rows = await strRows(after, 10);
+    if (!rows.length) return { ok: false, error: 'empty' };
+    const videos = await Promise.all(rows.map(async (r, i) => ({ id: `${r.code}:${r.fid}`, name: r.name || '', src: await strSrc(r.code, r.fid, i), d: '' })));
     return { ok: true, unlimited: true, left: null, videos };
   };
+  // REELS_HLS: does this user's /reels play the streams?
+  const reelsHls = async uid => { const m = (await runtime()).REELS_HLS; return m === 2 || (m === 1 && (await isAdmin(uid))); };
   // a video that didn't play in /str: one more fail (3 = left out of the feed)
   const strBad = async (uid, id) => {
     const m = /^([\w-]+):(\d+)$/.exec(String(id || ''));
-    if (!m || !(await strAllowed(uid))) return { ok: false };
+    if (!m || !((await strAllowed(uid)) || (await reelsHls(uid)))) return { ok: false };
     await db.run('UPDATE streams SET fails = fails + 1 WHERE code = ? AND fid = ?', m[1], m[2]);
     return { ok: true };
   };
@@ -3010,5 +3025,5 @@ Choose your preferred language:
     const rt = await runtime();
     return rt.VIDEOS_APP_PUBLIC === 1 || rt.APP_TESTERS.includes(String(uid));
   };
-  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: uid => (appFeed ? appFeed(uid) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, reelsHls: async uid => (await runtime()).REELS_HLS === 1 && (await isAdmin(uid)), likes: () => likesApi, isAdmin };
+  return { onMessage, onCallback, onChatMember, cron, bootCard, appAllowed, appFeed: (uid, hls) => (appFeed ? appFeed(uid, hls) : { ok: false, error: 'off' }), appSend: (uid, id) => (appSend ? appSend(uid, id) : { ok: false }), appLive, strFeed, strBad, reelsHls, likes: () => likesApi, isAdmin };
 }

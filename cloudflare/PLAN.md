@@ -18,6 +18,7 @@ Live for admins: `/str` (since 2026-10-31 the Reels page itself, `src/reels.js` 
 - [ ] `/strreset` (admin): set `fails` back to 0 — needed if the TeraBox cookie expires and every video collects 3 fails.
 - [ ] Decide before opening /str to users: the `streams` table holds users' own files. Showing them to other users is a privacy and report/ban risk.
 - [x] 2026-10-31: admins' `/reels` now play the /str streams (HLS) — `REELS_HLS` 1 (admins only; `/configset REELS_HLS 0` = back to Telegram videos). No Download / server likes there (stream ids). Live log says "🧪 stream test".
+- [x] 2026-10-31: HLS Reels have the same free count / paywall / likes / profile as the Telegram ones (no Download). Streams go over our own proxies `HLS_PROXIES` (3 accounts, videos take turns); links / Watch Online stay on `HLS_PROXY`. Switch: `/configset REELS_HLS 0` (Telegram videos for all) · `1` (admins on HLS) · `2` (everyone on HLS).
 - [ ] If it wins: merge into `src/reels.js` (one page, not two copies).
 
 - Request cost (2026-10-29): per video 1 request on our worker (the /m3u8 playlist; a TeraBox resolve + 1 D1 write when the 30-min link cache is cold), but **every HLS segment is a request on the HLS proxy worker** (HLS_PROXY, a separate Cloudflare account) — ~20–40+ per video watched, plus a few for the warmed next one. Watch Online uses the same proxy, so /str and Watch Online share that account's 100k/day (~4,000 videos/day at ~25 segments each). Before opening /str to users: several proxy accounts (spread the load) or a paid proxy plan.
