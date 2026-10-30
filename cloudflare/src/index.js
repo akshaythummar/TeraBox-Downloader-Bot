@@ -24,8 +24,8 @@ async function m3u8(env, db, url) {
   if (own) cfg = { ...cfg, proxy: own.trim().replace(/\/$/, '') };
   // Serve the playlist from this origin: the HLS proxy sends no CORS header, so a
   // redirect to it is blocked by the browser. Segment URLs stay as the proxy wrote them.
-  const playlist = async d => {
-    const src = streamUrl(cfg, d, p.f, p.q);
+  const playlist = async (d, q = p.q) => {
+    const src = streamUrl(cfg, d, p.f, q);
     try {
       const r = await fetch(src, { signal: AbortSignal.timeout(20000) });
       const body = await r.text();
@@ -40,6 +40,8 @@ async function m3u8(env, db, url) {
     d = await resolveCached(env, db, p.s, true);
     abs = d && (await playlist(d));
   }
+  // a video without this quality (REELS_QUALITY 720 / 1080 on a small upload): the 480p one
+  if (!abs && d && p.q !== 'M3U8_AUTO_480') abs = await playlist(d, 'M3U8_AUTO_480');
   if (!d) return new Response('Link expired or TeraBox unavailable', { status: 502 });
   if (!abs) return new Response('HLS proxy error', { status: 502 });
   return new Response(abs, { headers: { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' } });

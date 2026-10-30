@@ -383,6 +383,7 @@ export function createBot(env, api, db, origin) {
       VIDEOS_APP_PUBLIC: int(o.VIDEOS_APP_PUBLIC ?? env.VIDEOS_APP_PUBLIC ?? 0), // 0 = the Videos Mini App is for admins only
       APP_LOG_CHAT: csv(o.APP_LOG_CHAT ?? env.APP_LOG_CHAT), // where the Videos App's live session log goes (default the owner; 0 = off)
       PROFILE_PUBLIC: int(o.PROFILE_PUBLIC ?? env.PROFILE_PUBLIC ?? 0), // 1 = likes on the server + the profile grid for everyone (else admins + APP_TESTERS)
+      REELS_QUALITY: [360, 480, 720, 1080].includes(int(o.REELS_QUALITY)) ? int(o.REELS_QUALITY) : 480, // HLS Reels / /str picture (links stay 480)
       REELS_HLS: int(o.REELS_HLS ?? env.REELS_HLS ?? 1), // /reels plays the /str streams (HLS) instead of the Telegram videos: 0 = nobody, 1 = admins, 2 = everyone
       APP_TESTERS: csv(o.APP_TESTERS ?? env.APP_TESTERS), // user IDs who get the app before it's public — as normal users (free limit, paywall)
       FORCE_CHANNELS: csv(o.FORCE_CHANNELS ?? env.FORCE_CHANNELS),
@@ -1135,6 +1136,7 @@ Choose your preferred language:
     VIDEOS_APP_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
     APP_TESTERS: { section: 'Limits', kind: 'csv' },
     PROFILE_PUBLIC: { section: 'Limits', kind: 'int', min: 0, max: 1 },
+    REELS_QUALITY: { section: 'Limits', kind: 'int', min: 360, max: 1080 },
     REELS_HLS: { section: 'Limits', kind: 'int', min: 0, max: 2 },
     APP_LOG_CHAT: { section: 'Limits', kind: 'csv' },
     FORCE_CHANNELS: { section: 'Force Join', kind: 'csv' },
@@ -3000,7 +3002,7 @@ Choose your preferred language:
   // videos take turns and the load is shared. Links (Watch Online) stay on HLS_PROXY.
   const PX = String(env.HLS_PROXIES || '').split(',').filter(Boolean).length;
   const strSrc = async (code, fid, i) => {
-    const q = DEFAULT_QUALITY;
+    const q = `M3U8_AUTO_${(await runtime()).REELS_QUALITY}`;
     return `/m3u8?s=${code}&f=${fid}&q=${q}${PX ? `&p=${(i % PX) + 1}` : ''}&t=${await sign(env.WEBHOOK_SECRET, `${code}:${fid}:${q}`)}`;
   };
   const strFeed = async (uid, after) => {
