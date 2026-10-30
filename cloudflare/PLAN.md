@@ -15,11 +15,12 @@ Live for admins: `/str` (since 2026-10-31 the Reels page itself, `src/reels.js` 
 
 - [ ] Compare with Reels for 2–3 days: live-log "⚡ Start: … · 🧪 stream test" vs the Reels lines (start time, stalls).
 - [ ] Quality: now fixed at 480p (`DEFAULT_QUALITY`, `M3U8_AUTO_480`). Options: 720p (better picture, ~2x data), or pick by the phone's connection (360/480 on slow, 720 on good). Don't use 1080p.
+- [ ] Our proxies (`hls-proxy/worker.js`, 3 accounts) work since 2026-10-31 with the old proxy's ndus cookie (hardcoded in the pasted copy only, NOT in git — a logged-out request gets a ~30 s preview).
 - [ ] `/strreset` (admin): set `fails` back to 0 — needed if the TeraBox cookie expires and every video collects 3 fails.
 - [ ] Decide before opening /str to users: the `streams` table holds users' own files. Showing them to other users is a privacy and report/ban risk.
 - [x] 2026-10-31: admins' `/reels` now play the /str streams (HLS) — `REELS_HLS` 1 (admins only; `/configset REELS_HLS 0` = back to Telegram videos). No Download / server likes there (stream ids). Live log says "🧪 stream test".
 - [x] 2026-10-31: HLS Reels have the same free count / paywall / likes / profile as the Telegram ones (no Download). Streams go over our own proxies `HLS_PROXIES` (3 accounts, videos take turns); links / Watch Online stay on `HLS_PROXY`. Switch: `/configset REELS_HLS 0` (Telegram videos for all) · `1` (admins on HLS) · `2` (everyone on HLS).
-- [ ] If it wins: merge into `src/reels.js` (one page, not two copies).
+- [x] If it wins: merge into `src/reels.js` (one page, not two copies).
 
 - Request cost (2026-10-29): per video 1 request on our worker (the /m3u8 playlist; a TeraBox resolve + 1 D1 write when the 30-min link cache is cold), but **every HLS segment is a request on the HLS proxy worker** (HLS_PROXY, a separate Cloudflare account) — ~20–40+ per video watched, plus a few for the warmed next one. Watch Online uses the same proxy, so /str and Watch Online share that account's 100k/day (~4,000 videos/day at ~25 segments each). Before opening /str to users: several proxy accounts (spread the load) or a paid proxy plan.
 - [ ] Count /str's loading numbers too (counters `rl_*_s`; now only in the live log) to compare stalls with Reels.
@@ -42,7 +43,7 @@ Live for everyone (`PROFILE_PUBLIC` 1, set 2026-10-30), with a step-by-step firs
 - [x] Opened to everyone (`/configset PROFILE_PUBLIC 0` turns it off again).
 - [ ] Tour back to admins only (2026-10-31): on 30 Oct, its first full day for everyone, paywall views halved (272 → 136) and payments fell (18 → 10, none 00:00–10:00). Check 31 Oct / 1 Nov: paywall views 250+ again → the tour was the cause. If it comes back: never hold the feed, Hinglish text, no Download step.
 - [ ] Orders → paid fell 37% → 21% on 30 Oct (48 orders, 10 paid): watch the profile Premium sheet and the ₹19 first-time offer (12 orders, 3 paid); unfinished-payment reminder (section 4).
-- [ ] /str: likes and the profile there too (the page is a copy of Reels; its videos are HLS, the viewer would need hls.js).
+- [x] /str: likes and the profile there too (the page is a copy of Reels; its videos are HLS, the viewer would need hls.js).
 - [ ] `/funnel`: show `pf_open` (profile opens) next to the app numbers.
 
 ## 3. Payment worker security (paytm-payment-worker/index.js) — important
