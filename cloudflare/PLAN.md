@@ -41,6 +41,8 @@ Live for everyone (`PROFILE_PUBLIC` 1, set 2026-10-30), with a step-by-step firs
 - Tested locally with a synthetic clip (3 s black, then colours) and mock Telegram / payment worker; no real video.
 - Limits: a separate D1 database (500 MB). Later, if likes near the 100k writes/day: move `likes` to Turso. No R2 (no payment details); when thumbnails fill 500 MB: another free D1 database. Not KV, Supabase or Telegram.
 - [x] Opened to everyone (`/configset PROFILE_PUBLIC 0` turns it off again).
+- [ ] Tour back to admins only (2026-10-31): on 30 Oct, its first full day for everyone, paywall views halved (272 → 136) and payments fell (18 → 10, none 00:00–10:00). Check 31 Oct / 1 Nov: paywall views 250+ again → the tour was the cause. If it comes back: never hold the feed, Hinglish text, no Download step.
+- [ ] Orders → paid fell 37% → 21% on 30 Oct (48 orders, 10 paid): watch the profile Premium sheet and the ₹19 first-time offer (12 orders, 3 paid); unfinished-payment reminder (section 4).
 - [ ] /str: likes and the profile there too (the page is a copy of Reels; its videos are HLS, the viewer would need hls.js).
 - [ ] `/funnel`: show `pf_open` (profile opens) next to the app numbers.
 
