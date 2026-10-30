@@ -8,7 +8,7 @@ compatibility_flags = ["global_fetch_strictly_public"]
 [vars]
 PUBLIC_URL = "https://terabox-stream-bot.stockish.workers.dev"   # this worker's URL (the panel sets the webhook to <PUBLIC_URL>/webhook)
 HLS_PROXY = "https://amzon.ktnetwork002.workers.dev"   # TERABOX_HLS_PROXY_WORKER
-HLS_PROXIES = "https://player.terabox-55b.workers.dev,https://jollybest.dragonfruit-65b.workers.dev"   # our own proxies (hls-proxy/worker.js, one per account, comma-separated): /str only for now, videos take turns (p=1, 2, …)
+HLS_PROXIES = "https://player.terabox-55b.workers.dev,https://jollybest.dragonfruit-65b.workers.dev,https://bugfinder.raginisanghavi.workers.dev"   # our own proxies (hls-proxy/worker.js, one per account, comma-separated): /str + HLS /reels; links (Watch Online) stay on HLS_PROXY, videos take turns (p=1, 2, …)
 OWNER_ID = "618879443"
 ADMINS = "618879443"              # comma-separated
 FORCE_CHANNELS = "@AT_BOTZ"       # comma-separated; bot must be admin there
