@@ -1677,7 +1677,13 @@ Choose your preferred language:
     const store = Array.isArray(v) ? v.join(',') : String(v);
     await setOverride(key, store);
     await logAudit('CONFIGSET', m.uid, `${key}=${store}`);
-    await m.reply(`Updated \`${key}\` = **${store}** (live, no restart).`);
+    // what a few switches mean, so the admin sees who got what
+    const MEAN = {
+      REELS_HLS: { 0: '🎬 Reels: Telegram videos for **everyone** (the old Reels, with Download)', 1: '🎬 Reels: HLS streams for **admins only**, users keep the Telegram videos', 2: '🎬 Reels: HLS streams for **everyone** (no Download). Undo: /configset REELS_HLS 0' },
+      REELS_QUALITY: { 360: '📺 HLS Reels play in **360p**', 480: '📺 HLS Reels play in **480p**', 720: '📺 HLS Reels play in **720p** (480p where a video has no 720p)', 1080: '📺 HLS Reels play in **1080p** (heavy)' },
+    };
+    const mean = MEAN[key]?.[store];
+    await m.reply(`Updated \`${key}\` = **${store}** (live, no restart).${mean ? `\n${mean}` : ''}`);
   }, ADMIN);
   on(/^\/configreset(?:\s+(\S+))?$/, async (m, g) => {
     const arg = (g[1] || '').trim().toUpperCase();
