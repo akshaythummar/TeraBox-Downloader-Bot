@@ -11,7 +11,8 @@
 
 // playlists are fetched only from TeraBox's own sites (chunk links are checked by signature instead)
 const HOSTS = ['1024tera.com', 'terabox.com', 'teraboxapp.com', 'freeterabox.com', '4funbox.com', 'mirrobox.com', 'nephobox.com', 'momerybox.com', 'tibibox.com', 'teraboxlink.com', 'terasharelink.com'];
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+// the same headers as the old proxy (a Chromecast: TeraBox gives it the whole video, not the preview)
+const UA = 'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 CrKey/1.54.250320';
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'range', 'access-control-expose-headers': 'content-length, content-range' };
 
 const enc = new TextEncoder();
@@ -22,7 +23,7 @@ async function sig(secret, text) {
 }
 const teraHost = u => { try { const h = new URL(u).hostname; return HOSTS.some(d => h === d || h.endsWith('.' + d)); } catch { return false; } };
 const cookie = env => { const c = String(env.COOKIE || '').split(',').map(x => x.trim()).filter(Boolean); if (!c.length) return {}; const v = c[Math.floor(Math.random() * c.length)]; return { cookie: v.includes('=') ? v : `ndus=${v}` }; };
-const upstream = (env, extra = {}) => ({ 'user-agent': UA, referer: 'https://www.terabox.com/', ...cookie(env), ...extra });
+const upstream = (env, extra = {}) => ({ accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7', 'accept-language': 'en-US,en;q=0.9', 'user-agent': UA, referer: 'https://www.terabox.com/', ...cookie(env), ...extra });
 const fail = (status, text) => new Response(text, { status, headers: CORS });
 
 // a link this worker writes: playlists again through ?hls=, everything else through ?seg=
@@ -31,9 +32,9 @@ async function link(env, origin, u) {
 }
 
 async function playlist(env, origin, src) {
-  // TeraBox sometimes answers {"errno":400141} ("needs verify"): wait 1 s and ask again (≤5 times)
+  // TeraBox sometimes answers {"errno":400141} ("needs verify"): wait 1 s and ask again (≤10 times, as the old proxy)
   let r, text;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 10; i++) {
     r = await fetch(src, { headers: upstream(env), signal: AbortSignal.timeout(15000) });
     text = await r.text();
     if (!text.includes('400141') || text.startsWith('#EXTM3U')) break;
