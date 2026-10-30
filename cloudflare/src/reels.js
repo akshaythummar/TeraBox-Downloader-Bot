@@ -55,6 +55,11 @@ svg{display:block}
 .seek.drag .bar{height:6px}.seek.drag .bar i:after{transform:scale(1)}
 .tm{position:fixed;left:50%;bottom:calc(var(--sb) + 90px);transform:translateX(-50%);font-size:26px;font-weight:700;letter-spacing:.5px;text-shadow:0 2px 8px #000a;opacity:0;transition:opacity .15s;pointer-events:none;font-variant-numeric:tabular-nums}
 .seek.drag .tm{opacity:1}
+/* /str: the time above the line (as Watch Online); the text and buttons move up for it */
+.time{display:none;position:absolute;left:14px;right:14px;bottom:calc(var(--sb) + 20px);justify-content:space-between;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000c;pointer-events:none;transition:opacity .2s}
+.time span{color:#ddd}
+.str .time{display:flex}.str .info{bottom:calc(var(--sb) + 46px)}.str .rail{bottom:calc(var(--sb) + 50px)}
+.slide.held .time,.seeking .time{opacity:0}
 .slide.held .tm{opacity:1;font-size:16px}
 /* dragging / holding: only the video (and the time) */
 .slide.held .rail,.slide.held .info,.slide.held .shade,.seeking .rail,.seeking .info{opacity:0}
@@ -241,7 +246,7 @@ if (window.Telegram && Telegram.WebApp && !tg) tgReady();
 // Telegram puts the signed login data in the URL hash: read it there so the feed starts at once
 var INIT = (tg && tg.initData) || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
 var feed = document.getElementById("feed"), muted = true, loading = false, ended = false, slides = [], freeLeft = null;
-document.documentElement.classList.add("mute");
+document.documentElement.classList.add("mute"); if (STR) document.documentElement.classList.add("str");
 var me = 0, meName = ""; try { var u0 = JSON.parse(new URLSearchParams(INIT).get("user")); me = u0.id || 0; meName = u0.username ? "@" + u0.username : (u0.first_name || ""); } catch (e) {}
 document.getElementById("lid").textContent = me || "—"; document.getElementById("lname").textContent = meName;
 var SVG = function (vb, inner, fill) { return '<svg viewBox="' + vb + '" fill="' + (fill || "none") + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + "</svg>"; };
@@ -324,8 +329,8 @@ function download(s, b) {
 }
 // the seek bar: tap or drag anywhere on it to jump; the big time shows while dragging
 function seeker(s) {
-  var sk = s.querySelector(".seek"), bar = s.querySelector(".bar"), fill = s.querySelector(".bar i"), tm = s.querySelector(".tm"), dur = s.querySelector(".len");
-  s._show = function (t) { var v = s._v; if (v && v.duration) { fill.style.width = (100 * t / v.duration) + "%"; tm.textContent = fmt(t) + " / " + fmt(v.duration); dur.textContent = " · " + fmt(v.duration); } };
+  var sk = s.querySelector(".seek"), bar = s.querySelector(".bar"), fill = s.querySelector(".bar i"), tm = s.querySelector(".tm"), dur = s.querySelector(".len"), cur = s.querySelector(".cur"), lft = s.querySelector(".lft");
+  s._show = function (t) { var v = s._v; if (v && v.duration) { fill.style.width = (100 * t / v.duration) + "%"; tm.textContent = cur.textContent = fmt(t) + " / " + fmt(v.duration); lft.textContent = "-" + fmt(v.duration - t); dur.textContent = " · " + fmt(v.duration); } };
   function at(e) { var r = bar.getBoundingClientRect(), v = s._v; return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (v ? v.duration : 0); }
   sk.addEventListener("pointerdown", function (e) {
     e.stopPropagation(); if (!s._v || !s._v.duration) return;
@@ -827,6 +832,7 @@ function slideHTML(prem, prof) {
       '<button class="act snd"><span class="on">' + IC.speakerOn + '</span><span class="off">' + IC.speakerOff + '</span><span>Sound</span></button>' +
       (prof ? '<button class="me" aria-label="Profile"><i>' + myInit + '</i></button>' : '<div class="disc">' + initial + '</div>') +
     '</div>' +
+    '<div class="time"><b class="cur"></b><span class="lft"></span></div>' +
     '<div class="seek"><span class="tm"></span><div class="bar"><i></i></div></div>';
 }
 // like, download, sound, tap / double-tap / hold, the seek bar
