@@ -1600,7 +1600,7 @@ Choose your preferred language:
       `👥 Referrals: **${tot.referrals}**\n` +
       `🎬 /videos sent: **${tot.videos}**\n` +
       `🎁 Offers: first-time ${tot.offer_first} orders → ${tot.offer_first_paid} paid · welcome-back ${tot.offer_back} orders → ${tot.offer_back_paid} paid\n` +
-      `⚡ Reels loading (old / new): start ${['a', 'b'].map(g => (tot[`rl_st_${g}`] ? `${(tot[`rl_ms_${g}`] / tot[`rl_st_${g}`] / 1000).toFixed(2)}s` : '–')).join(' / ')} avg · stalls per 100 ${['a', 'b'].map(g => (tot[`rl_st_${g}`] ? Math.round((100 * tot[`rl_stall_${g}`]) / tot[`rl_st_${g}`]) : '–')).join(' / ')} · skipped ${tot.rl_skip_a} / ${tot.rl_skip_b} (${tot.rl_st_a} / ${tot.rl_st_b} starts)\n` +
+      `⚡ Reels loading: ${(() => { const st = tot.rl_st_a + tot.rl_st_b; return st ? `start ${((tot.rl_ms_a + tot.rl_ms_b) / st / 1000).toFixed(2)}s avg · stalls ${Math.round((100 * (tot.rl_stall_a + tot.rl_stall_b)) / st)} per 100 · skipped while loading ${tot.rl_skip_a + tot.rl_skip_b} (${st} starts)` : '–'; })()}\n` +
       `📱 Videos App: **${tot.app_videos}** videos served · 🔒 paywall ${tot.app_wall} · 💳 plan taps ${tot.app_buy} · ⬇️ downloads ${tot.app_dl}\n` +
       `🎁 Trials started: **${tot.trials}** (${pct(tot.trials, tot.new_users)} of new users)\n` +
       `📋 Plans shown: **${tot.plans_shown}**\n` +

@@ -23,12 +23,9 @@ Live for admins: `/str`, `src/str.js`, table `streams` (code, fid, name, fails),
 - [ ] Count /str's loading numbers too (counters `rl_*_s`; now only in the live log) to compare stalls with Reels.
 - [ ] Don't send users from Reels to /str yet (decided 2026-10-29): /str shows users' own unchecked files to everyone (report / ban risk), only ~1,250 videos, no free count / paywall, depends on the TeraBox cookie and the HLS proxy. Keep Reels; take what makes /str smooth (small HLS chunks, fewer stalls) into Reels instead.
 
-## 2. Reels loading A/B test
+## 2. Reels loading A/B test — done 2026-10-31
 
-Odd user ids = new loading (next 2 warmed, next batch at 7 left), even = old. Numbers in `/funnel` ("⚡ Reels loading (old / new)").
-
-- 2026-10-29: old 0.41 s avg start, 21 stalls per 100 videos (1,935 starts); new 0.49 s, 14 stalls per 100 (1,370). Stalls are the lag users feel; the new loading has a third fewer.
-- [ ] Give everyone the new loading and delete the old code path.
+The new loading (next 2 warmed at once, next batch at 7 left) won: 14 vs 18 stalls per 100 reels, 2.6 % vs 3.9 % skipped while loading, same start time (0.50 vs 0.48 s; 8,485 starts over 4 days). It is now on for everyone; /funnel shows one loading line.
 
 ## 2b. Likes + profile (Instagram-style) — live for everyone since 2026-10-30
 

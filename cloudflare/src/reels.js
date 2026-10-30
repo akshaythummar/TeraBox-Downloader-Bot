@@ -263,10 +263,11 @@ function haptic(k) { try { tg.HapticFeedback.impactOccurred(k || "light"); } cat
 function toast(t) { var el = document.getElementById("toast"); el.textContent = t; el.hidden = true; void el.offsetWidth; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(function () { el.hidden = true; }, 2600); }
 // the owner's live log: one silent message per session, edited as the user watches (≤ 1 call / 8 s;
 // closing the app sends the final state at once). Only counts — nothing is stored anywhere.
-// loading A/B test: odd user ids (b) get the new loading (next 2 warmed at once, next batch earlier),
-// even ids (a) the old one; both report how fast videos start — numbers only (st = started, ms = total
-// wait, stall = stopped to load after starting, skip = swiped away before it started)
-var AB = me % 2 ? "b" : "a";
+// loading: the next 2 reels warmed at once, the next batch fetched with 7 left (the "new" loading —
+// it won the A/B test, 2026-10-31: 14 vs 18 stalls per 100 reels, 2.6 % vs 3.9 % skipped while
+// loading). Start / stall numbers are still reported (g = "b"): st = started, ms = total wait,
+// stall = stopped to load after starting, skip = swiped away before it started
+var AB = "b";
 var LV = { fail: 0, n: 0, dl: 0, lk: 0, wall: 0, buy: 0, st: 0, ms: 0, stall: 0, skip: 0, sent: { st: 0, ms: 0, stall: 0, skip: 0 }, t0: Date.now(), mid: 0, sig: "", at: 0, key: "", busy: false, tm: 0 };
 function live(end) {
   if (!okAt) return;
