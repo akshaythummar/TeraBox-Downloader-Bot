@@ -2992,7 +2992,9 @@ Choose your preferred language:
     rows = [...new Map(rows.map(r => [`${r.code}:${r.fid}`, r])).values()];
     if (!rows.length) return { ok: false, error: 'empty' };
     const q = DEFAULT_QUALITY;
-    const videos = await Promise.all(rows.map(async r => ({ id: `${r.code}:${r.fid}`, name: r.name || '', src: `/m3u8?s=${r.code}&f=${r.fid}&q=${q}${env.HLS_PROXY_2 ? '&p=2' : ''}&t=${await sign(env.WEBHOOK_SECRET, `${r.code}:${r.fid}:${q}`)}`, d: '' })));
+    // our own proxies (HLS_PROXIES, one per account): the videos take turns, so the load is shared
+    const px = String(env.HLS_PROXIES || '').split(',').filter(Boolean).length;
+    const videos = await Promise.all(rows.map(async (r, i) => ({ id: `${r.code}:${r.fid}`, name: r.name || '', src: `/m3u8?s=${r.code}&f=${r.fid}&q=${q}${px ? `&p=${(i % px) + 1}` : ''}&t=${await sign(env.WEBHOOK_SECRET, `${r.code}:${r.fid}:${q}`)}`, d: '' })));
     return { ok: true, unlimited: true, left: null, videos };
   };
   // a video that didn't play in /str: one more fail (3 = left out of the feed)

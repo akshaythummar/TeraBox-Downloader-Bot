@@ -18,9 +18,10 @@ async function m3u8(env, db, url) {
   const p = params(url);
   if (!p || p.t !== (await sign(env.WEBHOOK_SECRET, `${p.s}:${p.f}:${p.q}`))) return new Response('Bad link', { status: 403 });
   let cfg = await teraboxCfg(env, db);
-  // p=2: our own proxy on another account (the /str feed asks for it: a test before spreading the load).
+  // p=N: our own proxy N of HLS_PROXIES (other accounts; the /str feed spreads its videos over them).
   // A copy: the cached config stays on the main proxy for everything else
-  if (url.searchParams.get('p') === '2' && env.HLS_PROXY_2) cfg = { ...cfg, proxy: env.HLS_PROXY_2.replace(/\/$/, '') };
+  const own = String(env.HLS_PROXIES || '').split(',')[Number(url.searchParams.get('p')) - 1];
+  if (own) cfg = { ...cfg, proxy: own.trim().replace(/\/$/, '') };
   // Serve the playlist from this origin: the HLS proxy sends no CORS header, so a
   // redirect to it is blocked by the browser. Segment URLs stay as the proxy wrote them.
   const playlist = async d => {
